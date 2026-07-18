@@ -610,6 +610,9 @@ body {
   gap: 6px;
 }
 
+/* Native form controls ignore em font sizing in WebKit — every control here is
+   custom-drawn in em so the whole panel scales in lockstep with ⌘+/⌘−. */
+
 .settings-row input[type="color"] {
   width: 2.3em;
   height: 1.54em;
@@ -618,8 +621,68 @@ body {
   padding: 0;
 }
 
+.settings-row input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 0.12em;
+}
+
+.settings-row input[type="color"]::-webkit-color-swatch {
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 0.3em;
+}
+
+.settings-row input[type="color"]:disabled {
+  opacity: 0.35;
+}
+
+.settings-panel input[type="checkbox"] {
+  appearance: none;
+  width: 1.1em;
+  height: 1.1em;
+  margin: 0;
+  flex: none;
+  border-radius: 0.28em;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.08);
+  display: inline-grid;
+  place-content: center;
+}
+
+.settings-panel input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.settings-panel input[type="checkbox"]:checked::after {
+  content: "";
+  width: 0.5em;
+  height: 0.26em;
+  border-left: 0.14em solid #fff;
+  border-bottom: 0.14em solid #fff;
+  transform: rotate(-45deg) translate(0.03em, -0.06em);
+}
+
 .settings-row input[type="range"] {
+  appearance: none;
   width: 10em;
+  height: 1.2em;
+  margin: 0;
+  background: transparent;
+}
+
+.settings-row input[type="range"]::-webkit-slider-runnable-track {
+  height: 0.3em;
+  border-radius: 0.15em;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.settings-row input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 1em;
+  height: 1em;
+  border-radius: 50%;
+  background: #fff;
+  margin-top: -0.35em;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
 .settings-actions {

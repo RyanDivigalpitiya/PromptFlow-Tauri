@@ -77,7 +77,9 @@ fn store_path(app: &AppHandle) -> std::path::PathBuf {
         .join("promptflow.sqlite")
 }
 
-fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+fn build_menu(
+    app: &AppHandle,
+) -> tauri::Result<(tauri::menu::Menu<tauri::Wry>, tauri::menu::Submenu<tauri::Wry>)> {
     let app_menu = SubmenuBuilder::new(app, "PromptFlow")
         .about(None)
         .separator()
@@ -121,9 +123,10 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         .separator()
         .fullscreen()
         .build()?;
-    MenuBuilder::new(app)
+    let menu = MenuBuilder::new(app)
         .items(&[&app_menu, &file_menu, &edit_menu, &window_menu])
-        .build()
+        .build()?;
+    Ok((menu, window_menu))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -173,8 +176,18 @@ pub fn run() {
                 }
             });
 
-            let menu = build_menu(app.handle())?;
+            let (menu, window_menu) = build_menu(app.handle())?;
             app.set_menu(menu)?;
+            // Must come AFTER set_menu: muda resolves the submenu's NSMenu from
+            // the INSTALLED main menu and silently no-ops if it isn't there yet.
+            // Registration makes AppKit auto-append the system window-management
+            // items (Fill / Center / Move & Resize / Full Screen Tile / Move to
+            // <display> / Bring All to Front + the open-window list) — the same
+            // set the SwiftUI original gets for free.
+            #[cfg(target_os = "macos")]
+            window_menu.set_as_windows_menu_for_nsapp()?;
+            #[cfg(not(target_os = "macos"))]
+            let _ = &window_menu;
             app.on_menu_event(|app, event| match event.id().0.as_str() {
                 "pf-new-window" => {
                     let _ = spawn_window(app);
