@@ -261,6 +261,28 @@ export function setCollapsedAll(collapsed: boolean) {
   s.collapseAll(parents);
 }
 
+/** Reveal a node from the focus pane: go Home if it's outside the current drill,
+ * expand its collapsed ancestors, un-hide completed ancestors transiently (the
+ * revealKeep semantics), then focus it — the presence-gated scroll effect lands it
+ * on screen after the structural changes settle. */
+export function revealNode(nodeId: string) {
+  const s = ws();
+  const node = mirror.get(nodeId);
+  if (!node) return;
+  const ancestors = mirror.ancestors(nodeId);
+  if (s.drill && s.drill !== nodeId && !ancestors.includes(s.drill)) {
+    s.goHome();
+  }
+  s.expandMany(ancestors);
+  if (s.hideCompleted) {
+    for (const a of ancestors) {
+      if (mirror.get(a)?.isCompleted) s.holdVisible(a, 60_000);
+    }
+    if (node.isCompleted) s.holdVisible(nodeId, 60_000);
+  }
+  s.focusNode(nodeId, "main", { type: "end" });
+}
+
 function subtreeLines(nodeId: string, lines: string[], depth = 0) {
   const n = mirror.get(nodeId);
   if (!n) return;
@@ -289,5 +311,5 @@ export async function copyBlock(ids: string[]) {
 // swapped this module would strand components on a fresh empty instance. Decline hot
 // updates so edits here trigger a FULL reload instead.
 if (import.meta.hot) {
-  import.meta.hot.decline();
+  import.meta.hot.accept(() => import.meta.hot?.invalidate());
 }

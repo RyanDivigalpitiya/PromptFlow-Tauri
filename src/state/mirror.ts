@@ -218,6 +218,12 @@ export const mirror = {
     for (const k of kids) if (nodes.get(k)?.isCompleted) done++;
     return done / kids.length;
   },
+  /** Every highlighted (⌘⇧F) node id — the focus pane's membership scan. */
+  highlightedIds(): string[] {
+    const out: string[] = [];
+    for (const [id, rec] of nodes) if (rec.isHighlighted) out.push(id);
+    return out;
+  },
   /** `id`'s whole subtree (self included), parents before children. Cycle-guarded. */
   descendants(id: string): string[] {
     const out: string[] = [];
@@ -309,5 +315,5 @@ export function undoVersionNow(): number {
 // swapped this module would strand components on a fresh empty instance. Decline hot
 // updates so edits here trigger a FULL reload instead.
 if (import.meta.hot) {
-  import.meta.hot.decline();
+  import.meta.hot.accept(() => import.meta.hot?.invalidate());
 }

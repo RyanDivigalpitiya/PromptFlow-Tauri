@@ -1,3 +1,4 @@
+mod archive;
 mod commands;
 mod model;
 mod persist;
@@ -134,6 +135,39 @@ pub fn run() {
                 store.clear_history(); // the seed is not an undoable user action
             }
             app.manage(Mutex::new(store) as StoreState);
+            app.manage(commands::AppPaths(path.clone()));
+
+            // Auto-archive sweep (deferred a few seconds so windows can load first):
+            // completed units older than the retention age out to a JSON archive, then
+            // delete. Gated by the "autoArchive" setting (default on).
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(4));
+                let Some(state) = handle.try_state::<StoreState>() else {
+                    return;
+                };
+                let mut store = state.lock().unwrap();
+                if store.get_setting("autoArchive").as_deref() == Some("0") {
+                    return;
+                }
+                let cutoff = model::now_ms() - archive::RETENTION_MS;
+                let units = archive::collect(&store, Some(cutoff));
+                if units.is_empty() {
+                    return;
+                }
+                let dir = archive::archive_dir(&path);
+                let doc = archive::document(&store, &units, &Default::default());
+                let Ok(_) = archive::write_archive(&dir, &doc) else {
+                    return; // backup failed ⇒ delete nothing
+                };
+                if let Ok(delta) = store.delete_archived(&units) {
+                    if !delta.ops.is_empty() {
+                        let mut d = delta;
+                        d.origin = "auto-archive".into();
+                        let _ = handle.emit("store://delta", &d);
+                    }
+                }
+            });
 
             let menu = build_menu(app.handle())?;
             app.set_menu(menu)?;
@@ -197,6 +231,13 @@ pub fn run() {
             commands::seed_demo,
             commands::node_count,
             commands::log_msg,
+            commands::export_to_file,
+            commands::import_from_file,
+            commands::completed_units_info,
+            commands::clear_completed,
+            commands::archive_dir_path,
+            commands::get_setting,
+            commands::set_setting,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

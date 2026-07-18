@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
+import { FocusPane } from "./components/FocusPane";
 import { OutlineView } from "./components/OutlineView";
+import { SettingsPanel } from "./components/SettingsPanel";
 import { TopBar } from "./components/TopBar";
 import { api } from "./lib/api";
 import { copyBlock, setCollapsedAll } from "./state/controller";
 import { mirror, startMirror, subscribeStructure } from "./state/mirror";
 import { selectionIds, useSelection } from "./state/selection";
+import { useSettings } from "./state/settings";
 import { useWindowState } from "./state/windowState";
 
 /** Keys while a NODE selection is live (nothing is first responder then) — the
@@ -105,7 +108,10 @@ export default function App() {
       const s = useWindowState.getState();
       const meta = e.metaKey;
       if (!meta) return;
-      if (!e.shiftKey && (e.key === "=" || e.key === "+")) {
+      if (e.altKey && (e.key === "f" || e.key === "F" || e.code === "KeyF")) {
+        e.preventDefault();
+        s.toggleFocusPane(); // ⌘⌥F — the one ⌘⌥ shortcut, like the SwiftUI app
+      } else if (!e.shiftKey && (e.key === "=" || e.key === "+")) {
         e.preventDefault();
         s.adjustFont(1);
       } else if (!e.shiftKey && e.key === "-") {
@@ -142,11 +148,18 @@ export default function App() {
     };
   }, []);
 
-  if (!ready) return <div className="app-shell" />;
+  const bgTint = useSettings((s) => s.bgTint);
+  const shellStyle = {
+    background: `rgba(10, 10, 14, ${bgTint})`,
+  } as React.CSSProperties;
+
+  if (!ready) return <div className="app-shell" style={shellStyle} />;
   return (
-    <div className="app-shell">
+    <div className="app-shell" style={shellStyle}>
       <TopBar />
+      <FocusPane />
       <OutlineView />
+      <SettingsPanel />
     </div>
   );
 }

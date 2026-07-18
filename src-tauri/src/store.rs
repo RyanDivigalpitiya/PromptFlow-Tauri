@@ -1237,6 +1237,29 @@ impl Store {
         Ok(delta)
     }
 
+    // MARK: App settings (device-local key/value, e.g. the auto-archive toggle)
+
+    pub fn get_setting(&self, key: &str) -> Option<String> {
+        self.db
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+    }
+
+    pub fn set_setting(&mut self, key: &str, value: &str) -> Result<(), String> {
+        self.db
+            .execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [key, value],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     fn ensure(&self, id: Uuid) -> Result<(), String> {
         if self.nodes.contains_key(&id) {
             Ok(())
@@ -1247,11 +1270,8 @@ impl Store {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn mem_store() -> Store {
-        let db = persist::open_in_memory().unwrap();
+impl Store {
+    pub fn open_in_memory_for_tests() -> Store {
         Store {
             nodes: HashMap::new(),
             children: HashMap::new(),
@@ -1259,8 +1279,17 @@ mod tests {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             tx: None,
-            db,
+            db: persist::open_in_memory().unwrap(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem_store() -> Store {
+        Store::open_in_memory_for_tests()
     }
 
     #[test]

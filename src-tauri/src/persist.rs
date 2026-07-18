@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS nodes (
   completed_at  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent);
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 ";
 
 pub fn open(path: &std::path::Path) -> Result<Connection, String> {

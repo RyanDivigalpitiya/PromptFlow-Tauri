@@ -29,7 +29,8 @@ let src = CGEventSource(stateID: .hidSystemState)
 let shift = ProcessInfo.processInfo.environment["PF_SHIFT"] == "1"
 let down = CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: pt, mouseButton: .left)
 let up = CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: pt, mouseButton: .left)
-if shift { down?.flags = .maskShift; up?.flags = .maskShift }
+down?.flags = shift ? .maskShift : []
+up?.flags = shift ? .maskShift : []
 down?.post(tap: .cghidEventTap)
 usleep(60_000)
 up?.post(tap: .cghidEventTap)

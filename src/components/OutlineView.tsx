@@ -11,12 +11,13 @@ import {
   hiddenCompletedCount,
   type RenderRow,
 } from "../lib/flatten";
-import { OutlineLayout, Theme } from "../lib/layout";
+import { OutlineLayout } from "../lib/layout";
 import { addAtBottom, appendChildAt, publishRows } from "../state/controller";
 import { useDrag } from "../state/drag";
 import { publishDragEnv } from "../state/dragGesture";
 import { mirror, subscribeStructure } from "../state/mirror";
 import { useSelection } from "../state/selection";
+import { useSettings } from "../state/settings";
 import { useWindowState } from "../state/windowState";
 import { AddChildRow, NodeRow } from "./NodeRow";
 
@@ -138,6 +139,9 @@ export function OutlineView() {
 
   const selResolved = useSelection((s) => s.resolved);
   const dragSubtree = useDrag((s) => s.subtree);
+  const showGuides = useSettings((s) => s.showIndentGuides);
+  const guideColor = useSettings((s) => s.indentGuideColor);
+  const highlightColor = useSettings((s) => s.highlightColor);
 
   return (
     <div
@@ -177,9 +181,9 @@ export function OutlineView() {
                   isDrillRoot={drill === row.nodeId}
                   hasHighlightedDescendant={highlightAncestors.has(row.nodeId)}
                   fontSize={fontSize}
-                  showGuides={true}
-                  guideColor={Theme.defaultIndentGuideHex}
-                  highlightColor={Theme.defaultHighlightHex}
+                  showGuides={showGuides}
+                  guideColor={guideColor}
+                  highlightColor={highlightColor}
                   isSelected={selResolved?.ids.includes(row.nodeId) ?? false}
                   isSelTinted={
                     (selResolved?.tint.has(row.nodeId) ?? false) &&

@@ -161,5 +161,5 @@ export const useDrag = create<DragState>((set) => ({
 // swapped this module would strand components on a fresh empty instance. Decline hot
 // updates so edits here trigger a FULL reload instead.
 if (import.meta.hot) {
-  import.meta.hot.decline();
+  import.meta.hot.accept(() => import.meta.hot?.invalidate());
 }

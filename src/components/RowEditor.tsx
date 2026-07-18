@@ -7,6 +7,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { api } from "../lib/api";
+import { adjustRangesForEdit, toggleBold } from "../lib/bold";
 import { caretLineInfo, lastVisualLineStart } from "../lib/caret";
 import { resolveKey, type EditorKey } from "../lib/keys";
 import { Theme } from "../lib/layout";
@@ -128,6 +129,8 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
   const [local, setLocal] = useState<string | null>(null);
   /** Texts sent to the store whose delta echoes haven't arrived yet. */
   const pendingSent = useRef<string[]>([]);
+  /** Bold runs tracked through the live edit (sent alongside each set_text). */
+  const localBold = useRef<number[]>([]);
 
   const focusEpoch = useWindowState((s) => (p.isFocused ? s.focusEpoch : 0));
   const caretIntent = useWindowState((s) => (p.isFocused ? s.caretIntent : null));
@@ -135,7 +138,11 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
   // Entering/leaving focus: seed/drop the local editing buffer.
   useEffect(() => {
     if (p.isFocused) {
-      setLocal((cur) => cur ?? mirror.get(p.nodeId)?.text ?? "");
+      setLocal((cur) => {
+        if (cur !== null) return cur;
+        localBold.current = mirror.get(p.nodeId)?.boldRanges ?? [];
+        return mirror.get(p.nodeId)?.text ?? "";
+      });
     } else {
       setLocal(null);
       pendingSent.current = [];
@@ -153,6 +160,7 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
     }
     if (pendingSent.current.length === 0 && rec.text !== local) {
       setLocal(rec.text);
+      localBold.current = rec.boldRanges;
       const ta = taRef.current;
       if (ta) {
         const caret = Math.min(ta.selectionStart, rec.text.length);
@@ -181,12 +189,18 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
 
   const send = (text: string) => {
     pendingSent.current.push(text);
-    void api.setText(p.nodeId, text);
+    void api.setText(p.nodeId, text, localBold.current);
   };
 
   const onChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setLocal(e.target.value);
-    send(e.target.value);
+    const next = e.target.value;
+    localBold.current = adjustRangesForEdit(
+      localBold.current,
+      local ?? rec.text,
+      next,
+    );
+    setLocal(next);
+    send(next);
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -218,6 +232,17 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
 
     // Command-modified shortcuts (the AutoSizingTextView.keyDown ports).
     if (meta && !e.altKey && !e.ctrlKey) {
+      if (!e.shiftKey && (e.key === "b" || e.key === "B")) {
+        e.preventDefault();
+        localBold.current = toggleBold(
+          localBold.current,
+          value.length,
+          selStart,
+          selEnd,
+        );
+        send(value); // text unchanged; the bold runs ride along
+        return;
+      }
       if (e.key === "1" || e.key === "2" || e.key === "3") {
         e.preventDefault();
         void setKindGuarded(

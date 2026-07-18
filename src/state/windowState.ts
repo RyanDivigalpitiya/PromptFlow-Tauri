@@ -32,6 +32,8 @@ interface WindowState {
   exemptPruneOnce: string | null;
   /** Just-completed nodes briefly held on screen under hide-completed. */
   keepVisible: Set<string>;
+  /** The focus pane strip (⌘⌥F / the ⭐ button) — per window. */
+  focusPaneExpanded: boolean;
 
   toggleCollapse(id: string): void;
   setCollapsed(id: string, value: boolean): void;
@@ -51,6 +53,7 @@ interface WindowState {
   clearFocus(): void;
   setExemptPruneOnce(id: string | null): void;
   holdVisible(id: string, ms?: number): void;
+  toggleFocusPane(): void;
   /** Drop references to deleted nodes (fired from the mirror's delete hook). */
   purgeDeleted(ids: Set<string>): void;
 }
@@ -64,6 +67,7 @@ interface PersistedShape {
   hideCompleted: boolean;
   fontSize: number;
   drill: string | null;
+  focusPaneExpanded?: boolean;
 }
 
 function loadInitial(): PersistedShape {
@@ -99,6 +103,7 @@ export const useWindowState = create<WindowState>((set, get) => ({
   focusEpoch: 0,
   exemptPruneOnce: null,
   keepVisible: new Set(),
+  focusPaneExpanded: initial.focusPaneExpanded ?? false,
 
   toggleCollapse(id) {
     const next = new Set(get().collapsed);
@@ -200,6 +205,10 @@ export const useWindowState = create<WindowState>((set, get) => ({
     }, ms);
   },
 
+  toggleFocusPane() {
+    set({ focusPaneExpanded: !get().focusPaneExpanded });
+  },
+
   purgeDeleted(ids) {
     const s = get();
     const patch: Partial<WindowState> = {};
@@ -234,6 +243,7 @@ useWindowState.subscribe((s) => {
       hideCompleted: s.hideCompleted,
       fontSize: s.fontSize,
       drill: s.drill,
+      focusPaneExpanded: s.focusPaneExpanded,
     };
     try {
       const json = JSON.stringify(payload);
@@ -251,5 +261,5 @@ export const windowLabel = label;
 // swapped this module would strand components on a fresh empty instance. Decline hot
 // updates so edits here trigger a FULL reload instead.
 if (import.meta.hot) {
-  import.meta.hot.decline();
+  import.meta.hot.accept(() => import.meta.hot?.invalidate());
 }

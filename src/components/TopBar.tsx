@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { mirror, nodeVersion, subscribeNode } from "../state/mirror";
+import { useSettings } from "../state/settings";
 import { useWindowState } from "../state/windowState";
 
 function DrillTitle({ id }: { id: string }) {
@@ -15,6 +16,7 @@ export function TopBar() {
   const canBack = useWindowState((s) => s.back.length > 0);
   const canForward = useWindowState((s) => s.forward.length > 0);
   const hideCompleted = useWindowState((s) => s.hideCompleted);
+  const focusPane = useWindowState((s) => s.focusPaneExpanded);
   const s = useWindowState.getState;
 
   return (
@@ -47,6 +49,13 @@ export function TopBar() {
       </div>
       <div className="topbar-right">
         <button
+          className={"bar-btn" + (focusPane ? " active" : "")}
+          onClick={() => s().toggleFocusPane()}
+          title="Focus pane (⌘⌥F)"
+        >
+          ★
+        </button>
+        <button
           className={"bar-btn" + (hideCompleted ? " active" : "")}
           onClick={() => s().setHideCompleted(!hideCompleted)}
           title={hideCompleted ? "Show completed" : "Hide completed"}
@@ -63,6 +72,13 @@ export function TopBar() {
               <line x1="2" y1="12" x2="12" y2="2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
             )}
           </svg>
+        </button>
+        <button
+          className="bar-btn"
+          onClick={() => useSettings.getState().openSettings(true)}
+          title="Settings"
+        >
+          ⚙
         </button>
       </div>
     </div>

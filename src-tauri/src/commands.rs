@@ -364,3 +364,124 @@ pub fn node_count(state: State<StoreState>) -> Result<usize, String> {
 pub fn log_msg(window: WebviewWindow, msg: String) {
     eprintln!("[js:{}] {}", window.label(), msg);
 }
+
+// MARK: Export / import / archive
+
+/// The store's sqlite path, stashed at setup (archive dir derives from it).
+pub struct AppPaths(pub std::path::PathBuf);
+
+#[tauri::command]
+pub fn export_to_file(
+    state: State<StoreState>,
+    path: String,
+    collapsed: Vec<Uuid>,
+) -> Result<usize, String> {
+    let store = state.lock().unwrap();
+    let roots = store.roots();
+    let doc = crate::archive::document(&store, &roots, &collapsed.into_iter().collect());
+    let json = crate::archive::encode(&doc)?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    Ok(store.node_count())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOut {
+    pub imported: usize,
+    /// Ids to seed the importing window's collapsed set (per-window state).
+    pub collapsed: Vec<Uuid>,
+}
+
+/// REPLACE the whole outline from a `.promptflow.outline` JSON file. Destructive by
+/// design — the frontend confirms first. NOT undoable (history cleared).
+#[tauri::command]
+pub fn import_from_file(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<StoreState>,
+    path: String,
+) -> Result<ImportOut, String> {
+    let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let doc = crate::archive::decode(&json)?;
+    let (recs, collapsed) = crate::archive::to_records(&doc);
+    let n = recs.len();
+    let delta = state.lock().unwrap().replace_all(recs)?;
+    emit_delta(&app, delta, window.label());
+    Ok(ImportOut {
+        imported: n,
+        collapsed,
+    })
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletedInfo {
+    pub units: usize,
+    pub nodes: usize,
+}
+
+/// What "Clear Completed" WOULD remove (for the confirmation dialog).
+#[tauri::command]
+pub fn completed_units_info(state: State<StoreState>) -> Result<CompletedInfo, String> {
+    let store = state.lock().unwrap();
+    let units = crate::archive::collect(&store, None);
+    let nodes = units.iter().map(|u| store.descendants(*u).len()).sum();
+    Ok(CompletedInfo {
+        units: units.len(),
+        nodes,
+    })
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearOut {
+    pub archived: usize,
+    pub path: String,
+}
+
+/// Manual "Clear Completed": archive every completed unit to disk FIRST, then delete
+/// (never lose data we couldn't back up). Non-undoable, mirroring the SwiftUI app.
+#[tauri::command]
+pub fn clear_completed(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<StoreState>,
+    paths: State<AppPaths>,
+) -> Result<ClearOut, String> {
+    let mut store = state.lock().unwrap();
+    let units = crate::archive::collect(&store, None);
+    if units.is_empty() {
+        return Ok(ClearOut {
+            archived: 0,
+            path: String::new(),
+        });
+    }
+    let doc = crate::archive::document(&store, &units, &Default::default());
+    let dir = crate::archive::archive_dir(&paths.0);
+    let path = crate::archive::write_archive(&dir, &doc)?;
+    let nodes: usize = units.iter().map(|u| store.descendants(*u).len()).sum();
+    let delta = store.delete_archived(&units)?;
+    drop(store);
+    emit_delta(&app, delta, window.label());
+    Ok(ClearOut {
+        archived: nodes,
+        path: path.to_string_lossy().into_owned(),
+    })
+}
+
+#[tauri::command]
+pub fn archive_dir_path(paths: State<AppPaths>) -> Result<String, String> {
+    let dir = crate::archive::archive_dir(&paths.0);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn get_setting(state: State<StoreState>, key: String) -> Result<Option<String>, String> {
+    Ok(state.lock().unwrap().get_setting(&key))
+}
+
+#[tauri::command]
+pub fn set_setting(state: State<StoreState>, key: String, value: String) -> Result<(), String> {
+    state.lock().unwrap().set_setting(&key, &value)
+}
