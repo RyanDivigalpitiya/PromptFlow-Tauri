@@ -8,16 +8,22 @@ import {
 } from "react";
 import { api } from "../lib/api";
 import { adjustRangesForEdit, toggleBold } from "../lib/bold";
-import { caretLineInfo, lastVisualLineStart } from "../lib/caret";
+import {
+  caretLineInfo,
+  lastVisualLineStart,
+  selectionOffsets,
+  serializeEditor,
+  setSelectionOffsets,
+} from "../lib/caret";
 import { resolveKey, type EditorKey } from "../lib/keys";
 import { Theme } from "../lib/layout";
+import { buildRunDom, segments, toMarkdown, type StyleSet } from "../lib/runs";
 import type { NodeRec } from "../lib/types";
 import { applyWrap, wrapAction } from "../lib/wrap";
 import {
   deleteAndFocusPrev,
   moveFocused,
   performDecision,
-  pruneIfEmptyOnDefocus,
   setKindGuarded,
   toggleHighlight,
 } from "../state/controller";
@@ -58,39 +64,17 @@ function textOffsetFromPoint(
   return total;
 }
 
-/** Static text render: bold runs + completed strike + highlight color, in spans. */
-function StaticText({
-  rec,
-  highlightColor,
-}: {
-  rec: NodeRec;
-  highlightColor: string;
-}) {
-  const text = rec.text;
-  const segments: { text: string; bold: boolean }[] = [];
-  if (rec.boldRanges.length >= 2) {
-    // Clamp stale offsets instead of trapping (the BoldRuns.ranges contract).
-    const marks = new Array<boolean>(text.length).fill(false);
-    for (let i = 0; i + 1 < rec.boldRanges.length; i += 2) {
-      const loc = Math.max(0, Math.min(rec.boldRanges[i], text.length));
-      const end = Math.max(0, Math.min(loc + rec.boldRanges[i + 1], text.length));
-      for (let j = loc; j < end; j++) marks[j] = true;
-    }
-    let cur = "";
-    let curBold = marks[0] ?? false;
-    for (let i = 0; i < text.length; i++) {
-      if (marks[i] === curBold) {
-        cur += text[i];
-      } else {
-        segments.push({ text: cur, bold: curBold });
-        cur = text[i];
-        curBold = marks[i];
-      }
-    }
-    if (cur !== "") segments.push({ text: cur, bold: curBold });
-  } else {
-    segments.push({ text, bold: false });
-  }
+function recStyles(rec: NodeRec): StyleSet {
+  return {
+    bold: rec.boldRanges,
+    italic: rec.italicRanges,
+    underline: rec.underlineRanges,
+  };
+}
+
+/** Completed/highlight styling shared by the static span and the live editor, so
+ * focusing never changes metrics or colors. */
+function wrapperStyle(rec: NodeRec, highlightColor: string): React.CSSProperties {
   const style: React.CSSProperties = {};
   if (rec.isCompleted) {
     style.textDecoration = "line-through";
@@ -101,12 +85,36 @@ function StaticText({
     style.color = highlightColor;
     style.fontWeight = 600;
   }
+  return style;
+}
+
+/** Static text render: bold/italic/underline runs + completed strike + highlight
+ * color, in spans — the exact structure the live editor builds imperatively. */
+function StaticText({
+  rec,
+  highlightColor,
+}: {
+  rec: NodeRec;
+  highlightColor: string;
+}) {
+  const segs = segments(rec.text, recStyles(rec));
   return (
-    <span className="node-text-static" style={style}>
-      {segments.map((s, i) =>
-        s.bold ? <b key={i}>{s.text}</b> : <span key={i}>{s.text}</span>,
-      )}
-      {text === "" && "​"}
+    <span className="node-text-static" style={wrapperStyle(rec, highlightColor)}>
+      {segs.map((s, i) => (
+        <span
+          key={i}
+          style={{
+            // 700, not 600: highlighted rows set 600 on the wrapper, and bold
+            // must stay visibly heavier inside them.
+            fontWeight: s.bold ? 700 : undefined,
+            fontStyle: s.italic ? "italic" : undefined,
+            textDecoration: s.underline ? "underline" : undefined,
+          }}
+        >
+          {s.text}
+        </span>
+      ))}
+      {rec.text === "" && "​"}
     </span>
   );
 }
@@ -119,29 +127,43 @@ export interface RowEditorProps {
 }
 
 /** One row's main text. Unfocused rows are cheap static spans (thousands of them);
- * the ONE focused row swaps in a textarea — the same single-live-editor economy the
- * SwiftUI app gets from first responder. */
+ * the ONE focused row becomes a contenteditable div — SAME span structure, so
+ * styled runs stay visible while editing and focusing shifts nothing. The DOM is
+ * controlled: every input re-renders from the local model and restores the caret;
+ * the browser's own rich-text editing (⌘B, styled paste) is suppressed. */
 export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
   useSyncExternalStore(subscribeNode(p.nodeId), () => nodeVersion(p.nodeId));
   const rec = mirror.get(p.nodeId);
-  const taRef = useRef<HTMLTextAreaElement | null>(null);
-  const staticRef = useRef<HTMLDivElement | null>(null);
+  const edRef = useRef<HTMLDivElement | null>(null);
   const [local, setLocal] = useState<string | null>(null);
+  /** Bumped when only styles change so the run DOM rebuilds. */
+  const [styleEpoch, setStyleEpoch] = useState(0);
   /** Texts sent to the store whose delta echoes haven't arrived yet. */
   const pendingSent = useRef<string[]>([]);
-  /** Bold runs tracked through the live edit (sent alongside each set_text). */
+  /** Style runs tracked through the live edit (sent alongside each set_text). */
   const localBold = useRef<number[]>([]);
+  const localItalic = useRef<number[]>([]);
+  const localUnderline = useRef<number[]>([]);
+  /** Caret to restore after the next run-DOM rebuild. */
+  const caretReq = useRef<{ start: number; end: number } | null>(null);
+  const composing = useRef(false);
 
   const focusEpoch = useWindowState((s) => (p.isFocused ? s.focusEpoch : 0));
   const caretIntent = useWindowState((s) => (p.isFocused ? s.caretIntent : null));
 
-  // Entering/leaving focus: seed/drop the local editing buffer.
-  useEffect(() => {
+  // Entering/leaving focus: seed/drop the local editing buffer. LAYOUT effect,
+  // declared BEFORE the run-DOM builder: the builder reads the style refs in the
+  // same commit, and a passive effect would seed them one paint too late (bold
+  // text flashed unstyled on focus).
+  useLayoutEffect(() => {
     if (p.isFocused) {
       setLocal((cur) => {
         if (cur !== null) return cur;
-        localBold.current = mirror.get(p.nodeId)?.boldRanges ?? [];
-        return mirror.get(p.nodeId)?.text ?? "";
+        const r = mirror.get(p.nodeId);
+        localBold.current = r?.boldRanges ?? [];
+        localItalic.current = r?.italicRanges ?? [];
+        localUnderline.current = r?.underlineRanges ?? [];
+        return r?.text ?? "";
       });
     } else {
       setLocal(null);
@@ -151,6 +173,10 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
 
   // Remote-edit adoption while focused (echo-guarded: our own in-flight texts are
   // acknowledged and skipped; anything else is a REAL remote change and wins).
+  // Keyed on the REC OBJECT (fresh per delta), not rec.text: style-only deltas —
+  // another window's ⌘B, a store ⌘Z of a style toggle — carry identical text and
+  // must still drain their echo / be adopted, or the next local send silently
+  // reverts them.
   useEffect(() => {
     if (!p.isFocused || local === null || !rec) return;
     const idx = pendingSent.current.indexOf(rec.text);
@@ -158,56 +184,139 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
       pendingSent.current.splice(0, idx + 1);
       return;
     }
-    if (pendingSent.current.length === 0 && rec.text !== local) {
-      setLocal(rec.text);
+    if (pendingSent.current.length !== 0) return;
+    if (rec.text !== local) {
       localBold.current = rec.boldRanges;
-      const ta = taRef.current;
-      if (ta) {
-        const caret = Math.min(ta.selectionStart, rec.text.length);
-        requestAnimationFrame(() => ta.setSelectionRange(caret, caret));
-      }
+      localItalic.current = rec.italicRanges;
+      localUnderline.current = rec.underlineRanges;
+      const el = edRef.current;
+      const sel = el ? selectionOffsets(el) : null;
+      const at = Math.min(sel?.start ?? rec.text.length, rec.text.length);
+      caretReq.current = { start: at, end: at };
+      setLocal(rec.text);
+      return;
+    }
+    const stylesDiffer =
+      JSON.stringify(localBold.current) !== JSON.stringify(rec.boldRanges) ||
+      JSON.stringify(localItalic.current) !== JSON.stringify(rec.italicRanges) ||
+      JSON.stringify(localUnderline.current) !==
+        JSON.stringify(rec.underlineRanges);
+    if (stylesDiffer) {
+      localBold.current = rec.boldRanges;
+      localItalic.current = rec.italicRanges;
+      localUnderline.current = rec.underlineRanges;
+      const el = edRef.current;
+      const sel = el ? selectionOffsets(el) : null;
+      if (sel) caretReq.current = sel;
+      setStyleEpoch((v) => v + 1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rec?.text, p.isFocused]);
+  }, [rec, p.isFocused]);
 
-  // Apply focus + caret intent.
+  const value = local ?? rec?.text ?? "";
+
+  // Rebuild the editor's run DOM from the model, then restore the caret. Runs on
+  // every text/style change — the editor is CONTROLLED (browser DOM mutations are
+  // always replaced by a model render).
+  useLayoutEffect(() => {
+    if (!p.isFocused) return;
+    const el = edRef.current;
+    if (!el || composing.current) return;
+    buildRunDom(el, value, {
+      bold: localBold.current,
+      italic: localItalic.current,
+      underline: localUnderline.current,
+    });
+    const req = caretReq.current;
+    if (req && document.activeElement === el) {
+      setSelectionOffsets(el, req.start, req.end);
+      caretReq.current = null;
+    }
+  }, [p.isFocused, value, styleEpoch]);
+
+  // Apply focus + caret intent (after the run DOM exists — declared later on
+  // purpose; layout effects run in declaration order).
   useLayoutEffect(() => {
     if (!p.isFocused || !caretIntent) return;
-    const ta = taRef.current;
-    if (!ta) return;
-    if (document.activeElement !== ta) ta.focus({ preventScroll: true });
-    const len = ta.value.length;
+    const el = edRef.current;
+    if (!el) return;
+    if (document.activeElement !== el) el.focus({ preventScroll: true });
+    const len = value.length;
     let at = len;
     if (caretIntent.type === "start") at = 0;
     else if (caretIntent.type === "end") at = len;
     else if (caretIntent.type === "at") at = Math.min(caretIntent.offset, len);
-    else if (caretIntent.type === "lastLineStart") at = lastVisualLineStart(ta);
-    ta.setSelectionRange(at, at);
-  }, [p.isFocused, focusEpoch]); // eslint-disable-line react-hooks/exhaustive-deps
+    else if (caretIntent.type === "lastLineStart")
+      at = lastVisualLineStart(el, value);
+    setSelectionOffsets(el, at);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.isFocused, focusEpoch]);
 
   if (!rec) return null;
 
   const send = (text: string) => {
     pendingSent.current.push(text);
-    void api.setText(p.nodeId, text, localBold.current);
+    void api.setText(
+      p.nodeId,
+      text,
+      localBold.current,
+      localItalic.current,
+      localUnderline.current,
+    );
   };
 
-  const onChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const next = e.target.value;
-    localBold.current = adjustRangesForEdit(
-      localBold.current,
-      local ?? rec.text,
-      next,
-    );
+  /** Adopt an edited text: adjust every style run across the splice, then render,
+   * restore the caret, and persist. */
+  const commitText = (next: string, caretStart: number, caretEnd = caretStart) => {
+    const prev = local ?? rec.text;
+    localBold.current = adjustRangesForEdit(localBold.current, prev, next);
+    localItalic.current = adjustRangesForEdit(localItalic.current, prev, next);
+    localUnderline.current = adjustRangesForEdit(localUnderline.current, prev, next);
+    caretReq.current = { start: caretStart, end: caretEnd };
     setLocal(next);
+    setStyleEpoch((v) => v + 1);
     send(next);
   };
 
-  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    const ta = e.currentTarget;
-    const value = ta.value;
-    const selStart = ta.selectionStart;
-    const selEnd = ta.selectionEnd;
+  const onInput = () => {
+    const el = edRef.current;
+    if (!el || composing.current) return;
+    const next = serializeEditor(el);
+    const sel = selectionOffsets(el);
+    const at = sel?.start ?? next.length;
+    if (next === (local ?? rec.text)) {
+      // No text change (e.g. a formatting keystroke the browser swallowed) — still
+      // re-render so any stray browser DOM is replaced.
+      caretReq.current = { start: at, end: sel?.end ?? at };
+      setStyleEpoch((v) => v + 1);
+      return;
+    }
+    commitText(next, at, sel?.end ?? at);
+  };
+
+  const insertText = (ins: string) => {
+    const el = edRef.current;
+    if (!el) return;
+    const sel = selectionOffsets(el) ?? { start: value.length, end: value.length };
+    const next = value.slice(0, sel.start) + ins + value.slice(sel.end);
+    commitText(next, sel.start + ins.length);
+  };
+
+  const selectedRaw = (): string => {
+    const el = edRef.current;
+    const sel = el ? selectionOffsets(el) : null;
+    if (sel && sel.start !== sel.end) return value.slice(sel.start, sel.end);
+    return value;
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    // During IME composition every key belongs to the IME (Enter commits the
+    // candidate — intercepting it would split the node mid-composition).
+    if (composing.current || e.nativeEvent.isComposing) return;
+    const el = e.currentTarget;
+    const sel = selectionOffsets(el) ?? { start: value.length, end: value.length };
+    const selStart = sel.start;
+    const selEnd = sel.end;
     const meta = e.metaKey;
     const s = useWindowState.getState();
 
@@ -223,24 +332,69 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
       if (action) {
         e.preventDefault();
         const r = applyWrap(action, e.key, value, selStart, selEnd);
+        // Two single-splice adjustments (old→mid, mid→final): a wrap edits TWO
+        // positions, which one adjustRangesForEdit call mis-models.
+        const step = (ranges: number[]) =>
+          adjustRangesForEdit(
+            adjustRangesForEdit(ranges, value, r.mid),
+            r.mid,
+            r.text,
+          );
+        localBold.current = step(localBold.current);
+        localItalic.current = step(localItalic.current);
+        localUnderline.current = step(localUnderline.current);
+        caretReq.current = { start: r.selStart, end: r.selEnd };
         setLocal(r.text);
+        setStyleEpoch((v) => v + 1);
         send(r.text);
-        requestAnimationFrame(() => ta.setSelectionRange(r.selStart, r.selEnd));
         return;
       }
     }
 
-    // Command-modified shortcuts (the AutoSizingTextView.keyDown ports).
+    // Command-modified shortcuts (the AutoSizingTextView.keyDown ports). ⌘B/⌘I/⌘U
+    // must preventDefault even with no selection — the browser's own contenteditable
+    // rich-text engine would mutate the DOM behind the model's back.
     if (meta && !e.altKey && !e.ctrlKey) {
       if (!e.shiftKey && (e.key === "b" || e.key === "B")) {
         e.preventDefault();
-        localBold.current = toggleBold(
-          localBold.current,
-          value.length,
-          selStart,
-          selEnd,
+        localBold.current = toggleBold(localBold.current, value.length, selStart, selEnd);
+        caretReq.current = { start: selStart, end: selEnd };
+        setStyleEpoch((v) => v + 1);
+        send(value);
+        return;
+      }
+      if (!e.shiftKey && (e.key === "i" || e.key === "I")) {
+        e.preventDefault();
+        localItalic.current = toggleBold(localItalic.current, value.length, selStart, selEnd);
+        caretReq.current = { start: selStart, end: selEnd };
+        setStyleEpoch((v) => v + 1);
+        send(value);
+        return;
+      }
+      if (!e.shiftKey && (e.key === "u" || e.key === "U")) {
+        e.preventDefault();
+        localUnderline.current = toggleBold(localUnderline.current, value.length, selStart, selEnd);
+        caretReq.current = { start: selStart, end: selEnd };
+        setStyleEpoch((v) => v + 1);
+        send(value);
+        return;
+      }
+      if (e.shiftKey && (e.key === "c" || e.key === "C")) {
+        // ⇧⌘C: the selection (or whole text) as markdown.
+        e.preventDefault();
+        const raw = selectedRaw();
+        const off = raw === value ? 0 : selStart;
+        const slice = (r: number[]) =>
+          r.length === 0
+            ? r
+            : segRanges(r, off, off + raw.length);
+        void navigator.clipboard.writeText(
+          toMarkdown(raw, {
+            bold: slice(localBold.current),
+            italic: slice(localItalic.current),
+            underline: slice(localUnderline.current),
+          }),
         );
-        send(value); // text unchanged; the bold runs ride along
         return;
       }
       if (e.key === "1" || e.key === "2" || e.key === "3") {
@@ -249,6 +403,14 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
           p.nodeId,
           e.key === "1" ? "bulletPoint" : e.key === "2" ? "checkbox" : "promptDraft",
         );
+        return;
+      }
+      if (e.key === "4") {
+        // ⌘4 converts to a divider — which has no editor, so focus must leave.
+        e.preventDefault();
+        void setKindGuarded(p.nodeId, "line").then(() => {
+          useWindowState.getState().clearFocus();
+        });
         return;
       }
       if (e.shiftKey && (e.key === "f" || e.key === "F")) {
@@ -291,7 +453,7 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
       if (value === "") {
         void deleteAndFocusPrev(p.nodeId);
       } else {
-        ta.blur();
+        el.blur();
         s.clearFocus();
       }
       return;
@@ -309,10 +471,10 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
     let atFirstLine = true;
     let atLastLine = true;
     if (key === "moveUp" || key === "shiftMoveUp") {
-      atFirstLine = caretLineInfo(ta, selStart).atFirstLine;
+      atFirstLine = caretLineInfo(el, value, selStart).atFirstLine;
     }
     if (key === "moveDown" || key === "shiftMoveDown") {
-      atLastLine = caretLineInfo(ta, selEnd).atLastLine;
+      atLastLine = caretLineInfo(el, value, selEnd).atLastLine;
     }
 
     const decision = resolveKey(key, {
@@ -325,9 +487,16 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
       atLastLine,
     });
 
-    if (decision === "passthrough" || decision === "newline") {
+    if (decision === "newline") {
+      // The contenteditable default would insert <div>/<br> structure — take over
+      // and splice a literal newline into the model instead.
+      e.preventDefault();
+      insertText("\n");
+      return;
+    }
+    if (decision === "passthrough") {
       if (key === "tab" || key === "backtab") e.preventDefault();
-      return; // let the textarea do its native thing
+      return; // native editing (typing, caret moves, backspace mid-text)
     }
     e.preventDefault();
     void performDecision(p.nodeId, decision, selStart, selEnd, value);
@@ -335,38 +504,62 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
 
   const onBlur = () => {
     const s = useWindowState.getState();
+    // The controller's focus-state subscription owns empty-node pruning — a
+    // direct call here would double-schedule and the second delete rejects.
     if (s.focusId === p.nodeId && s.focusField === "main") s.clearFocus();
-    setTimeout(() => void pruneIfEmptyOnDefocus(p.nodeId), 0);
   };
 
   if (p.isFocused) {
-    const value = local ?? rec.text;
     return (
-      <div className="grow-wrap" data-value={value}>
-        <textarea
-          ref={taRef}
-          className="node-textarea"
-          value={value}
-          rows={1}
-          onChange={onChange}
-          onKeyDown={onKeyDown}
-          onBlur={onBlur}
-          spellCheck={false}
-          autoCapitalize="off"
-          autoCorrect="off"
-        />
-      </div>
+      <div
+        // Distinct key: the editor's children are imperative (buildRunDom), which
+        // React doesn't know about — swapping branches must replace the DOM node,
+        // or React appends the static span NEXT TO the leftover editor spans.
+        key="editor"
+        ref={edRef}
+        className="node-text-wrap node-editor"
+        style={wrapperStyle(rec, p.highlightColor)}
+        contentEditable
+        onInput={onInput}
+        onKeyDown={onKeyDown}
+        onBlur={onBlur}
+        onCompositionStart={() => {
+          composing.current = true;
+        }}
+        onCompositionEnd={() => {
+          composing.current = false;
+          onInput();
+        }}
+        onPaste={(e) => {
+          e.preventDefault();
+          insertText(e.clipboardData.getData("text/plain"));
+        }}
+        onCopy={(e) => {
+          // ⌘C is RAW text (never the browser's styled-HTML flavor).
+          e.preventDefault();
+          e.clipboardData.setData("text/plain", selectedRaw());
+        }}
+        onCut={(e) => {
+          e.preventDefault();
+          const el = edRef.current;
+          const sel = el ? selectionOffsets(el) : null;
+          if (!sel || sel.start === sel.end) return;
+          e.clipboardData.setData("text/plain", value.slice(sel.start, sel.end));
+          commitText(value.slice(0, sel.start) + value.slice(sel.end), sel.start);
+        }}
+        spellCheck={false}
+      />
     );
   }
 
   return (
     <div
-      ref={staticRef}
+      key="static"
       className="node-text-wrap"
       onMouseDown={(e) => {
         if (e.button !== 0) return;
         // Without this, the mousedown's DEFAULT action (post-handler focus steal to
-        // body) blurs the textarea the click just focused.
+        // body) blurs the editor the click just focused.
         e.preventDefault();
         const sel = useSelection.getState();
         if (e.shiftKey) {
@@ -380,8 +573,8 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
         }
         sel.clear();
         const offset =
-          staticRef.current &&
-          textOffsetFromPoint(staticRef.current, e.clientX, e.clientY);
+          e.currentTarget &&
+          textOffsetFromPoint(e.currentTarget, e.clientX, e.clientY);
         useWindowState
           .getState()
           .focusNode(
@@ -396,8 +589,21 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
   );
 });
 
+/** Clip flat [loc,len] ranges to [lo,hi) and rebase to lo — for markdown of a
+ * selection slice. */
+function segRanges(ranges: number[], lo: number, hi: number): number[] {
+  const out: number[] = [];
+  for (let i = 0; i + 1 < ranges.length; i += 2) {
+    const a = Math.max(ranges[i], lo);
+    const b = Math.min(ranges[i] + ranges[i + 1], hi);
+    if (b > a) out.push(a - lo, b - a);
+  }
+  return out;
+}
+
 /** The secondary note line (⌘⇧N) — smaller, grey, below the text. Rendered only
- * while non-empty or focused. */
+ * while non-empty or focused. Plain text (no style runs — notes have no style
+ * storage, matching the SwiftUI original). */
 export const NoteEditor = memo(function NoteEditor(p: {
   nodeId: string;
   isNoteFocused: boolean;
@@ -450,7 +656,6 @@ export const NoteEditor = memo(function NoteEditor(p: {
           onBlur={() => {
             const s = useWindowState.getState();
             if (s.focusId === p.nodeId && s.focusField === "note") s.clearFocus();
-            setTimeout(() => void pruneIfEmptyOnDefocus(p.nodeId), 0);
           }}
           spellCheck={false}
         />

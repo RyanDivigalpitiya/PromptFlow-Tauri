@@ -101,6 +101,53 @@ export default function App() {
     return subscribeStructure(() => useSelection.getState().refresh());
   }, []);
 
+  // Trackpad pinch → font size (the MagnifyGesture port): WebKit delivers pinch as
+  // proprietary gesture events with a cumulative scale; size = anchor × scale,
+  // rounded and clamped, exactly like the SwiftUI app. Some configurations send
+  // ctrl+wheel instead — same mapping through an accumulated float.
+  useEffect(() => {
+    let anchor = 0;
+    const start = (e: Event) => {
+      e.preventDefault();
+      anchor = useWindowState.getState().fontSize;
+    };
+    const change = (e: Event) => {
+      e.preventDefault();
+      const scale = (e as { scale?: number }).scale;
+      if (anchor > 0 && typeof scale === "number") {
+        useWindowState.getState().setFont(anchor * scale);
+      }
+    };
+    const end = (e: Event) => {
+      e.preventDefault();
+      anchor = 0;
+    };
+    let wheelFloat: number | null = null;
+    let wheelReset: ReturnType<typeof setTimeout> | null = null;
+    const wheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return; // plain wheel = scroll
+      e.preventDefault();
+      const s = useWindowState.getState();
+      if (wheelFloat === null) wheelFloat = s.fontSize;
+      wheelFloat = Math.min(40, Math.max(9, wheelFloat * Math.exp(-e.deltaY * 0.01)));
+      s.setFont(wheelFloat);
+      if (wheelReset) clearTimeout(wheelReset);
+      wheelReset = setTimeout(() => {
+        wheelFloat = null;
+      }, 300);
+    };
+    window.addEventListener("gesturestart", start, { passive: false });
+    window.addEventListener("gesturechange", change, { passive: false });
+    window.addEventListener("gestureend", end, { passive: false });
+    window.addEventListener("wheel", wheel, { passive: false });
+    return () => {
+      window.removeEventListener("gesturestart", start);
+      window.removeEventListener("gesturechange", change);
+      window.removeEventListener("gestureend", end);
+      window.removeEventListener("wheel", wheel);
+    };
+  }, []);
+
   // Window-level shortcuts (the OutlineView keyboardShortcuts / commands port).
   useEffect(() => {
     const onSelKey = (e: KeyboardEvent) => {

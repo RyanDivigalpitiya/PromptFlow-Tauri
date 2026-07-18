@@ -66,6 +66,12 @@ pub struct NodeRec {
     pub is_collapsed: bool,
     /// Bold character ranges over `text` as flat `[location, length, …]` pairs.
     pub bold_ranges: Vec<i64>,
+    /// Italic / underline ranges — same flat-pair format. `serde(default)` so
+    /// snapshots and archives from before these existed still deserialize.
+    #[serde(default)]
+    pub italic_ranges: Vec<i64>,
+    #[serde(default)]
+    pub underline_ranges: Vec<i64>,
     /// Milliseconds since the Unix epoch.
     pub created_at: i64,
     pub updated_at: i64,
@@ -86,6 +92,8 @@ impl NodeRec {
             is_highlighted: false,
             is_collapsed: false,
             bold_ranges: Vec::new(),
+            italic_ranges: Vec::new(),
+            underline_ranges: Vec::new(),
             created_at: now,
             updated_at: now,
             completed_at: None,

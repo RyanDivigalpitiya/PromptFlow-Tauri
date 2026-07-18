@@ -15,6 +15,8 @@ export interface NodeRec {
   isCollapsed: boolean;
   /** Flat [location, length, …] pairs over `text`. */
   boldRanges: number[];
+  italicRanges: number[];
+  underlineRanges: number[];
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;

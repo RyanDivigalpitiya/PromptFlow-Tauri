@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS nodes (
   is_highlighted INTEGER NOT NULL DEFAULT 0,
   is_collapsed  INTEGER NOT NULL DEFAULT 0,
   bold_ranges   TEXT NOT NULL DEFAULT '[]',
+  italic_ranges TEXT NOT NULL DEFAULT '[]',
+  underline_ranges TEXT NOT NULL DEFAULT '[]',
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL,
   completed_at  INTEGER
@@ -46,18 +48,29 @@ fn init(db: &Connection) -> Result<(), String> {
     // WAL keeps per-keystroke upserts cheap and lets reads (none today) proceed during writes.
     let _ = db.pragma_update(None, "journal_mode", "WAL");
     let _ = db.pragma_update(None, "synchronous", "NORMAL");
-    db.execute_batch(SCHEMA).map_err(|e| e.to_string())
+    db.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+    // Migrate stores created before italic/underline existed. ALTER errors mean the
+    // column is already there (fresh stores get it from SCHEMA) — ignore them.
+    for col in ["italic_ranges", "underline_ranges"] {
+        let _ = db.execute(
+            &format!("ALTER TABLE nodes ADD COLUMN {col} TEXT NOT NULL DEFAULT '[]'"),
+            [],
+        );
+    }
+    Ok(())
 }
 
 pub fn load_all(db: &Connection) -> Result<HashMap<Uuid, NodeRec>, String> {
     let mut stmt = db
-        .prepare("SELECT id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, created_at, updated_at, completed_at FROM nodes")
+        .prepare("SELECT id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges, created_at, updated_at, completed_at FROM nodes")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
             let id: String = row.get(0)?;
             let parent: Option<String> = row.get(1)?;
             let bold_json: String = row.get(9)?;
+            let italic_json: String = row.get(10)?;
+            let underline_json: String = row.get(11)?;
             Ok(NodeRec {
                 id: Uuid::parse_str(&id).unwrap_or_default(),
                 parent: parent.and_then(|p| Uuid::parse_str(&p).ok()),
@@ -69,9 +82,11 @@ pub fn load_all(db: &Connection) -> Result<HashMap<Uuid, NodeRec>, String> {
                 is_highlighted: row.get::<_, i64>(7)? != 0,
                 is_collapsed: row.get::<_, i64>(8)? != 0,
                 bold_ranges: serde_json::from_str(&bold_json).unwrap_or_default(),
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
-                completed_at: row.get(12)?,
+                italic_ranges: serde_json::from_str(&italic_json).unwrap_or_default(),
+                underline_ranges: serde_json::from_str(&underline_json).unwrap_or_default(),
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
+                completed_at: row.get(14)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -93,13 +108,14 @@ pub fn apply<'a>(
     {
         let mut upsert = tx
             .prepare_cached(
-                "INSERT INTO nodes (id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, created_at, updated_at, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                "INSERT INTO nodes (id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges, created_at, updated_at, completed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                  ON CONFLICT(id) DO UPDATE SET
                    parent=excluded.parent, position=excluded.position, text=excluded.text,
                    note=excluded.note, kind=excluded.kind, is_completed=excluded.is_completed,
                    is_highlighted=excluded.is_highlighted, is_collapsed=excluded.is_collapsed,
-                   bold_ranges=excluded.bold_ranges, created_at=excluded.created_at,
+                   bold_ranges=excluded.bold_ranges, italic_ranges=excluded.italic_ranges,
+                   underline_ranges=excluded.underline_ranges, created_at=excluded.created_at,
                    updated_at=excluded.updated_at, completed_at=excluded.completed_at",
             )
             .map_err(|e| e.to_string())?;
@@ -121,6 +137,8 @@ pub fn apply<'a>(
                             r.is_highlighted as i64,
                             r.is_collapsed as i64,
                             serde_json::to_string(&r.bold_ranges).unwrap_or_else(|_| "[]".into()),
+                            serde_json::to_string(&r.italic_ranges).unwrap_or_else(|_| "[]".into()),
+                            serde_json::to_string(&r.underline_ranges).unwrap_or_else(|_| "[]".into()),
                             r.created_at,
                             r.updated_at,
                             r.completed_at,

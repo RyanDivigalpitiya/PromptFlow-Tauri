@@ -46,6 +46,10 @@ export interface WrapResult {
   text: string;
   selStart: number;
   selEnd: number;
+  /** The text after ONLY the later-position edit — every wrap/unwrap is TWO
+   * single-character splices, and style-run adjustment (adjustRangesForEdit)
+   * models exactly one splice per step; adjust old→mid, then mid→text. */
+  mid: string;
 }
 
 /** Apply the action; the inner text stays selected in every case. */
@@ -59,23 +63,32 @@ export function applyWrap(
   const close = PAIRS[ch];
   const sel = text.slice(selStart, selEnd);
   switch (action.type) {
-    case "wrap":
+    case "wrap": {
+      const mid = text.slice(0, selEnd) + close + text.slice(selEnd);
       return {
         text: text.slice(0, selStart) + ch + sel + close + text.slice(selEnd),
         selStart: selStart + 1,
         selEnd: selEnd + 1,
+        mid,
       };
-    case "unwrapSurrounding":
+    }
+    case "unwrapSurrounding": {
+      const mid = text.slice(0, selEnd) + text.slice(selEnd + 1);
       return {
         text: text.slice(0, selStart - 1) + sel + text.slice(selEnd + 1),
         selStart: selStart - 1,
         selEnd: selEnd - 1,
+        mid,
       };
-    case "unwrapInclusive":
+    }
+    case "unwrapInclusive": {
+      const mid = text.slice(0, selEnd - 1) + text.slice(selEnd);
       return {
         text: text.slice(0, selStart) + sel.slice(1, -1) + text.slice(selEnd),
         selStart,
         selEnd: selEnd - 2,
+        mid,
       };
+    }
   }
 }

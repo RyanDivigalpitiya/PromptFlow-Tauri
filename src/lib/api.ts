@@ -59,8 +59,20 @@ export const api = {
   toggleCompleted: (node: string) =>
     invoke<MutationOut>("toggle_completed", { node }),
 
-  setText: (node: string, text: string, boldRanges?: number[]) =>
-    invoke<MutationOut>("set_text", { node, text, boldRanges }),
+  setText: (
+    node: string,
+    text: string,
+    boldRanges?: number[],
+    italicRanges?: number[],
+    underlineRanges?: number[],
+  ) =>
+    invoke<MutationOut>("set_text", {
+      node,
+      text,
+      boldRanges,
+      italicRanges,
+      underlineRanges,
+    }),
 
   setNote: (node: string, note: string) =>
     invoke<MutationOut>("set_note", { node, note }),

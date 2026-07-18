@@ -203,6 +203,8 @@ export function OutlineView() {
                   parentId={row.nodeId}
                   depth={row.depth}
                   fontSize={fontSize}
+                  showGuides={showGuides}
+                  guideColor={guideColor}
                   hiddenCount={
                     hideCompleted
                       ? hiddenCompletedCount(

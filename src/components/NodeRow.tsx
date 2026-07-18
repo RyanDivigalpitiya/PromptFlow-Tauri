@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { OutlineLayout } from "../lib/layout";
+import { toMarkdown } from "../lib/runs";
 import {
   addRelative,
   copySubtree,
@@ -24,6 +25,7 @@ function TrailingCluster(p: {
   hasChildren: boolean;
   isCollapsed: boolean;
   isLine: boolean;
+  isPrompt: boolean;
   fontSize: number;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -71,6 +73,8 @@ function TrailingCluster(p: {
     };
   }, [menuOpen]);
 
+  // No preventDefault on these buttons' mousedown: pressing ANY row control is
+  // meant to defocus a node being edited (the natural focus steal does it).
   return (
     <span className="trailing-cluster" style={{ height: OutlineLayout.lineHeight(p.fontSize) }}>
       {p.hasChildren && (
@@ -78,7 +82,6 @@ function TrailingCluster(p: {
           className={"chevron" + (p.isCollapsed ? " collapsed" : "")}
           style={{ width: slot }}
           tabIndex={-1}
-          onMouseDown={(e) => e.preventDefault()}
           onClick={() => s().toggleCollapse(p.nodeId)}
           aria-label={p.isCollapsed ? "Expand" : "Collapse"}
         >
@@ -92,7 +95,6 @@ function TrailingCluster(p: {
           className="row-action"
           style={{ width: slot }}
           tabIndex={-1}
-          onMouseDown={(e) => e.preventDefault()}
           onClick={() => void addRelative(p.nodeId)}
           aria-label="Add node"
         >
@@ -103,7 +105,6 @@ function TrailingCluster(p: {
             className="row-action"
             style={{ width: slot }}
             tabIndex={-1}
-            onMouseDown={(e) => e.preventDefault()}
             onClick={() => drillInto(p.nodeId)}
             aria-label="Zoom in"
           >
@@ -118,7 +119,6 @@ function TrailingCluster(p: {
             className="row-action"
             style={{ width: slot }}
             tabIndex={-1}
-            onMouseDown={(e) => e.preventDefault()}
             onClick={() => setMenuOpen((v) => !v)}
             aria-label="Node menu"
           >
@@ -136,15 +136,55 @@ function TrailingCluster(p: {
                     Zoom In
                   </button>
                 )}
-                {!p.isLine && (
-                  <button
-                    onClick={() => {
-                      setMenuOpen(false);
-                      void copySubtree(p.nodeId);
-                    }}
-                  >
-                    Copy
-                  </button>
+                {p.isPrompt ? (
+                  <>
+                    <button
+                      onClick={() => {
+                        setMenuOpen(false);
+                        const r = mirror.get(p.nodeId);
+                        if (r)
+                          void navigator.clipboard.writeText(
+                            toMarkdown(r.text, {
+                              bold: r.boldRanges,
+                              italic: r.italicRanges,
+                              underline: r.underlineRanges,
+                            }),
+                          );
+                      }}
+                    >
+                      Copy Markdown
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMenuOpen(false);
+                        const r = mirror.get(p.nodeId);
+                        if (r) void navigator.clipboard.writeText(r.text);
+                      }}
+                    >
+                      Copy Raw
+                    </button>
+                    {p.hasChildren && (
+                      <button
+                        onClick={() => {
+                          setMenuOpen(false);
+                          void copySubtree(p.nodeId);
+                        }}
+                      >
+                        Copy Subtree
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  !p.isLine && (
+                    <button
+                      onClick={() => {
+                        setMenuOpen(false);
+                        void copySubtree(p.nodeId);
+                      }}
+                    >
+                      Copy
+                    </button>
+                  )
                 )}
                 <button
                   className="danger"
@@ -166,6 +206,7 @@ function TrailingCluster(p: {
 /** Delete via the menu: whole subtree, confirming when it's big (the
  * bulletDeleteWarningThreshold port). */
 async function confirmDelete(nodeId: string) {
+  if (!mirror.get(nodeId)) return; // blur-prune may have beaten this click
   const count = mirror.descendantsCount(nodeId) - 1;
   if (count >= 10) {
     const ok = window.confirm(
@@ -283,9 +324,22 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
       hasChildren={p.hasChildren}
       isCollapsed={p.isCollapsed}
       isLine={isLine}
+      isPrompt={isPrompt}
       fontSize={p.fontSize}
     />
   );
+
+  // The prompt's leading bar sits ON the shared glyph column (bullet centers), not
+  // hugging the panel edge — panel-relative offset back to the slot center.
+  const promptBarWidth = Math.max(2, Math.round(2.5 * scale));
+  // −1: the abs-positioned bar's containing block is the panel's PADDING box,
+  // one border-px right of where the glyph-column math starts.
+  const promptBarLeft =
+    -(
+      OutlineLayout.glyphGap * scale +
+      OutlineLayout.bulletHitSize(p.fontSize) / 2 +
+      promptBarWidth / 2
+    ) - 1;
 
   // A prompt's cluster sits OUTSIDE the panel at the row's right edge (SwiftUI
   // parity) — rendered by the prompt branch below, not inline after the text.
@@ -338,6 +392,7 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
         {isLine ? (
           <div className="content line-content">
             <hr className="node-divider" />
+            {cluster}
           </div>
         ) : isPrompt ? (
           <div className="content">
@@ -347,10 +402,21 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
               style={{
                 borderColor: rec.isHighlighted ? p.highlightColor : undefined,
               }}
+              onMouseDown={(e) => {
+                // Anywhere in the panel's empty space focuses the editor — only
+                // direct panel hits, so text/buttons/note keep their own behavior.
+                if (e.target !== e.currentTarget || e.button !== 0) return;
+                e.preventDefault();
+                useWindowState
+                  .getState()
+                  .focusNode(p.nodeId, "main", { type: "end" });
+              }}
             >
               <span
                 className="prompt-line-bullet"
                 style={{
+                  left: promptBarLeft,
+                  width: promptBarWidth,
                   background:
                     rec.isHighlighted || p.hasHighlightedDescendant
                       ? p.highlightColor
@@ -362,17 +428,6 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
               />
               {firstLine}
               <NoteEditor nodeId={p.nodeId} isNoteFocused={p.isNoteFocused} />
-              <div className="prompt-actions">
-                <button
-                  className="row-action"
-                  tabIndex={-1}
-                  title="Copy prompt"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => void navigator.clipboard.writeText(rec.text)}
-                >
-                  ⧉
-                </button>
-              </div>
             </div>
             {cluster}
             </div>
@@ -389,12 +444,15 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
 });
 
 /** The faint "+" placeholder at the bottom of an expanded child list, with the
- * "(All Completed — Hidden)" hint when hide-completed emptied the list. */
+ * "(All Completed — Hidden)" hint when hide-completed emptied the list. Renders
+ * the SAME indent guides as node rows so a level's guide line never gaps here. */
 export const AddChildRow = memo(function AddChildRow(p: {
   parentId: string;
   depth: number;
   fontSize: number;
   hiddenCount: number | null;
+  showGuides: boolean;
+  guideColor: string;
   onAdd: (parentId: string) => void;
 }) {
   const scale = OutlineLayout.scale(p.fontSize);
@@ -403,10 +461,19 @@ export const AddChildRow = memo(function AddChildRow(p: {
     <div
       className="node-row add-child-row"
       style={{
+        position: "relative",
         paddingLeft: OutlineLayout.documentHInset + indent,
         fontSize: p.fontSize,
       }}
     >
+      {p.showGuides && (
+        <IndentGuides
+          depth={p.depth}
+          fontSize={p.fontSize}
+          expandedParent={false}
+          color={p.guideColor}
+        />
+      )}
       <button
         className="add-child-btn"
         style={{ width: OutlineLayout.bulletHitSize(p.fontSize) }}

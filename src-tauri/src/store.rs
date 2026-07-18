@@ -87,6 +87,34 @@ struct TxData {
     before: HashMap<Uuid, Option<NodeRec>>,
 }
 
+/// Split flat `[loc, len, …]` style pairs at `at`: head keeps runs before the split
+/// (clipped), tail keeps runs after it, rebased to 0. Runs straddling `at` split.
+fn split_ranges(ranges: &[i64], at: i64) -> (Vec<i64>, Vec<i64>) {
+    let mut head = Vec::new();
+    let mut tail = Vec::new();
+    for pair in ranges.chunks(2) {
+        if pair.len() < 2 {
+            break;
+        }
+        let (lo, hi) = (pair[0], pair[0] + pair[1]);
+        if lo < at {
+            let h = hi.min(at);
+            if h > lo {
+                head.push(lo);
+                head.push(h - lo);
+            }
+        }
+        if hi > at {
+            let l = lo.max(at);
+            if hi > l {
+                tail.push(l - at);
+                tail.push(hi - l);
+            }
+        }
+    }
+    (head, tail)
+}
+
 // MARK: - Store
 
 pub struct Store {
@@ -502,7 +530,9 @@ impl Store {
     /// Enter: split `node` at the caret. Expanded-with-children parent → new node is the
     /// FIRST CHILD (inheriting the visible top child's kind); otherwise the NEXT SIBLING
     /// (inheriting the node's kind). `expanded_in_window` is the calling window's collapse
-    /// state for `node` (collapse is per-window).
+    /// state for `node` (collapse is per-window). Style runs split with the text: the
+    /// source keeps runs clipped to the head, the new node gets the tail rebased — the
+    /// offsets are UTF-16 code units (the editor's offset space).
     pub fn commit_new_node(
         &mut self,
         node: Uuid,
@@ -512,12 +542,20 @@ impl Store {
         hide_completed: bool,
     ) -> Result<(Delta, MutationOut), String> {
         self.ensure(node)?;
+        let at = before.encode_utf16().count() as i64;
+        let src = &self.nodes[&node];
+        let (bold_head, bold_tail) = split_ranges(&src.bold_ranges, at);
+        let (italic_head, italic_tail) = split_ranges(&src.italic_ranges, at);
+        let (under_head, under_tail) = split_ranges(&src.underline_ranges, at);
         self.begin();
         self.edit(node, |r| {
             r.text = before;
+            r.bold_ranges = bold_head;
+            r.italic_ranges = italic_head;
+            r.underline_ranges = under_head;
             r.updated_at = now_ms();
         });
-        let new_rec = if expanded_in_window && self.has_children(node) {
+        let mut new_rec = if expanded_in_window && self.has_children(node) {
             let kind = self.top_child_kind(node, hide_completed);
             let pos = self.first_child_position(node);
             NodeRec::new(after, kind, Some(node), pos)
@@ -527,6 +565,9 @@ impl Store {
             let parent = self.nodes[&node].parent;
             NodeRec::new(after, kind, parent, pos)
         };
+        new_rec.bold_ranges = bold_tail;
+        new_rec.italic_ranges = italic_tail;
+        new_rec.underline_ranges = under_tail;
         let new_id = new_rec.id;
         self.insert_new(new_rec);
         let delta = self.commit(None)?;
@@ -841,6 +882,8 @@ impl Store {
         node: Uuid,
         text: String,
         bold_ranges: Option<Vec<i64>>,
+        italic_ranges: Option<Vec<i64>>,
+        underline_ranges: Option<Vec<i64>>,
     ) -> Result<(Delta, MutationOut), String> {
         self.ensure(node)?;
         self.begin();
@@ -848,6 +891,12 @@ impl Store {
             r.text = text;
             if let Some(b) = bold_ranges {
                 r.bold_ranges = b;
+            }
+            if let Some(i) = italic_ranges {
+                r.italic_ranges = i;
+            }
+            if let Some(u) = underline_ranges {
+                r.underline_ranges = u;
             }
             r.updated_at = now_ms();
         });
@@ -1302,6 +1351,32 @@ mod tests {
     }
 
     #[test]
+    fn split_ranges_clips_and_rebases() {
+        // "abcdef" bold [1,4] ("bcde"), split at 3 → head "abc" bold [1,2] ("bc"),
+        // tail "def" bold [0,2] ("de"); a run entirely after the split rebases whole.
+        assert_eq!(split_ranges(&[1, 4], 3), (vec![1, 2], vec![0, 2]));
+        assert_eq!(split_ranges(&[4, 2], 3), (vec![], vec![1, 2]));
+        assert_eq!(split_ranges(&[0, 2], 3), (vec![0, 2], vec![]));
+    }
+
+    #[test]
+    fn commit_new_node_splits_style_runs() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        s.set_text(a, "abcdef".into(), Some(vec![1, 4]), Some(vec![0, 6]), None)
+            .unwrap();
+        let (_, out) = s
+            .commit_new_node(a, "abc".into(), "def".into(), false, false)
+            .unwrap();
+        let b = out.new_node.unwrap();
+        assert_eq!(s.get(a).unwrap().bold_ranges, vec![1, 2]);
+        assert_eq!(s.get(a).unwrap().italic_ranges, vec![0, 3]);
+        assert_eq!(s.get(b).unwrap().bold_ranges, vec![0, 2]);
+        assert_eq!(s.get(b).unwrap().italic_ranges, vec![0, 3]);
+    }
+
+    #[test]
     fn commit_new_node_sibling_and_first_child() {
         let mut s = mem_store();
         let (_, a) = s.append_root(NodeKind::Checkbox).unwrap();
@@ -1360,9 +1435,9 @@ mod tests {
         let mut s = mem_store();
         let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
         let a = a.new_node.unwrap();
-        s.set_text(a, "h".into(), None).unwrap();
-        s.set_text(a, "he".into(), None).unwrap();
-        s.set_text(a, "hello".into(), None).unwrap();
+        s.set_text(a, "h".into(), None, None, None).unwrap();
+        s.set_text(a, "he".into(), None, None, None).unwrap();
+        s.set_text(a, "hello".into(), None, None, None).unwrap();
         s.undo().unwrap();
         assert_eq!(s.get(a).unwrap().text, "");
     }

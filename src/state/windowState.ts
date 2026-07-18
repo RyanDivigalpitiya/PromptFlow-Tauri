@@ -42,6 +42,8 @@ interface WindowState {
   expandAll(): void;
   setHideCompleted(on: boolean): void;
   adjustFont(step: number): void;
+  /** Absolute size (clamped) — the pinch gesture's continuous path. */
+  setFont(size: number): void;
   resetFont(): void;
   drillIn(id: string | null): void;
   goBack(): void;
@@ -140,6 +142,10 @@ export const useWindowState = create<WindowState>((set, get) => ({
   },
   adjustFont(step) {
     set({ fontSize: OutlineLayout.clampFontSize(get().fontSize + step) });
+  },
+  setFont(size) {
+    const next = OutlineLayout.clampFontSize(Math.round(size));
+    if (next !== get().fontSize) set({ fontSize: next });
   },
   resetFont() {
     set({ fontSize: OutlineLayout.baseFontSize });

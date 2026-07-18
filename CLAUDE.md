@@ -106,14 +106,25 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   backend `settings` table holds only `autoArchive` — backend-stored because the sweep
   runs in Rust at launch with no frontend involvement (deferred ~4s so windows load
   first; they then receive its `auto-archive` delta).
-- **One live editor** (`RowEditor.tsx`): unfocused rows are static spans (bold runs,
-  strikethrough `#06FF9A`, highlight); ONLY the focused row mounts a textarea (grid
-  grow-wrap auto-size). This is the port of AppKit's first-responder economy and what
-  keeps 10k+ rows cheap — do not make rows permanently editable. **Echo guard**
-  (`pendingSent`): every `set_text` pushes the sent text; a delta whose `rec.text`
-  matches an in-flight entry is an acknowledged echo (skipped); a remote edit adopts
-  only when nothing is in flight. Without this, in-flight keystroke echoes clobber the
-  textarea mid-burst.
+- **One live editor** (`RowEditor.tsx`): unfocused rows are static spans; ONLY the
+  focused row becomes a CONTROLLED contenteditable div (the textarea died with the
+  rich-text upgrade — bold/italic/underline must render while editing). Invariants:
+  (1) the editor's children are IMPERATIVE (`buildRunDom`) and the two branches carry
+  distinct React keys ("editor"/"static") — without them React appends the static
+  span beside the leftover editor spans (shipped bug, fixed); (2) every input is
+  serialized (`serializeEditor`: text nodes + `<br>`=\n, sentinel `<br
+  data-pf-sentinel>` = zero-width) then re-rendered from the model with the caret
+  restored (`selectionOffsets`/`setSelectionOffsets`); the sentinel is appended when
+  text ends in \n so the trailing line has a line box; (3) ⌘B/I/U ALWAYS
+  preventDefault (the browser's own rich-text engine must never touch the DOM), and
+  paste/copy/cut are intercepted (plain text in, RAW text out; ⇧⌘C = markdown);
+  (4) style refs seed in a LAYOUT effect declared before the run-DOM builder (a
+  passive effect painted one frame unstyled); (5) IME: onKeyDown bails while
+  composing (Enter commits the candidate, never splits). **Echo guard**
+  (`pendingSent`): every `set_text` pushes the sent text; the adoption effect keys on
+  the REC OBJECT (not `rec.text`) so style-only deltas (remote ⌘B, store ⌘Z of a
+  style toggle) drain their echo and adopt — keying on text alone made the next
+  keystroke silently clobber remote/undone styles (shipped bug, fixed).
 - **Virtualized outline** (`OutlineView.tsx`, TanStack Virtual): flatten → one
   virtualizer, `getItemKey` = row id, dynamic heights via `measureElement`.
   **`paddingStart: OutlineLayout.documentVInset`, never CSS padding-top** on the
@@ -142,9 +153,11 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
 
 - **Keyboard handling is split three ways — check all three before adding a shortcut**:
   (1) `RowEditor.onKeyDown` (focused editing: `resolveKey` routing, ⌘B/⌘1-3/⌘⇧F/⌘⇧N,
-  ⌥arrows, ⌘↑/⌘↓ collapse/expand the focused parent — childless falls through to the
-  native caret jump, wrap-selection, Escape); (2) `App.tsx` window handler (⌘⌥F, ⌘=/−/0,
-  ⌘[/], ⌘E/⌘D collapse/expand focused, ⌘⇧E/⌘⇧D collapse/expand ALL, ⌘Z fallback,
+  ⌘B/⌘I/⌘U style toggles, ⌘4 → divider (single-node only, then clearFocus — a divider
+  has no editor), ⇧⌘C markdown copy, ⌥arrows, ⌘↑/⌘↓ collapse/expand the focused
+  parent — childless falls through to the native caret jump, wrap-selection, Escape);
+  (2) `App.tsx` window handler (⌘⌥F, ⌘=/−/0 + pinch/ctrl-wheel → `setFont`, ⌘[/],
+  ⌘E/⌘D collapse/expand focused, ⌘⇧E/⌘⇧D collapse/expand ALL, ⌘Z fallback,
   ⌘⌃⇧7); (3) `handleSelectionKey` capture-phase (block ops while a node selection is
   live; its Escape yields to an open ⋯ row-menu — one layer per press). Plus native menu accelerators (⌘N/⌘Z/⇧⌘Z + clipboard roles —
   the predefined cut/copy/paste/select_all items are REQUIRED; a macOS webview gets no
@@ -204,9 +217,14 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   root); an abandoned empty node is pruned on defocus (`exemptPruneOnce` protects
   Enter-at-line-start splits); dividers (`line`) never drill, never parent, never
   propagate their kind, and ⌘1/2/3 never convert them.
-- **Bold runs**: flat `[location, length, …]` pairs; the editor adjusts them through
-  every text change via `adjustRangesForEdit` (single-splice diff) and sends them WITH
-  each `set_text` — dropping that coupling silently loses bold under concurrent edits.
+- **Style runs (bold/italic/underline)**: three flat `[location, length, …]` arrays
+  (UTF-16 code units) on every node; the editor adjusts each through every text change
+  via `adjustRangesForEdit` (SINGLE-splice diff — a wrap/unwrap is TWO splices, so it
+  adjusts old→`mid`→final using `applyWrap().mid`) and sends all three WITH each
+  `set_text`. `commit_new_node` splits the arrays at the caret (`split_ranges`) so an
+  Enter split keeps styling on both halves. Export writes `italicRanges`/
+  `underlineRanges` ONLY when non-empty — style-free documents stay byte-identical to
+  the SwiftUI format (whose decoder ignores the extra keys on styled ones).
 - **The mutation surface is the Rust commands** (36 registered in `lib.rs`; typed
   wrappers in `src/lib/api.ts`). Never mutate the mirror locally — apply state only from
   deltas. New mutations follow the pattern: store method → command → `emit_delta` →

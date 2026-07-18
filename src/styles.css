@@ -172,7 +172,6 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-top: 1px;
 }
 
 .glyph-dot,
@@ -187,7 +186,9 @@ body {
 .content {
   flex: 1;
   min-width: 0;
-  margin-left: 6px;
+  /* = glyphGap·scale (em rides the row's inline font-size), matching
+     OutlineLayout.glyphSlotToContent — a fixed px gap drifted at other scales. */
+  margin-left: 0.43em;
 }
 
 .firstline {
@@ -228,6 +229,14 @@ body {
   display: inline-block;
   max-width: 100%;
   min-height: 1.35em;
+}
+
+/* The focused row's live editor — same element/spans as the static render, so
+   focusing shifts nothing. */
+.node-editor {
+  outline: none;
+  caret-color: var(--accent);
+  min-width: 10px;
 }
 
 .grow-wrap {
@@ -398,10 +407,15 @@ body {
   min-height: 1.35em;
 }
 
+.line-content:hover .row-actions {
+  opacity: 1;
+}
+
 .node-divider {
   flex: 1;
   border: none;
   border-top: 1px solid rgba(255, 255, 255, 0.18);
+  margin: 0;
 }
 
 /* The prompt panel + its trailing cluster sit side by side; the cluster lives
@@ -424,7 +438,7 @@ body {
   border: 1px solid transparent;
   border-radius: 0.71em;
   background: rgba(255, 255, 255, 0.045);
-  padding: 0.71em 2.4em 0.71em 0.86em;
+  padding: 0.71em 0.86em;
   min-height: 4.1em;
 }
 
@@ -432,35 +446,13 @@ body {
   border-color: rgba(255, 255, 255, 0.14);
 }
 
+/* Horizontal position + width come inline from NodeRow (centered on the shared
+   glyph column, like every other bullet). */
 .prompt-line-bullet {
   position: absolute;
-  left: -14px;
-  top: 6px;
-  bottom: 6px;
-  width: 3px;
-  border-radius: 2px;
-}
-
-.prompt-actions {
-  position: absolute;
   top: 0.43em;
-  right: 0.43em;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  opacity: 0;
-  transition: opacity 0.12s ease;
-}
-
-.prompt-panel:hover .prompt-actions,
-.prompt-panel:focus-within .prompt-actions {
-  opacity: 1;
-}
-
-.prompt-actions .row-action {
-  width: 1.57em;
-  height: 1.57em;
-  font-size: 0.93em;
+  bottom: 0.43em;
+  border-radius: 99px;
 }
 
 /* ---------- Placeholders ---------- */

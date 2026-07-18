@@ -37,16 +37,18 @@ export const Glyph = memo(function Glyph(p: GlyphProps) {
     return <span style={{ width: size, height: size, flex: "none" }} />;
   }
   if (p.kind === "line") {
+    const stroke = Math.max(2.5, 2.5 * OutlineLayout.scale(p.fontSize));
     return (
       <span className="glyph-dash" style={{ width: size, height: size }}>
         <svg width={size} height={size}>
           <line
-            x1={size * 0.15}
+            x1={size * 0.15 + stroke / 2}
             y1={size / 2}
-            x2={size * 0.85}
+            x2={size * 0.85 - stroke / 2}
             y2={size / 2}
             stroke="rgba(255,255,255,0.4)"
-            strokeWidth={1.5}
+            strokeWidth={stroke}
+            strokeLinecap="round"
           />
         </svg>
       </span>

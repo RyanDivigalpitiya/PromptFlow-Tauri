@@ -185,8 +185,13 @@ pub fn set_text(
     node: Uuid,
     text: String,
     bold_ranges: Option<Vec<i64>>,
+    italic_ranges: Option<Vec<i64>>,
+    underline_ranges: Option<Vec<i64>>,
 ) -> Result<MutationOut, String> {
-    let r = state.lock().unwrap().set_text(node, text, bold_ranges);
+    let r = state
+        .lock()
+        .unwrap()
+        .set_text(node, text, bold_ranges, italic_ranges, underline_ranges);
     run_mutation(&app, &window, r)
 }
 

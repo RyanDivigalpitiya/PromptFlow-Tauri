@@ -189,13 +189,29 @@ export async function pruneIfEmptyOnDefocus(nodeId: string) {
 
 // MARK: Row affordances
 
-/** The row's trailing "+" — first child for a parent (expanding it), sibling for a
- * leaf; the DRILL ROOT forces the child branch (its siblings aren't rendered). */
+/** The row's trailing "+" — first child for an EXPANDED parent, sibling below for a
+ * leaf or a COLLAPSED parent (adding into a closed list you can't see would be
+ * disorienting); the DRILL ROOT forces the child branch (its siblings aren't
+ * rendered). */
 export async function addRelative(nodeId: string) {
   const s = ws();
+  const node = mirror.get(nodeId);
+  // The click that revealed this + may have BLUR-pruned the node it belongs to.
+  if (!node) return;
+  const isDrillRoot = s.drill === nodeId;
+  if (
+    node &&
+    !isDrillRoot &&
+    mirror.hasChildren(nodeId) &&
+    s.collapsed.has(nodeId)
+  ) {
+    const out = await api.insertSiblingAfter(nodeId, inheritableKind(node.kind));
+    await applyOut(out);
+    return;
+  }
   const out = await api.insertNewNodeRelative(
     nodeId,
-    s.drill === nodeId,
+    isDrillRoot,
     s.hideCompleted,
   );
   await applyOut(out);
@@ -306,6 +322,19 @@ export async function copyBlock(ids: string[]) {
   for (const id of ids) subtreeLines(id, lines);
   await navigator.clipboard.writeText(lines.join("\n"));
 }
+
+// Prune abandoned empty nodes on ANY focus change. The editor's onBlur alone can't
+// do it: focusing another row unmounts the editor without a blur event (browsers
+// fire no blur when a focused element is removed), so the prune must key off the
+// focus STATE, not the DOM event.
+let lastFocusId: string | null = useWindowState.getState().focusId;
+useWindowState.subscribe((s) => {
+  const prev = lastFocusId;
+  if (s.focusId !== prev) {
+    lastFocusId = s.focusId;
+    if (prev) setTimeout(() => void pruneIfEmptyOnDefocus(prev), 0);
+  }
+});
 
 // Module-level state must never be split across HMR generations — a hot update that
 // swapped this module would strand components on a fresh empty instance. Decline hot

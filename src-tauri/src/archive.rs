@@ -34,6 +34,13 @@ pub struct NodeExport {
     pub is_collapsed: bool,
     #[serde(rename = "boldRanges")]
     pub bold_ranges: Vec<i64>,
+    /// Only written when non-empty so style-free documents stay byte-identical to
+    /// the SwiftUI app's format (which has no italic/underline); its JSONDecoder
+    /// ignores unknown keys, so styled exports still import there (styles dropped).
+    #[serde(rename = "italicRanges", default, skip_serializing_if = "Vec::is_empty")]
+    pub italic_ranges: Vec<i64>,
+    #[serde(rename = "underlineRanges", default, skip_serializing_if = "Vec::is_empty")]
+    pub underline_ranges: Vec<i64>,
     pub position: i64,
     #[serde(rename = "createdAt")]
     pub created_at: String,
@@ -74,6 +81,8 @@ fn export_node(store: &Store, id: Uuid, collapsed: &HashSet<Uuid>, seen: &mut Ha
         is_completed: rec.is_completed,
         is_collapsed: collapsed.contains(&id),
         bold_ranges: rec.bold_ranges,
+        italic_ranges: rec.italic_ranges,
+        underline_ranges: rec.underline_ranges,
         position: rec.position,
         created_at: iso(rec.created_at),
         updated_at: iso(rec.updated_at),
@@ -119,6 +128,8 @@ pub fn to_records(doc: &OutlineDocument) -> (Vec<NodeRec>, Vec<Uuid>) {
         rec.is_completed = e.is_completed;
         rec.is_collapsed = e.is_collapsed;
         rec.bold_ranges = e.bold_ranges.clone();
+        rec.italic_ranges = e.italic_ranges.clone();
+        rec.underline_ranges = e.underline_ranges.clone();
         rec.created_at = parse_iso(&e.created_at);
         rec.updated_at = parse_iso(&e.updated_at);
         rec.completed_at = e.completed_at.as_deref().map(parse_iso);
@@ -229,10 +240,10 @@ mod tests {
         let mut s = Store::open_in_memory_for_tests();
         let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
         let a = a.new_node.unwrap();
-        s.set_text(a, "root A".into(), Some(vec![0, 4])).unwrap();
+        s.set_text(a, "root A".into(), Some(vec![0, 4]), Some(vec![5, 2]), None).unwrap();
         let (_, b) = s.append_child(a, NodeKind::Checkbox).unwrap();
         let b = b.new_node.unwrap();
-        s.set_text(b, "child B".into(), None).unwrap();
+        s.set_text(b, "child B".into(), None, None, None).unwrap();
         s.set_note(b, "a note".into()).unwrap();
         s.toggle_completed(b).unwrap();
 
@@ -246,6 +257,8 @@ mod tests {
         let ra = recs.iter().find(|r| r.text == "root A").unwrap();
         let rb = recs.iter().find(|r| r.text == "child B").unwrap();
         assert_eq!(ra.bold_ranges, vec![0, 4]);
+        assert_eq!(ra.italic_ranges, vec![5, 2]);
+        assert!(rb.italic_ranges.is_empty() && rb.underline_ranges.is_empty());
         assert_eq!(rb.parent, Some(ra.id));
         assert!(rb.is_completed);
         assert!(rb.completed_at.is_some());

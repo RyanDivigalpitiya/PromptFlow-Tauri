@@ -7,7 +7,9 @@ export const OutlineLayout = {
   /** Document margins around the flattened list. */
   documentHInset: 18,
   documentVInset: 12,
-  glyphTopInset: 1,
+  /** 0 since the glyph/text vertical-alignment fix — the slot centers on the text's
+   * first line box with no optical nudge (the 1px nudge read as misalignment). */
+  glyphTopInset: 0,
 
   /** Font size the glyph base dimensions were tuned against (scale == 1 here). */
   baseFontSize: 14,
