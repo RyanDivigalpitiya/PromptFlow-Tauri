@@ -20,11 +20,15 @@ function TrailingCluster(p: {
   hasChildren: boolean;
   isCollapsed: boolean;
   isLine: boolean;
+  isDrillRoot: boolean;
   fontSize: number;
 }) {
   const slot = OutlineLayout.disclosureWidth(p.fontSize);
   const icon = Math.round(10 * OutlineLayout.scale(p.fontSize));
   const s = useWindowState.getState;
+  // A drilled-into node is always shown expanded and can't be collapsed (collapsing
+  // your zoom root would empty the view) — its chevron is locked open.
+  const collapsedDisplay = p.isCollapsed && !p.isDrillRoot;
 
   // No preventDefault on these buttons' mousedown: pressing ANY row control is
   // meant to defocus a node being edited (the natural focus steal does it).
@@ -32,11 +36,21 @@ function TrailingCluster(p: {
     <span className="trailing-cluster" style={{ height: OutlineLayout.lineHeight(p.fontSize) }}>
       {p.hasChildren && (
         <button
-          className={"chevron" + (p.isCollapsed ? " collapsed" : "")}
+          className={
+            "chevron" +
+            (collapsedDisplay ? " collapsed" : "") +
+            (p.isDrillRoot ? " locked" : "")
+          }
           style={{ width: slot }}
           tabIndex={-1}
-          onClick={() => s().toggleCollapse(p.nodeId)}
-          aria-label={p.isCollapsed ? "Expand" : "Collapse"}
+          onClick={p.isDrillRoot ? undefined : () => s().toggleCollapse(p.nodeId)}
+          aria-label={
+            p.isDrillRoot
+              ? "Expanded (zoomed in)"
+              : collapsedDisplay
+                ? "Expand"
+                : "Collapse"
+          }
         >
           <svg width={icon} height={icon} viewBox="0 0 10 10">
             <path d="M2 3.5 L5 6.5 L8 3.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
@@ -211,6 +225,7 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
       hasChildren={p.hasChildren}
       isCollapsed={p.isCollapsed}
       isLine={isLine}
+      isDrillRoot={p.isDrillRoot}
       fontSize={p.fontSize}
     />
   );

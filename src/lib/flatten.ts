@@ -94,7 +94,9 @@ export function flattenDrillRoot(
         depth: 0,
         hasChildren: mirror.hasChildren(rootId),
         kind: "node",
-        isCollapsed: collapsed.has(rootId),
+        // Drilling in always reveals the root's children (recursion below ignores
+        // its collapse), so its disclosure must READ as expanded — never collapsed.
+        isCollapsed: false,
       },
     ],
   };

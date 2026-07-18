@@ -55,8 +55,27 @@ export function TopBar() {
           ›
         </button>
         {drill && (
-          <button className="bar-btn" onClick={() => s().goHome()} title="Home">
-            ⌂
+          <button
+            className="bar-btn home"
+            onClick={() => s().goHome()}
+            title="Home"
+            aria-label="Home"
+          >
+            <svg
+              width={13 * ts}
+              height={13 * ts}
+              viewBox="0 0 14 14"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              {/* Outline house: roof, walls, and a door notch. */}
+              <path d="M1.9 6.7 L7 2.1 L12.1 6.7" />
+              <path d="M3.15 5.9 V11.9 H10.85 V5.9" />
+              <path d="M5.7 11.9 V8.4 H8.3 V11.9" />
+            </svg>
           </button>
         )}
       </div>
