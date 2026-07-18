@@ -69,6 +69,9 @@ export function OutlineView() {
     estimateSize: () => rowEstimate,
     getItemKey: (i) => rows[i].id,
     overscan: 14,
+    // The document's top margin — must be the virtualizer's own padding (a CSS
+    // padding on the container is invisible to its translateY positioning).
+    paddingStart: OutlineLayout.documentVInset,
   });
 
   // Keep the focused row on screen (presence-gated, like the Swift attemptScroll).
@@ -95,10 +98,7 @@ export function OutlineView() {
     >
       <div
         className="outline-inner"
-        style={{
-          height: virtualizer.getTotalSize(),
-          paddingTop: OutlineLayout.documentVInset,
-        }}
+        style={{ height: virtualizer.getTotalSize() }}
       >
         {items.map((vi) => {
           const row = rows[vi.index];

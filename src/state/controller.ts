@@ -1,5 +1,11 @@
+import { invoke } from "@tauri-apps/api/core";
 import { api } from "../lib/api";
 import type { RenderRow } from "../lib/flatten";
+
+/** Dev diagnostics to the terminal (see commands::log_msg). */
+export function dbg(msg: string) {
+  void invoke("log_msg", { msg }).catch(() => {});
+}
 import type { KeyDecision } from "../lib/keys";
 import { inheritableKind, type NodeKind } from "../lib/types";
 import { mirror } from "./mirror";

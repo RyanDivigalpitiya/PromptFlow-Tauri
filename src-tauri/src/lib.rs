@@ -196,6 +196,7 @@ pub fn run() {
             commands::new_window,
             commands::seed_demo,
             commands::node_count,
+            commands::log_msg,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

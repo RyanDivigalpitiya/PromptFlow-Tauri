@@ -3,6 +3,7 @@ import { OutlineLayout } from "../lib/layout";
 import {
   addRelative,
   copySubtree,
+  dbg,
   deleteAndFocusPrev,
   drillInto,
   toggleCompleted,
@@ -133,7 +134,9 @@ async function confirmDelete(nodeId: string) {
 }
 
 /** Faint unbroken vertical guides — one per ancestor level at the ancestor's glyph
- * column — plus the expanded parent's child-connector stub. */
+ * column — plus the expanded parent's child-connector stub. Anchored on the ROW
+ * element (guideX measures from the document's leading edge + documentHInset), so
+ * every guide falls inside the row's empty indent gutter. */
 function IndentGuides(p: {
   depth: number;
   fontSize: number;
@@ -146,7 +149,10 @@ function IndentGuides(p: {
       <span
         key={level}
         className="indent-guide"
-        style={{ left: OutlineLayout.guideX(level, p.fontSize), background: p.color }}
+        style={{
+          left: OutlineLayout.documentHInset + OutlineLayout.guideX(level, p.fontSize),
+          background: p.color,
+        }}
       />,
     );
   }
@@ -160,7 +166,9 @@ function IndentGuides(p: {
         key="connector"
         className="indent-guide"
         style={{
-          left: OutlineLayout.guideX(p.depth + 1, p.fontSize),
+          left:
+            OutlineLayout.documentHInset +
+            OutlineLayout.guideX(p.depth + 1, p.fontSize),
           top,
           background: p.color,
         }}
@@ -207,6 +215,7 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
       }}
       onMouseDown={(e) => e.preventDefault()}
       onClick={() => {
+        dbg(`glyph click kind=${rec.kind} id=${p.nodeId.slice(0, 8)}`);
         if (rec.kind === "checkbox") void toggleCompleted(p.nodeId);
         else if (!isLine) drillInto(p.nodeId);
       }}
@@ -255,20 +264,21 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
     <div
       className={"node-row kind-" + rec.kind}
       style={{
+        position: "relative",
         paddingLeft: OutlineLayout.documentHInset + indent,
         paddingRight: OutlineLayout.documentHInset,
         fontSize: p.fontSize,
       }}
     >
-      <div className="row-inner" style={{ position: "relative" }}>
-        {p.showGuides && (
-          <IndentGuides
-            depth={p.depth}
-            fontSize={p.fontSize}
-            expandedParent={p.hasChildren && !p.isCollapsed}
-            color={p.guideColor}
-          />
-        )}
+      {p.showGuides && (
+        <IndentGuides
+          depth={p.depth}
+          fontSize={p.fontSize}
+          expandedParent={p.hasChildren && !p.isCollapsed}
+          color={p.guideColor}
+        />
+      )}
+      <div className="row-inner">
         {glyph}
         {isLine ? (
           <div className="content line-content">

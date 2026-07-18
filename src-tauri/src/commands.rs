@@ -358,3 +358,9 @@ pub fn seed_demo(
 pub fn node_count(state: State<StoreState>) -> Result<usize, String> {
     Ok(state.lock().unwrap().node_count())
 }
+
+/// Frontend diagnostics land in the dev terminal (window.onerror etc.).
+#[tauri::command]
+pub fn log_msg(window: WebviewWindow, msg: String) {
+    eprintln!("[js:{}] {}", window.label(), msg);
+}
