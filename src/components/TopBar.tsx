@@ -10,7 +10,9 @@ function DrillTitle({ id }: { id: string }) {
 }
 
 /** The window chrome strip: nav back/forward/home, the drill title, hide-completed.
- * The whole bar is a drag region (overlay title bar), with the buttons on top. */
+ * Chrome-less: no background or divider — it reads as part of the content area,
+ * with the traffic lights vertically centered on the same line (trafficLightPosition).
+ * "deep" drag region: anywhere in the strip drags the window except the buttons. */
 export function TopBar() {
   const drill = useWindowState((s) => s.drill);
   const canBack = useWindowState((s) => s.back.length > 0);
@@ -20,7 +22,7 @@ export function TopBar() {
   const s = useWindowState.getState;
 
   return (
-    <div className="topbar" data-tauri-drag-region>
+    <div className="topbar" data-tauri-drag-region="deep">
       <div className="topbar-left">
         <button
           className="bar-btn"
@@ -44,8 +46,8 @@ export function TopBar() {
           </button>
         )}
       </div>
-      <div className="topbar-center" data-tauri-drag-region>
-        {drill ? <DrillTitle id={drill} /> : <span className="topbar-title app">PromptFlow</span>}
+      <div className="topbar-center">
+        {drill && <DrillTitle id={drill} />}
       </div>
       <div className="topbar-right">
         <button

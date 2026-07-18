@@ -42,17 +42,18 @@ body {
   background: var(--bg-tint);
 }
 
-/* ---------- Top bar (overlay title bar: traffic lights float at the left) ---------- */
+/* ---------- Top bar (overlay title bar: traffic lights float at the left) ----------
+   Chrome-less: no fill, no divider — visually continuous with the outline below.
+   Height pairs with trafficLightPosition {x:18, y:24} (tauri.conf.json + lib.rs) so
+   the lights, nav buttons, and right-side buttons all center on the same line. */
 
 .topbar {
-  height: 46px;
+  height: 44px;
   flex: none;
   display: flex;
   align-items: center;
   padding: 0 14px 0 84px;
   gap: 8px;
-  background: rgba(255, 255, 255, 0.03);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
 }
 
 .topbar-left,
@@ -80,10 +81,6 @@ body {
   text-overflow: ellipsis;
 }
 
-.topbar-title.app {
-  color: var(--text-faint);
-}
-
 .bar-btn {
   appearance: none;
   border: none;
@@ -106,6 +103,12 @@ body {
 
 .bar-btn:disabled {
   opacity: 0.3;
+}
+
+/* The ‹ › ⌂ glyph ink sits low in its em box; lift it so the ink centers on the
+   traffic-light midline. Padding (not transform) keeps the hover pill centered. */
+.topbar-left .bar-btn {
+  padding-bottom: 3px;
 }
 
 .bar-btn.active {

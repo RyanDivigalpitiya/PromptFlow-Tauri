@@ -41,6 +41,10 @@ pub fn spawn_window(app: &AppHandle) -> tauri::Result<String> {
         .transparent(true)
         .hidden_title(true)
         .title_bar_style(TitleBarStyle::Overlay)
+        // y=24 centers the 12px lights at 22 — the midline of the 44px .topbar strip.
+        // (tao's inset resizes the titlebar container to height y+12 and the buttons
+        // keep an 8px bottom offset inside it, so button center lands at y-2 from top.)
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 24.0))
         .theme(Some(tauri::Theme::Dark))
         .effects(WindowEffectsConfig {
             effects: vec![WindowEffect::UnderWindowBackground],

@@ -45,7 +45,10 @@ npx tsc --noEmit             # typecheck (strict; noUnusedLocals/Parameters)
   override via env `PF_NEEDLE`; shot.sh and winids.swift take the needle as an argument
   instead. **The user's REAL SwiftUI PromptFlow app is often running with owner
   "PromptFlow"; never loosen the needle** or you will click into their daily driver.
-  `PF_SHIFT=1` shift-clicks. **GOTCHA: synthetic modifier events can LATCH the HID shift
+  `PF_SHIFT=1` shift-clicks. The needle only matches the DEV binary: a release/installed
+  bundle's window owner is "PromptFlow" (productName), indistinguishable from the SwiftUI
+  app — that's why `verify.sh` matches by its child PID instead, and why release builds
+  can't be driven with these scripts. **GOTCHA: synthetic modifier events can LATCH the HID shift
   state** (every later click acts shift-modified, keystrokes misroute) — if interactions
   go weird, run `scripts/clearmods.swift` and re-check `CGEventSource.flagsState`.
 
@@ -156,7 +159,19 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   footer on any new stateful module; force a full reload by touching `src/main.tsx`.
 - **Capabilities must stay `"windows": ["*"]`** (`src-tauri/capabilities/default.json`).
   Tauri permissions are per-window; the template's `["main"]` made every invoke from a
-  ⌘N-spawned `w*` window fail silently — blank second window.
+  ⌘N-spawned `w*` window fail silently — blank second window. The list must also keep
+  `core:window:allow-start-dragging`: `core:default` does NOT include it, and without it
+  the title-bar drag region silently fails (the injected drag.js invoke is denied) —
+  window can't be moved.
+- **Chrome-less title bar is a three-part coupling — change all or none**: `.topbar`
+  height 44px (styles.css) ⟷ `trafficLightPosition {x:18, y:24}` in BOTH
+  `tauri.conf.json` (main window) and the ⌘N builder in `lib.rs`. On this macOS the
+  traffic-light y-inset resolves to button center = y−2 from the window top (tao resizes
+  the titlebar container to y+12 and the buttons keep an 8px top offset), so y=24
+  centers the lights on the 44px strip's midline; derive a new y as `midline + 2` if the
+  height changes. The strip is `data-tauri-drag-region="deep"` (whole subtree drags;
+  `<button>`s still click). Alignment is verified by pixel-measuring screenshots, not
+  eyeballing.
 - **Programmatic focus needs `e.preventDefault()` on mousedown** (static row, glyphs,
   buttons): the mousedown default action steals focus to body AFTER handlers run,
   blurring the textarea the click just focused.
