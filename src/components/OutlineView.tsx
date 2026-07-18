@@ -12,7 +12,7 @@ import {
   type RenderRow,
 } from "../lib/flatten";
 import { OutlineLayout } from "../lib/layout";
-import { addAtBottom, appendChildAt, publishRows } from "../state/controller";
+import { addAtBottom, appendChildAt, dbg, publishRows } from "../state/controller";
 import { useDrag } from "../state/drag";
 import { publishDragEnv } from "../state/dragGesture";
 import { mirror, subscribeStructure } from "../state/mirror";
@@ -86,9 +86,16 @@ export function OutlineView() {
 
   const rows: RenderRow[] = useMemo(() => {
     void structureV;
-    return drill
+    const t0 = performance.now();
+    const out = drill
       ? flattenDrillRoot(drill, collapsed, hideCompleted, keepVisible)
       : flattenRoots(collapsed, hideCompleted, keepVisible);
+    const dt = performance.now() - t0;
+    if (dt > 8) {
+      // A slow flatten would be the first thing to hurt at scale — surface it.
+      dbg(`flatten: ${out.length} rows in ${dt.toFixed(1)}ms`);
+    }
+    return out;
   }, [structureV, collapsed, hideCompleted, keepVisible, drill]);
   publishRows(rows);
 

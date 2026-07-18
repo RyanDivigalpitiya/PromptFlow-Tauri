@@ -111,6 +111,10 @@ export default function App() {
       if (e.altKey && (e.key === "f" || e.key === "F" || e.code === "KeyF")) {
         e.preventDefault();
         s.toggleFocusPane(); // ⌘⌥F — the one ⌘⌥ shortcut, like the SwiftUI app
+      } else if (e.ctrlKey && e.shiftKey && e.code === "Digit7") {
+        // Dev: ⌘⌃⇧7 seeds a large synthetic tree for performance testing.
+        e.preventDefault();
+        void api.seedDemo(40, 25, 10).then((n) => console.log(`seeded ${n}`));
       } else if (!e.shiftKey && (e.key === "=" || e.key === "+")) {
         e.preventDefault();
         s.adjustFont(1);
