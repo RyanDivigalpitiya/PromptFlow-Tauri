@@ -148,7 +148,11 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   ⌘⌃⇧7); (3) `handleSelectionKey` capture-phase (block ops while a node selection is
   live; its Escape yields to an open ⋯ row-menu — one layer per press). Plus native menu accelerators (⌘N/⌘Z/⇧⌘Z + clipboard roles —
   the predefined cut/copy/paste/select_all items are REQUIRED; a macOS webview gets no
-  ⌘C/⌘V without them).
+  ⌘C/⌘V without them). The Window submenu is registered via
+  `set_as_windows_menu_for_nsapp()` AFTER `app.set_menu(...)` — muda resolves the
+  NSMenu from the INSTALLED main menu and silently no-ops if called earlier; the
+  registration is what makes AppKit auto-append Fill/Center/Move & Resize/tiling/
+  move-to-display and the open-window list.
 - **`resolveKey` (`lib/keys.ts`) is the pure keyboard truth table** (same semantics as
   the Swift original: bullet/checkbox Enter=new node, ⇧Enter=newline; prompt Enter AND
   ⇧Enter=newline — a prompt's "new node" is ⌥Enter, not ⇧Enter; ⌘Enter completes any
