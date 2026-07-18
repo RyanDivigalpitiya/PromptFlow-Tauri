@@ -142,9 +142,11 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
 
 - **Keyboard handling is split three ways — check all three before adding a shortcut**:
   (1) `RowEditor.onKeyDown` (focused editing: `resolveKey` routing, ⌘B/⌘1-3/⌘⇧F/⌘⇧N,
-  ⌥arrows, wrap-selection, Escape); (2) `App.tsx` window handler (⌘⌥F, ⌘=/−/0, ⌘[/],
-  ⌘⇧D/E, ⌘Z fallback, ⌘⌃⇧7); (3) `handleSelectionKey` capture-phase (block ops while a
-  node selection is live). Plus native menu accelerators (⌘N/⌘Z/⇧⌘Z + clipboard roles —
+  ⌥arrows, ⌘↑/⌘↓ collapse/expand the focused parent — childless falls through to the
+  native caret jump, wrap-selection, Escape); (2) `App.tsx` window handler (⌘⌥F, ⌘=/−/0,
+  ⌘[/], ⌘E/⌘D collapse/expand focused, ⌘⇧E/⌘⇧D collapse/expand ALL, ⌘Z fallback,
+  ⌘⌃⇧7); (3) `handleSelectionKey` capture-phase (block ops while a node selection is
+  live; its Escape yields to an open ⋯ row-menu — one layer per press). Plus native menu accelerators (⌘N/⌘Z/⇧⌘Z + clipboard roles —
   the predefined cut/copy/paste/select_all items are REQUIRED; a macOS webview gets no
   ⌘C/⌘V without them).
 - **`resolveKey` (`lib/keys.ts`) is the pure keyboard truth table** (same semantics as
@@ -175,6 +177,16 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
 - **Programmatic focus needs `e.preventDefault()` on mousedown** (static row, glyphs,
   buttons): the mousedown default action steals focus to body AFTER handlers run,
   blurring the textarea the click just focused.
+- **Chrome scales with ⌘+/⌘− via em units off an inline font-size** — rows set
+  `fontSize` on `.node-row` (cluster/menu/prompt internals are em), the TopBar sets
+  `16·clamp(scale,1,1.8)` (CAPPED: icons must never outgrow the fixed 44px strip or
+  they'd break traffic-light alignment), SettingsPanel sets `13·clamp(scale,.9,2.2)`.
+  New chrome CSS should be em, not px. The ⋯ menu has NO backdrop div (position:fixed
+  degrades inside the transformed virtual rows) — a window-level capture
+  mousedown/Escape pair closes it and SWALLOWS the dismissing press+click (macOS menu
+  convention; without the swallow the click lands underneath and mutates data). The
+  `.grow-wrap::after` mirror appends `\200B` (never a real space — that widened the
+  editor and made the cluster jump on click-to-edit).
 - **Column math**: `OutlineLayout` (`lib/layout.ts`) matches the Swift constants exactly
   (indent 22, hInset 18, glyph slot 18·s, gap 6; `guideX(level) = glyphCenterX(level−1)`).
   The ONE deliberate divergence: `lineHeight = fontSize × 1.35`, locked to CSS

@@ -73,7 +73,7 @@ body {
 }
 
 .topbar-title {
-  font-size: 13px;
+  font-size: 0.8125em;
   font-weight: 600;
   color: var(--text-dim);
   white-space: nowrap;
@@ -81,19 +81,22 @@ body {
   text-overflow: ellipsis;
 }
 
+/* em-based: the .topbar (and settings panel) set an inline font-size that scales
+   with ⌘+/⌘− — at 1em = 16px these resolve to the original 26×24 buttons. */
 .bar-btn {
   appearance: none;
   border: none;
   background: transparent;
   color: var(--text-dim);
-  font-size: 16px;
+  font-size: 1em;
   line-height: 1;
-  width: 26px;
-  height: 24px;
-  border-radius: 6px;
+  width: 1.625em;
+  height: 1.5em;
+  border-radius: 0.375em;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: none;
 }
 
 .bar-btn:hover:not(:disabled) {
@@ -108,7 +111,7 @@ body {
 /* The ‹ › ⌂ glyph ink sits low in its em box; lift it so the ink centers on the
    traffic-light midline. Padding (not transform) keeps the hover pill centered. */
 .topbar-left .bar-btn {
-  padding-bottom: 3px;
+  padding-bottom: 0.1875em;
 }
 
 .bar-btn.active {
@@ -134,6 +137,12 @@ body {
   top: 0;
   left: 0;
   width: 100%;
+}
+
+/* Virtualized rows are transformed siblings (each its own stacking context, painted
+   in DOM order) — without this, later rows paint OVER an open ⋯ menu. */
+.vrow:has(.row-menu) {
+  z-index: 5;
 }
 
 /* ---------- Rows ---------- */
@@ -227,7 +236,10 @@ body {
 }
 
 .grow-wrap::after {
-  content: attr(data-value) " ";
+  /* Zero-width space: forces the last line-box after a trailing newline WITHOUT
+     adding advance width — a real " " made the editor a space wider than the
+     static span, so the trailing cluster jumped right on click-to-edit. */
+  content: attr(data-value) "\200B";
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   visibility: hidden;
@@ -278,9 +290,10 @@ body {
   flex: none;
   display: inline-flex;
   align-items: center;
-  margin-left: 4px;
+  margin-left: 0.28em;
 }
 
+/* em-based so the whole cluster rides the row's font size (⌘+/⌘−). */
 .chevron,
 .row-action {
   appearance: none;
@@ -291,9 +304,9 @@ body {
   align-items: center;
   justify-content: center;
   height: 100%;
-  font-size: 12px;
+  font-size: 0.86em;
   line-height: 1;
-  border-radius: 4px;
+  border-radius: 0.3em;
 }
 
 .chevron svg {
@@ -319,11 +332,13 @@ body {
 }
 
 .firstline:hover .row-actions,
-.row-menu-anchor:has(.row-menu) .row-actions {
+.prompt-wrap:hover .row-actions,
+.row-actions:has(.row-menu) {
   opacity: 1;
 }
 
-.firstline:hover .chevron {
+.firstline:hover .chevron,
+.prompt-wrap:hover .chevron {
   color: var(--text-dim);
 }
 
@@ -346,11 +361,11 @@ body {
   top: 100%;
   right: 0;
   z-index: 41;
-  min-width: 130px;
-  background: rgba(34, 34, 40, 0.97);
+  min-width: 10em;
+  background: rgb(37, 37, 43);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  padding: 4px;
+  border-radius: 0.6em;
+  padding: 0.3em;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
   display: flex;
   flex-direction: column;
@@ -362,9 +377,9 @@ body {
   background: transparent;
   color: var(--text);
   text-align: left;
-  font-size: 12.5px;
-  padding: 5px 10px;
-  border-radius: 5px;
+  font-size: 0.92em;
+  padding: 0.38em 0.77em;
+  border-radius: 0.38em;
 }
 
 .row-menu button:hover {
@@ -389,13 +404,32 @@ body {
   border-top: 1px solid rgba(255, 255, 255, 0.18);
 }
 
+/* The prompt panel + its trailing cluster sit side by side; the cluster lives
+   OUTSIDE the input box, top-aligned with its first line. */
+.prompt-wrap {
+  display: flex;
+  align-items: flex-start;
+}
+
+.prompt-wrap > .trailing-cluster {
+  margin-top: 0.5em;
+}
+
 .prompt-panel {
   position: relative;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 10px;
+  flex: 1;
+  min-width: 0;
+  /* Border only while editing (:focus-within) or highlighted — transparent
+     otherwise so an idle prompt reads as plain content. */
+  border: 1px solid transparent;
+  border-radius: 0.71em;
   background: rgba(255, 255, 255, 0.045);
-  padding: 10px 34px 10px 12px;
-  min-height: 58px;
+  padding: 0.71em 2.4em 0.71em 0.86em;
+  min-height: 4.1em;
+}
+
+.prompt-panel:focus-within {
+  border-color: rgba(255, 255, 255, 0.14);
 }
 
 .prompt-line-bullet {
@@ -409,8 +443,8 @@ body {
 
 .prompt-actions {
   position: absolute;
-  top: 6px;
-  right: 6px;
+  top: 0.43em;
+  right: 0.43em;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -424,9 +458,9 @@ body {
 }
 
 .prompt-actions .row-action {
-  width: 22px;
-  height: 22px;
-  font-size: 13px;
+  width: 1.57em;
+  height: 1.57em;
+  font-size: 0.93em;
 }
 
 /* ---------- Placeholders ---------- */
@@ -523,20 +557,25 @@ body {
 
 /* ---------- Settings panel ---------- */
 
+/* Width + font-size come inline from the component (they scale with ⌘+/⌘−);
+   the internals are em so everything rides along. */
 .settings-panel {
   position: fixed;
   top: 60px;
   right: 16px;
   z-index: 50;
-  width: 340px;
+  max-width: calc(100vw - 32px);
   max-height: calc(100% - 90px);
   overflow-y: auto;
   background: rgba(30, 30, 36, 0.97);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 12px;
-  padding: 12px 14px;
+  border-radius: 0.92em;
+  padding: 0.92em 1.08em;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
-  font-size: 13px;
+}
+
+.settings-head .bar-btn {
+  font-size: 1.23em;
 }
 
 .settings-head {
@@ -548,8 +587,8 @@ body {
 }
 
 .settings-section {
-  margin: 12px 0 4px;
-  font-size: 11px;
+  margin: 0.92em 0 0.31em;
+  font-size: 0.85em;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -572,15 +611,15 @@ body {
 }
 
 .settings-row input[type="color"] {
-  width: 30px;
-  height: 20px;
+  width: 2.3em;
+  height: 1.54em;
   border: none;
   background: transparent;
   padding: 0;
 }
 
 .settings-row input[type="range"] {
-  width: 130px;
+  width: 10em;
 }
 
 .settings-actions {
@@ -595,9 +634,9 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.06);
   color: var(--text);
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 6px;
+  font-size: 0.92em;
+  padding: 0.33em 0.83em;
+  border-radius: 0.5em;
 }
 
 .mini-btn:hover {
@@ -605,18 +644,18 @@ body {
 }
 
 .settings-notice {
-  margin-top: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
+  margin-top: 0.62em;
+  padding: 0.46em 0.62em;
+  border-radius: 0.46em;
   background: rgba(6, 255, 154, 0.1);
   color: var(--complete);
-  font-size: 12px;
+  font-size: 0.92em;
 }
 
 .settings-footnote {
-  margin-top: 8px;
+  margin-top: 0.62em;
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: 0.85em;
 }
 
 /* ---------- Focus pane ---------- */

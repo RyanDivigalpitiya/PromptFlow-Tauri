@@ -1,7 +1,15 @@
 import { useSyncExternalStore } from "react";
+import { OutlineLayout } from "../lib/layout";
 import { mirror, nodeVersion, subscribeNode } from "../state/mirror";
 import { useSettings } from "../state/settings";
 import { useWindowState } from "../state/windowState";
+
+/** Toolbar icons ride ⌘+/⌘− but CAPPED so the buttons never outgrow the fixed
+ * 44px strip — the traffic lights can't move at runtime, so the row's midline
+ * (and therefore the strip height) must stay put for them to stay aligned. */
+export function topbarScale(fontSize: number): number {
+  return Math.min(Math.max(OutlineLayout.scale(fontSize), 1), 1.8);
+}
 
 function DrillTitle({ id }: { id: string }) {
   useSyncExternalStore(subscribeNode(id), () => nodeVersion(id));
@@ -19,10 +27,16 @@ export function TopBar() {
   const canForward = useWindowState((s) => s.forward.length > 0);
   const hideCompleted = useWindowState((s) => s.hideCompleted);
   const focusPane = useWindowState((s) => s.focusPaneExpanded);
+  const fontSize = useWindowState((s) => s.fontSize);
+  const ts = topbarScale(fontSize);
   const s = useWindowState.getState;
 
   return (
-    <div className="topbar" data-tauri-drag-region="deep">
+    <div
+      className="topbar"
+      data-tauri-drag-region="deep"
+      style={{ fontSize: 16 * ts }}
+    >
       <div className="topbar-left">
         <button
           className="bar-btn"
@@ -62,7 +76,7 @@ export function TopBar() {
           onClick={() => s().setHideCompleted(!hideCompleted)}
           title={hideCompleted ? "Show completed" : "Hide completed"}
         >
-          <svg width="14" height="14" viewBox="0 0 14 14">
+          <svg width={14 * ts} height={14 * ts} viewBox="0 0 14 14">
             <path
               d="M1 7 C3 3.5 5 2.5 7 2.5 C9 2.5 11 3.5 13 7 C11 10.5 9 11.5 7 11.5 C5 11.5 3 10.5 1 7 Z"
               fill="none"

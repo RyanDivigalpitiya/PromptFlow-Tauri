@@ -270,6 +270,22 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
       return;
     }
 
+    // ⌘↑ collapse / ⌘↓ expand the node the caret is in (NodeTextView keyDown
+    // parity). A childless node falls through to the native caret jump.
+    if (
+      meta &&
+      !e.altKey &&
+      !e.ctrlKey &&
+      !e.shiftKey &&
+      (e.key === "ArrowUp" || e.key === "ArrowDown")
+    ) {
+      if (mirror.hasChildren(p.nodeId)) {
+        e.preventDefault();
+        s.setCollapsed(p.nodeId, e.key === "ArrowUp");
+      }
+      return;
+    }
+
     if (e.key === "Escape") {
       e.preventDefault();
       if (value === "") {

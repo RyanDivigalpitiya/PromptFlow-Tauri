@@ -24,6 +24,9 @@ function handleSelectionKey(e: KeyboardEvent): boolean {
     sel.refresh();
   };
   if (e.key === "Escape") {
+    // An open ⋯ menu is the topmost layer — let its own Escape handler close
+    // it and keep the selection (native NSMenu peels one layer per press).
+    if (document.querySelector(".row-menu")) return false;
     e.preventDefault();
     sel.clear();
     return true;
@@ -136,6 +139,16 @@ export default function App() {
       } else if (e.shiftKey && (e.key === "e" || e.key === "E")) {
         e.preventDefault();
         setCollapsedAll(true); // ⌘⇧E collapse all (per window)
+      } else if (!e.shiftKey && !e.altKey && (e.key === "e" || e.key === "E")) {
+        // ⌘E collapse / ⌘D expand the focused node (the setCollapsedFocused
+        // port) — no-ops without a focused parent node, like the original.
+        e.preventDefault();
+        if (s.focusId && mirror.hasChildren(s.focusId))
+          s.setCollapsed(s.focusId, true);
+      } else if (!e.shiftKey && !e.altKey && (e.key === "d" || e.key === "D")) {
+        e.preventDefault();
+        if (s.focusId && mirror.hasChildren(s.focusId))
+          s.setCollapsed(s.focusId, false);
       } else if (!e.shiftKey && (e.key === "z" || e.key === "Z")) {
         // Normally consumed by the native Edit menu; fallback if it wasn't.
         e.preventDefault();

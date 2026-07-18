@@ -56,10 +56,12 @@ export function resolveKey(key: EditorKey, ctx: KeyContext): KeyDecision {
     case "deleteBackward":
       return ctx.caretAtStartEmpty ? "deleteEmpty" : "passthrough";
     case "moveUp":
-      if (ctx.opt) return "passthrough"; // ⌥Up is move-node, resolved before this
+      // ⌥Up is move-node, ⌘Up is collapse — both resolved in keyDown before this
+      // (the Swift KeyRouting cmd/opt passthrough).
+      if (ctx.opt || ctx.cmd) return "passthrough";
       return ctx.atFirstLine ? "arrowUp" : "passthrough";
     case "moveDown":
-      if (ctx.opt) return "passthrough";
+      if (ctx.opt || ctx.cmd) return "passthrough";
       return ctx.atLastLine ? "arrowDown" : "passthrough";
     case "shiftMoveUp":
       // Shift+Up grows the NODE selection only from the caret's boundary line.

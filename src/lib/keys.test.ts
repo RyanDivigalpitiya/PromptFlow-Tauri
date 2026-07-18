@@ -55,6 +55,11 @@ describe("resolveKey", () => {
     expect(resolveKey("moveDown", ctx({ opt: true }))).toBe("passthrough");
   });
 
+  it("Command+arrows never route as caret moves (collapse/expand handled upstream)", () => {
+    expect(resolveKey("moveUp", ctx({ cmd: true, atFirstLine: true }))).toBe("passthrough");
+    expect(resolveKey("moveDown", ctx({ cmd: true, atLastLine: true }))).toBe("passthrough");
+  });
+
   it("Shift+arrows grow a node selection only from boundary lines", () => {
     expect(resolveKey("shiftMoveUp", ctx({ atFirstLine: true }))).toBe("extendSelectUp");
     expect(resolveKey("shiftMoveUp", ctx({ atFirstLine: false }))).toBe("passthrough");

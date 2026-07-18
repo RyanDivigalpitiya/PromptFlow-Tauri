@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { Theme } from "../lib/layout";
+import { OutlineLayout, Theme } from "../lib/layout";
 import { mirror } from "../state/mirror";
 import { useSettings } from "../state/settings";
 import { useWindowState } from "../state/windowState";
@@ -18,6 +18,10 @@ function todayStamp(): string {
 export function SettingsPanel() {
   const s = useSettings();
   const [notice, setNotice] = useState<string | null>(null);
+  const fontSize = useWindowState((st) => st.fontSize);
+  // The panel rides ⌘+/⌘− (all internals are em); clamped so it neither
+  // shrinks unreadably nor outgrows the window.
+  const ss = Math.min(Math.max(OutlineLayout.scale(fontSize), 0.9), 2.2);
 
   useEffect(() => {
     if (s.settingsOpen) void s.loadBackend();
@@ -89,7 +93,10 @@ export function SettingsPanel() {
   return (
     <>
       <div className="menu-backdrop" onClick={() => s.openSettings(false)} />
-      <div className="settings-panel">
+      <div
+        className="settings-panel"
+        style={{ fontSize: 13 * ss, width: 340 * ss }}
+      >
         <div className="settings-head">
           <span>Settings</span>
           <button className="bar-btn" onClick={() => s.openSettings(false)}>

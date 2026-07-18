@@ -1,4 +1,4 @@
-import { memo, useState, useSyncExternalStore } from "react";
+import { memo, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { OutlineLayout } from "../lib/layout";
 import {
   addRelative,
@@ -15,7 +15,10 @@ import { NoteEditor, RowEditor } from "./RowEditor";
 /** Chevron + hover-revealed "+" / zoom / ⋯ hugging the end of the text (the
  * RowTrailingCluster port). Reveal is pure CSS :hover on the first line — no JS
  * hover state, so pointer movement re-renders nothing (the RowHoverBox lesson,
- * solved at the platform level). */
+ * solved at the platform level). Everything scales with the row font (⌘+/⌘−):
+ * slots via disclosureWidth, glyphs via a scaled SVG size / em font sizes.
+ * A LEAF renders no chevron slot at all (SwiftUI parity) so the hover actions
+ * hug the last character without a phantom gap. */
 function TrailingCluster(p: {
   nodeId: string;
   hasChildren: boolean;
@@ -24,22 +27,66 @@ function TrailingCluster(p: {
   fontSize: number;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const anchorRef = useRef<HTMLSpanElement | null>(null);
   const slot = OutlineLayout.disclosureWidth(p.fontSize);
+  const icon = Math.round(10 * OutlineLayout.scale(p.fontSize));
   const s = useWindowState.getState;
+
+  // Click-away / Escape closes the ⋯ menu. A backdrop div can't do this here:
+  // the virtualized row is transformed, so position:fixed degrades to row-local.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!anchorRef.current?.contains(e.target as Node)) {
+        // Swallow the dismissing press AND its paired click (macOS menu
+        // convention) — otherwise it also lands underneath and can toggle a
+        // checkbox, drill, steal focus, or start a drag.
+        e.preventDefault();
+        e.stopPropagation();
+        const at = Date.now();
+        window.addEventListener(
+          "click",
+          (ev) => {
+            if (Date.now() - at < 500) {
+              ev.preventDefault();
+              ev.stopPropagation();
+            }
+          },
+          { capture: true, once: true },
+        );
+        setMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("mousedown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [menuOpen]);
+
   return (
     <span className="trailing-cluster" style={{ height: OutlineLayout.lineHeight(p.fontSize) }}>
-      <button
-        className={"chevron" + (p.isCollapsed ? " collapsed" : "")}
-        style={{ width: slot, visibility: p.hasChildren ? "visible" : "hidden" }}
-        tabIndex={-1}
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => s().toggleCollapse(p.nodeId)}
-        aria-label={p.isCollapsed ? "Expand" : "Collapse"}
-      >
-        <svg width="10" height="10" viewBox="0 0 10 10">
-          <path d="M2 3.5 L5 6.5 L8 3.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
+      {p.hasChildren && (
+        <button
+          className={"chevron" + (p.isCollapsed ? " collapsed" : "")}
+          style={{ width: slot }}
+          tabIndex={-1}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => s().toggleCollapse(p.nodeId)}
+          aria-label={p.isCollapsed ? "Expand" : "Collapse"}
+        >
+          <svg width={icon} height={icon} viewBox="0 0 10 10">
+            <path d="M2 3.5 L5 6.5 L8 3.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+      )}
       <span className="row-actions">
         <button
           className="row-action"
@@ -60,13 +107,13 @@ function TrailingCluster(p: {
             onClick={() => drillInto(p.nodeId)}
             aria-label="Zoom in"
           >
-            <svg width="10" height="10" viewBox="0 0 10 10">
+            <svg width={icon} height={icon} viewBox="0 0 10 10">
               <circle cx="4.2" cy="4.2" r="3" fill="none" stroke="currentColor" strokeWidth="1.2" />
               <line x1="6.5" y1="6.5" x2="9" y2="9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
             </svg>
           </button>
         )}
-        <span className="row-menu-anchor">
+        <span className="row-menu-anchor" ref={anchorRef}>
           <button
             className="row-action"
             style={{ width: slot }}
@@ -78,9 +125,7 @@ function TrailingCluster(p: {
             ⋯
           </button>
           {menuOpen && (
-            <>
-              <div className="menu-backdrop" onClick={() => setMenuOpen(false)} />
-              <div className="row-menu">
+            <div className="row-menu">
                 {!p.isLine && (
                   <button
                     onClick={() => {
@@ -110,8 +155,7 @@ function TrailingCluster(p: {
                 >
                   Delete
                 </button>
-              </div>
-            </>
+            </div>
           )}
         </span>
       </span>
@@ -233,6 +277,18 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
     </span>
   );
 
+  const cluster = (
+    <TrailingCluster
+      nodeId={p.nodeId}
+      hasChildren={p.hasChildren}
+      isCollapsed={p.isCollapsed}
+      isLine={isLine}
+      fontSize={p.fontSize}
+    />
+  );
+
+  // A prompt's cluster sits OUTSIDE the panel at the row's right edge (SwiftUI
+  // parity) — rendered by the prompt branch below, not inline after the text.
   const firstLine = (
     <div className={"firstline" + (isPrompt ? " prompt" : "")}>
       <div className={"editor-hug" + (isPrompt ? " full" : "")}>
@@ -243,13 +299,7 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
           highlightColor={p.highlightColor}
         />
       </div>
-      <TrailingCluster
-        nodeId={p.nodeId}
-        hasChildren={p.hasChildren}
-        isCollapsed={p.isCollapsed}
-        isLine={isLine}
-        fontSize={p.fontSize}
-      />
+      {!isPrompt && cluster}
       <div
         className="tap-trailing"
         onMouseDown={(e) => {
@@ -291,12 +341,11 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
           </div>
         ) : isPrompt ? (
           <div className="content">
+            <div className="prompt-wrap">
             <div
               className={"prompt-panel" + (rec.isHighlighted ? " highlighted" : "")}
               style={{
-                borderColor: rec.isHighlighted
-                  ? p.highlightColor
-                  : "rgba(255,255,255,0.14)",
+                borderColor: rec.isHighlighted ? p.highlightColor : undefined,
               }}
             >
               <span
@@ -324,6 +373,8 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
                   ⧉
                 </button>
               </div>
+            </div>
+            {cluster}
             </div>
           </div>
         ) : (
