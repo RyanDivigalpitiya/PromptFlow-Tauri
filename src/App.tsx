@@ -3,8 +3,12 @@ import { FocusPane } from "./components/FocusPane";
 import { OutlineView } from "./components/OutlineView";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { TopBar } from "./components/TopBar";
-import { api } from "./lib/api";
-import { copyBlock, setCollapsedAll } from "./state/controller";
+import { api, onRowMenuAction } from "./lib/api";
+import {
+  copyBlock,
+  performRowMenuAction,
+  setCollapsedAll,
+} from "./state/controller";
 import { mirror, startMirror, subscribeStructure } from "./state/mirror";
 import { selectionIds, useSelection } from "./state/selection";
 import { useSettings } from "./state/settings";
@@ -99,6 +103,14 @@ export default function App() {
   // A structural change can move/remove selection members — re-resolve.
   useEffect(() => {
     return subscribeStructure(() => useSelection.getState().refresh());
+  }, []);
+
+  // Native row (⋯) menu selections arrive as events from Rust — run them here.
+  useEffect(() => {
+    const un = onRowMenuAction((action, node) => {
+      void performRowMenuAction(action, node);
+    });
+    return () => void un.then((f) => f());
   }, []);
 
   // Trackpad pinch → font size (the MagnifyGesture port): WebKit delivers pinch as

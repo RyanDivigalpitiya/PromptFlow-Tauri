@@ -41,7 +41,7 @@ export const OutlineLayout = {
 
   /** Side/diameter of a PARENT node's progress glyph (bullet ring / checkbox circle). */
   parentGlyphSize(fontSize: number): number {
-    return 16 * OutlineLayout.scale(fontSize);
+    return 14 * OutlineLayout.scale(fontSize);
   },
 
   /** Width of the trailing cluster's fixed slots (chevron / + / zoom / ⋯). */

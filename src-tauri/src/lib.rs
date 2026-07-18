@@ -189,6 +189,27 @@ pub fn run() {
             #[cfg(not(target_os = "macos"))]
             let _ = &window_menu;
             app.on_menu_event(|app, event| match event.id().0.as_str() {
+                // Native row (⋯) menu selection: id = pf-row:<action>:<window>:<node>.
+                // Route it back to the window that opened the menu so the frontend runs
+                // its own drill/copy/delete logic on the right node.
+                s if s.starts_with("pf-row:") => {
+                    let mut parts = s.splitn(4, ':');
+                    let _ = parts.next(); // "pf-row"
+                    if let (Some(action), Some(label), Some(node)) =
+                        (parts.next(), parts.next(), parts.next())
+                    {
+                        #[derive(Clone, serde::Serialize)]
+                        struct RowMenuAction<'a> {
+                            action: &'a str,
+                            node: &'a str,
+                        }
+                        let _ = app.emit_to(
+                            tauri::EventTarget::webview_window(label),
+                            "row-menu-action",
+                            RowMenuAction { action, node },
+                        );
+                    }
+                }
                 "pf-new-window" => {
                     let _ = spawn_window(app);
                 }
@@ -255,6 +276,7 @@ pub fn run() {
             commands::archive_dir_path,
             commands::get_setting,
             commands::set_setting,
+            commands::popup_row_menu,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

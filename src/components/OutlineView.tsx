@@ -118,11 +118,23 @@ export function OutlineView() {
     paddingStart: OutlineLayout.documentVInset,
   });
 
-  // Keep the focused row on screen (presence-gated, like the Swift attemptScroll).
+  // Scroll a focused row into view ONLY when it's fully off-screen (presence-gated,
+  // like the Swift attemptScroll). A row already at least partly visible — e.g. one
+  // the user just clicked — is left exactly where it is, so clicking a node never
+  // yanks the view to an "optimal" position for it.
   useEffect(() => {
     if (!focusId) return;
     const idx = rows.findIndex((r) => r.kind === "node" && r.nodeId === focusId);
-    if (idx >= 0) virtualizer.scrollToIndex(idx, { align: "auto" });
+    if (idx < 0) return;
+    const scrollEl = scrollRef.current;
+    const m = virtualizer.measurementsCache[idx];
+    if (scrollEl && m) {
+      const top = scrollEl.scrollTop;
+      const bottom = top + scrollEl.clientHeight;
+      // Any overlap with the viewport ⇒ already present; don't reposition.
+      if (m.end > top && m.start < bottom) return;
+    }
+    virtualizer.scrollToIndex(idx, { align: "auto" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusId, focusEpoch, rows]);
 
@@ -169,6 +181,8 @@ export function OutlineView() {
       >
         {items.map((vi) => {
           const row = rows[vi.index];
+          const prevDepth = rows[vi.index - 1]?.depth ?? -1;
+          const nextDepth = rows[vi.index + 1]?.depth ?? -1;
           return (
             <div
               key={vi.key}
@@ -181,6 +195,8 @@ export function OutlineView() {
                 <NodeRow
                   nodeId={row.nodeId}
                   depth={row.depth}
+                  prevDepth={prevDepth}
+                  nextDepth={nextDepth}
                   hasChildren={row.hasChildren}
                   isCollapsed={row.isCollapsed}
                   isFocused={focusId === row.nodeId && focusField === "main"}
@@ -202,6 +218,8 @@ export function OutlineView() {
                 <AddChildRow
                   parentId={row.nodeId}
                   depth={row.depth}
+                  prevDepth={prevDepth}
+                  nextDepth={nextDepth}
                   fontSize={fontSize}
                   showGuides={showGuides}
                   guideColor={guideColor}
@@ -223,7 +241,11 @@ export function OutlineView() {
         <DragOverlay fontSize={fontSize} />
       </div>
       <div className="bottom-add">
-        <button className="add-child-btn" onClick={() => void addAtBottom()}>
+        <button
+          className="add-child-btn"
+          style={{ width: OutlineLayout.bulletHitSize(fontSize), fontSize }}
+          onClick={() => void addAtBottom()}
+        >
           +
         </button>
         {(() => {

@@ -37,7 +37,7 @@ export const Glyph = memo(function Glyph(p: GlyphProps) {
     return <span style={{ width: size, height: size, flex: "none" }} />;
   }
   if (p.kind === "line") {
-    const stroke = Math.max(2.5, 2.5 * OutlineLayout.scale(p.fontSize));
+    const stroke = Math.max(1.5, 2.5 * OutlineLayout.scale(p.fontSize) - 1);
     return (
       <span className="glyph-dash" style={{ width: size, height: size }}>
         <svg width={size} height={size}>
@@ -62,7 +62,7 @@ export const Glyph = memo(function Glyph(p: GlyphProps) {
   if (p.kind === "checkbox") {
     const d = p.isParent
       ? OutlineLayout.parentGlyphSize(p.fontSize)
-      : Math.round(13 * OutlineLayout.scale(p.fontSize));
+      : Math.round(11.5 * OutlineLayout.scale(p.fontSize));
     const c = d / 2;
     const r = c - 1;
     const border = accented
@@ -73,7 +73,7 @@ export const Glyph = memo(function Glyph(p: GlyphProps) {
     return (
       <span className="glyph-box" style={{ width: size, height: size }}>
         <svg width={d} height={d}>
-          <circle cx={c} cy={c} r={r} fill="none" stroke={border} strokeWidth={1.3} />
+          <circle cx={c} cy={c} r={r} fill="none" stroke={border} strokeWidth={1.5} />
           {p.isParent ? (
             // A checkbox parent fills with the SAME wedge as a bullet parent —
             // minus the centre dot, so it reads as a plain pie.

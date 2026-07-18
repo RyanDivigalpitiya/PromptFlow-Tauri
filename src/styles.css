@@ -100,7 +100,7 @@ body {
 }
 
 .bar-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.09);
+  /* No background pill on hover — only the icon brightens. */
   color: var(--text);
 }
 
@@ -328,8 +328,8 @@ body {
 
 .chevron:hover,
 .row-action:hover {
+  /* No background pill on hover — only the icon brightens. */
   color: var(--text);
-  background: rgba(255, 255, 255, 0.08);
 }
 
 .row-actions {
@@ -426,7 +426,9 @@ body {
 }
 
 .prompt-wrap > .trailing-cluster {
-  margin-top: 0.5em;
+  /* Drop by the panel's top border + padding so the cluster's line box coincides
+     with the first text line's — its buttons center on that first line. */
+  margin-top: calc(0.71em + 1px);
 }
 
 .prompt-panel {
@@ -436,10 +438,11 @@ body {
   /* Border only while editing (:focus-within) or highlighted — transparent
      otherwise so an idle prompt reads as plain content. */
   border: 1px solid transparent;
-  border-radius: 0.71em;
+  border-radius: 0.5em;
   background: rgba(255, 255, 255, 0.045);
   padding: 0.71em 0.86em;
-  min-height: 4.1em;
+  /* An empty prompt is one text line tall (1.35em) + vertical padding + borders. */
+  min-height: 2.9em;
 }
 
 .prompt-panel:focus-within {
@@ -450,8 +453,8 @@ body {
    glyph column, like every other bullet). */
 .prompt-line-bullet {
   position: absolute;
-  top: 0.43em;
-  bottom: 0.43em;
+  top: 0.28em;
+  bottom: 0.28em;
   border-radius: 99px;
 }
 
@@ -475,9 +478,9 @@ body {
 }
 
 .add-child-btn:hover {
+  /* No background pill on hover — only the icon brightens. */
   opacity: 1;
   color: var(--text);
-  background: rgba(255, 255, 255, 0.08);
 }
 
 .hidden-completed-hint {

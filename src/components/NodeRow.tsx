@@ -1,12 +1,7 @@
-import { memo, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useSyncExternalStore } from "react";
+import { api } from "../lib/api";
 import { OutlineLayout } from "../lib/layout";
-import { toMarkdown } from "../lib/runs";
-import {
-  addRelative,
-  copySubtree,
-  deleteAndFocusPrev,
-  drillInto,
-} from "../state/controller";
+import { addRelative, drillInto } from "../state/controller";
 import { glyphMouseDown } from "../state/dragGesture";
 import { mirror, nodeVersion, subscribeNode } from "../state/mirror";
 import { useWindowState } from "../state/windowState";
@@ -25,53 +20,11 @@ function TrailingCluster(p: {
   hasChildren: boolean;
   isCollapsed: boolean;
   isLine: boolean;
-  isPrompt: boolean;
   fontSize: number;
 }) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const anchorRef = useRef<HTMLSpanElement | null>(null);
   const slot = OutlineLayout.disclosureWidth(p.fontSize);
   const icon = Math.round(10 * OutlineLayout.scale(p.fontSize));
   const s = useWindowState.getState;
-
-  // Click-away / Escape closes the ⋯ menu. A backdrop div can't do this here:
-  // the virtualized row is transformed, so position:fixed degrades to row-local.
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (!anchorRef.current?.contains(e.target as Node)) {
-        // Swallow the dismissing press AND its paired click (macOS menu
-        // convention) — otherwise it also lands underneath and can toggle a
-        // checkbox, drill, steal focus, or start a drag.
-        e.preventDefault();
-        e.stopPropagation();
-        const at = Date.now();
-        window.addEventListener(
-          "click",
-          (ev) => {
-            if (Date.now() - at < 500) {
-              ev.preventDefault();
-              ev.stopPropagation();
-            }
-          },
-          { capture: true, once: true },
-        );
-        setMenuOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        setMenuOpen(false);
-      }
-    };
-    window.addEventListener("mousedown", onDown, true);
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      window.removeEventListener("mousedown", onDown, true);
-      window.removeEventListener("keydown", onKey, true);
-    };
-  }, [menuOpen]);
 
   // No preventDefault on these buttons' mousedown: pressing ANY row control is
   // meant to defocus a node being edited (the natural focus steal does it).
@@ -108,125 +61,73 @@ function TrailingCluster(p: {
             onClick={() => drillInto(p.nodeId)}
             aria-label="Zoom in"
           >
-            <svg width={icon} height={icon} viewBox="0 0 10 10">
-              <circle cx="4.2" cy="4.2" r="3" fill="none" stroke="currentColor" strokeWidth="1.2" />
-              <line x1="6.5" y1="6.5" x2="9" y2="9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+            {/* Reproduction of the SF Symbol `text.line.2.summary` (SF Symbols can't
+                be referenced by name in a WebKit view — all icons here are inline
+                SVG): two text lines feeding an L-shaped flow arrow. */}
+            <svg
+              width={Math.round(12 * OutlineLayout.scale(p.fontSize))}
+              height={Math.round(11 * OutlineLayout.scale(p.fontSize))}
+              viewBox="0 0 22 20"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <line x1="10" y1="5" x2="20" y2="5" />
+              <line x1="10" y1="9.5" x2="16" y2="9.5" />
+              <path d="M5 4 V11 a4 4 0 0 0 4 4 H15" />
+              <path d="M15 11.8 L20.5 15 L15 18.2 Z" fill="currentColor" strokeWidth={1} />
             </svg>
           </button>
         )}
-        <span className="row-menu-anchor" ref={anchorRef}>
-          <button
-            className="row-action"
-            style={{ width: slot }}
-            tabIndex={-1}
-            onClick={() => setMenuOpen((v) => !v)}
-            aria-label="Node menu"
-          >
-            ⋯
-          </button>
-          {menuOpen && (
-            <div className="row-menu">
-                {!p.isLine && (
-                  <button
-                    onClick={() => {
-                      setMenuOpen(false);
-                      drillInto(p.nodeId);
-                    }}
-                  >
-                    Zoom In
-                  </button>
-                )}
-                {p.isPrompt ? (
-                  <>
-                    <button
-                      onClick={() => {
-                        setMenuOpen(false);
-                        const r = mirror.get(p.nodeId);
-                        if (r)
-                          void navigator.clipboard.writeText(
-                            toMarkdown(r.text, {
-                              bold: r.boldRanges,
-                              italic: r.italicRanges,
-                              underline: r.underlineRanges,
-                            }),
-                          );
-                      }}
-                    >
-                      Copy Markdown
-                    </button>
-                    <button
-                      onClick={() => {
-                        setMenuOpen(false);
-                        const r = mirror.get(p.nodeId);
-                        if (r) void navigator.clipboard.writeText(r.text);
-                      }}
-                    >
-                      Copy Raw
-                    </button>
-                    {p.hasChildren && (
-                      <button
-                        onClick={() => {
-                          setMenuOpen(false);
-                          void copySubtree(p.nodeId);
-                        }}
-                      >
-                        Copy Subtree
-                      </button>
-                    )}
-                  </>
-                ) : (
-                  !p.isLine && (
-                    <button
-                      onClick={() => {
-                        setMenuOpen(false);
-                        void copySubtree(p.nodeId);
-                      }}
-                    >
-                      Copy
-                    </button>
-                  )
-                )}
-                <button
-                  className="danger"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    void confirmDelete(p.nodeId);
-                  }}
-                >
-                  Delete
-                </button>
-            </div>
-          )}
-        </span>
+        <button
+          className="row-action"
+          style={{ width: slot }}
+          tabIndex={-1}
+          onClick={(e) => {
+            // Open the NATIVE macOS row menu at the button, dropping down from its
+            // bottom-left. Rust builds the items per node kind and routes the
+            // selection back as a `row-menu-action` event (see controller).
+            const r = e.currentTarget.getBoundingClientRect();
+            void api.popupRowMenu(p.nodeId, r.left, r.bottom);
+          }}
+          aria-label="Node menu"
+        >
+          ⋯
+        </button>
       </span>
     </span>
   );
 }
 
-/** Delete via the menu: whole subtree, confirming when it's big (the
- * bulletDeleteWarningThreshold port). */
-async function confirmDelete(nodeId: string) {
-  if (!mirror.get(nodeId)) return; // blur-prune may have beaten this click
-  const count = mirror.descendantsCount(nodeId) - 1;
-  if (count >= 10) {
-    const ok = window.confirm(
-      `Delete this node and its ${count} nested items? (⌘Z undoes)`,
-    );
-    if (!ok) return;
-  }
-  await deleteAndFocusPrev(nodeId);
-}
-
-/** Faint unbroken vertical guides — one per ancestor level at the ancestor's glyph
- * column — plus the expanded parent's child-connector stub. Anchored on the ROW
- * element (guideX measures from the document's leading edge + documentHInset), so
- * every guide falls inside the row's empty indent gutter. */
+/** Faint vertical guides — one per ancestor level at the ancestor's glyph column.
+ * Anchored on the ROW element (guideX measures from the document's leading edge +
+ * documentHInset), so every guide falls inside the row's empty indent gutter. A guide
+ * "run" is the contiguous column of rows at ≥ that level; only the run's two END
+ * segments get an inset, so the line reads as one solid stroke with clear air at its
+ * top (below the parent's dot) and bottom (above the next node) — never dashed. */
 function IndentGuides(p: {
   depth: number;
+  /** Depth of the PREVIOUS rendered row (−1 if none) — a level's run STARTS on this
+   * row when `level > prevDepth`, so that segment gets a top gap. */
+  prevDepth: number;
+  /** Depth of the NEXT rendered row (−1 if none) — a level's run ENDS on this row
+   * when `level > nextDepth`, so that segment gets a bottom gap. */
+  nextDepth: number;
   fontSize: number;
-  expandedParent: boolean;
   color: string;
 }) {
+  // The 1px guide is CENTERED on the glyph column (left = column − ½·width), not
+  // hung off its left edge — so it lines up with the prompt bar and the checkbox/
+  // bullet glyphs, which are all centered on that same column. (The prompt bar is
+  // 2/3px and the guide 1px; centering both on the column is the closest they can
+  // sit given the odd/even widths.)
+  const scale = OutlineLayout.scale(p.fontSize);
+  const GUIDE_W = 1;
+  const colLeft = (level: number) =>
+    OutlineLayout.documentHInset + OutlineLayout.guideX(level, p.fontSize) - GUIDE_W / 2;
+  const endGap = 9 * scale;
   const lines = [];
   for (let level = 1; level <= p.depth; level++) {
     lines.push(
@@ -234,27 +135,10 @@ function IndentGuides(p: {
         key={level}
         className="indent-guide"
         style={{
-          left: OutlineLayout.documentHInset + OutlineLayout.guideX(level, p.fontSize),
+          left: colLeft(level),
           background: p.color,
-        }}
-      />,
-    );
-  }
-  if (p.expandedParent) {
-    // The child-connector drops from below the glyph to the row bottom, on the SAME
-    // column the children draw (guideX identity).
-    const top =
-      OutlineLayout.glyphCenterY(p.fontSize) + 14 * OutlineLayout.scale(p.fontSize);
-    lines.push(
-      <span
-        key="connector"
-        className="indent-guide"
-        style={{
-          left:
-            OutlineLayout.documentHInset +
-            OutlineLayout.guideX(p.depth + 1, p.fontSize),
-          top,
-          background: p.color,
+          top: level > p.prevDepth ? endGap : undefined,
+          bottom: level > p.nextDepth ? endGap : undefined,
         }}
       />,
     );
@@ -265,6 +149,9 @@ function IndentGuides(p: {
 export interface NodeRowProps {
   nodeId: string;
   depth: number;
+  /** Depth of the prev/next rendered rows (−1 if none) — for indent-guide end gaps. */
+  prevDepth: number;
+  nextDepth: number;
   hasChildren: boolean;
   isCollapsed: boolean;
   isFocused: boolean;
@@ -324,14 +211,13 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
       hasChildren={p.hasChildren}
       isCollapsed={p.isCollapsed}
       isLine={isLine}
-      isPrompt={isPrompt}
       fontSize={p.fontSize}
     />
   );
 
   // The prompt's leading bar sits ON the shared glyph column (bullet centers), not
   // hugging the panel edge — panel-relative offset back to the slot center.
-  const promptBarWidth = Math.max(2, Math.round(2.5 * scale));
+  const promptBarWidth = Math.max(1, Math.round(2.5 * scale) - 1);
   // −1: the abs-positioned bar's containing block is the panel's PADDING box,
   // one border-px right of where the glyph-column math starts.
   const promptBarLeft =
@@ -358,6 +244,9 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
         className="tap-trailing"
         onMouseDown={(e) => {
           e.preventDefault();
+          // Prompt rows wrap this in a panel that ALSO focuses on empty-space
+          // clicks — don't let this bubble up and double-fire the focus.
+          e.stopPropagation();
           useWindowState.getState().focusNode(p.nodeId, "main", { type: "end" });
         }}
       />
@@ -382,8 +271,9 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
       {p.showGuides && (
         <IndentGuides
           depth={p.depth}
+          prevDepth={p.prevDepth}
+          nextDepth={p.nextDepth}
           fontSize={p.fontSize}
-          expandedParent={p.hasChildren && !p.isCollapsed}
           color={p.guideColor}
         />
       )}
@@ -403,9 +293,18 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
                 borderColor: rec.isHighlighted ? p.highlightColor : undefined,
               }}
               onMouseDown={(e) => {
-                // Anywhere in the panel's empty space focuses the editor — only
-                // direct panel hits, so text/buttons/note keep their own behavior.
-                if (e.target !== e.currentTarget || e.button !== 0) return;
+                if (e.button !== 0) return;
+                // Clicking ANYWHERE in the panel focuses the editor — including the
+                // editor's empty grown gutter and the panel's blank space below the
+                // text. Only the text, note, and leading bar are exempt (each owns
+                // its own click: caret placement, note focus, drill/drag).
+                const t = e.target as HTMLElement;
+                if (
+                  t.closest(
+                    ".node-text-wrap, .node-note-static, .note-wrap, .prompt-line-bullet",
+                  )
+                )
+                  return;
                 e.preventDefault();
                 useWindowState
                   .getState()
@@ -449,6 +348,8 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
 export const AddChildRow = memo(function AddChildRow(p: {
   parentId: string;
   depth: number;
+  prevDepth: number;
+  nextDepth: number;
   fontSize: number;
   hiddenCount: number | null;
   showGuides: boolean;
@@ -469,8 +370,9 @@ export const AddChildRow = memo(function AddChildRow(p: {
       {p.showGuides && (
         <IndentGuides
           depth={p.depth}
+          prevDepth={p.prevDepth}
+          nextDepth={p.nextDepth}
           fontSize={p.fontSize}
-          expandedParent={false}
           color={p.guideColor}
         />
       )}

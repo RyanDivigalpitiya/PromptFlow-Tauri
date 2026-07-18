@@ -7,6 +7,7 @@ export function dbg(msg: string) {
   void invoke("log_msg", { msg }).catch(() => {});
 }
 import type { KeyDecision } from "../lib/keys";
+import { toMarkdown } from "../lib/runs";
 import { inheritableKind, type NodeKind } from "../lib/types";
 import { mirror } from "./mirror";
 import { useSelection } from "./selection";
@@ -168,6 +169,51 @@ export async function deleteAndFocusPrev(nodeId: string) {
   const s = ws();
   if (prev) s.focusNode(prev.nodeId, "main", { type: "end" });
   else s.clearFocus();
+}
+
+/** Delete a node's whole subtree, confirming when it's big (the
+ * bulletDeleteWarningThreshold port). */
+export async function confirmDelete(nodeId: string) {
+  if (!mirror.get(nodeId)) return; // a blur-prune may have beaten this
+  const count = mirror.descendantsCount(nodeId) - 1;
+  if (count >= 10) {
+    const ok = window.confirm(
+      `Delete this node and its ${count} nested items? (⌘Z undoes)`,
+    );
+    if (!ok) return;
+  }
+  await deleteAndFocusPrev(nodeId);
+}
+
+/** Run a native row-(⋯)-menu selection through the existing gesture handlers — the
+ * same actions the old in-app dropdown fired, so behavior stays identical. */
+export async function performRowMenuAction(action: string, nodeId: string) {
+  const rec = mirror.get(nodeId);
+  if (!rec) return;
+  switch (action) {
+    case "zoom":
+      drillInto(nodeId);
+      break;
+    case "copy":
+    case "copy-subtree":
+      await copySubtree(nodeId);
+      break;
+    case "copy-md":
+      await navigator.clipboard.writeText(
+        toMarkdown(rec.text, {
+          bold: rec.boldRanges,
+          italic: rec.italicRanges,
+          underline: rec.underlineRanges,
+        }),
+      );
+      break;
+    case "copy-raw":
+      await navigator.clipboard.writeText(rec.text);
+      break;
+    case "delete":
+      await confirmDelete(nodeId);
+      break;
+  }
 }
 
 /** Prune an abandoned empty node when focus leaves it (the OutlineFocus.onDefocus

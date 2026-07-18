@@ -490,3 +490,70 @@ pub fn get_setting(state: State<StoreState>, key: String) -> Result<Option<Strin
 pub fn set_setting(state: State<StoreState>, key: String, value: String) -> Result<(), String> {
     state.lock().unwrap().set_setting(&key, &value)
 }
+
+/// Native row context menu for the ⋯ button — built per node kind, popped up at the
+/// button. The chosen item is routed back to the OPENING window as a `row-menu-action`
+/// event (see the app-wide menu handler in `lib.rs`), so the frontend reuses its
+/// existing drill / copy / delete gestures. Item ids encode
+/// `pf-row:<action>:<window-label>:<node-uuid>`. Built + shown on the main thread
+/// (AppKit menus are main-thread only; a `#[tauri::command]` may run off it).
+#[tauri::command]
+pub fn popup_row_menu(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<StoreState>,
+    node: Uuid,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    let (kind, has_children) = {
+        let store = state.lock().unwrap();
+        let rec = store.get(node).ok_or("node not found")?;
+        (rec.kind, !store.ordered_children(node).is_empty())
+    };
+    let label = window.label().to_string();
+    let win = window.clone();
+    window
+        .run_on_main_thread(move || {
+            use tauri::menu::{MenuBuilder, MenuItemBuilder};
+            let result = (|| -> tauri::Result<()> {
+                let id = |action: &str| format!("pf-row:{action}:{label}:{node}");
+                let mut items = Vec::new();
+                if kind != NodeKind::Line {
+                    items.push(MenuItemBuilder::with_id(id("zoom"), "Zoom In").build(&app)?);
+                }
+                match kind {
+                    NodeKind::PromptDraft => {
+                        items.push(
+                            MenuItemBuilder::with_id(id("copy-md"), "Copy Markdown").build(&app)?,
+                        );
+                        items.push(MenuItemBuilder::with_id(id("copy-raw"), "Copy Raw").build(&app)?);
+                        if has_children {
+                            items.push(
+                                MenuItemBuilder::with_id(id("copy-subtree"), "Copy Subtree")
+                                    .build(&app)?,
+                            );
+                        }
+                    }
+                    NodeKind::Line => {}
+                    _ => items.push(MenuItemBuilder::with_id(id("copy"), "Copy").build(&app)?),
+                }
+                let mut b = MenuBuilder::new(&app);
+                for it in &items {
+                    b = b.item(it);
+                }
+                if !items.is_empty() {
+                    b = b.separator();
+                }
+                let del = MenuItemBuilder::with_id(id("delete"), "Delete").build(&app)?;
+                let menu = b.item(&del).build()?;
+                win.popup_menu_at(&menu, tauri::LogicalPosition::new(x, y))?;
+                Ok(())
+            })();
+            if let Err(e) = result {
+                eprintln!("popup_row_menu: {e}");
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}

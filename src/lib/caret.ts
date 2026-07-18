@@ -94,13 +94,22 @@ function isSentinel(n: Node): boolean {
 /** The editor's text: text nodes in document order; <br> counts as "\n". */
 export function serializeEditor(el: HTMLElement): string {
   let out = "";
+  let hasText = false;
   const walk = (n: Node) => {
-    if (n.nodeType === Node.TEXT_NODE) out += n.nodeValue ?? "";
-    else if (n.nodeName === "BR") {
+    if (n.nodeType === Node.TEXT_NODE) {
+      const v = n.nodeValue ?? "";
+      if (v.length > 0) hasText = true;
+      out += v;
+    } else if (n.nodeName === "BR") {
       if (!isSentinel(n)) out += "\n";
     } else n.childNodes.forEach(walk);
   };
   el.childNodes.forEach(walk);
+  // A lone <br> with NO text is WebKit's placeholder for an emptied contenteditable,
+  // not a real newline — serializing it as "\n" left just-emptied nodes holding "\n"
+  // (so they no longer counted as empty and Backspace stopped deleting them). Treat it
+  // as empty. A genuine newline node renders text via buildRunDom, so hasText is true.
+  if (!hasText && out === "\n") return "";
   return out;
 }
 

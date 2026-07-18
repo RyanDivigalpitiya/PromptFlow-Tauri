@@ -109,8 +109,21 @@ export const api = {
 
   seedDemo: (roots: number, children: number, grandchildren: number) =>
     invoke<number>("seed_demo", { roots, children, grandchildren }),
+
+  /** Pop up the native row (⋯) context menu at (x, y) in window coordinates. */
+  popupRowMenu: (node: string, x: number, y: number) =>
+    invoke<void>("popup_row_menu", { node, x, y }),
 };
 
 export function onDelta(cb: (delta: Delta) => void): Promise<UnlistenFn> {
   return listen<Delta>("store://delta", (e) => cb(e.payload));
+}
+
+/** Selection from the native row (⋯) menu, routed back to THIS window from Rust. */
+export function onRowMenuAction(
+  cb: (action: string, node: string) => void,
+): Promise<UnlistenFn> {
+  return listen<{ action: string; node: string }>("row-menu-action", (e) =>
+    cb(e.payload.action, e.payload.node),
+  );
 }
