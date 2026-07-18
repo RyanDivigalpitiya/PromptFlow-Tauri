@@ -246,3 +246,10 @@ useWindowState.subscribe((s) => {
 });
 
 export const windowLabel = label;
+
+// Module-level state must never be split across HMR generations — a hot update that
+// swapped this module would strand components on a fresh empty instance. Decline hot
+// updates so edits here trigger a FULL reload instead.
+if (import.meta.hot) {
+  import.meta.hot.decline();
+}

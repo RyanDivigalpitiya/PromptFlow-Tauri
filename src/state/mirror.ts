@@ -218,6 +218,21 @@ export const mirror = {
     for (const k of kids) if (nodes.get(k)?.isCompleted) done++;
     return done / kids.length;
   },
+  /** `id`'s whole subtree (self included), parents before children. Cycle-guarded. */
+  descendants(id: string): string[] {
+    const out: string[] = [];
+    const stack = [id];
+    const seen = new Set<string>();
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      out.push(cur);
+      const kids = children.get(cur);
+      if (kids) for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    }
+    return out;
+  },
   /** Size of `id`'s subtree, self included. */
   descendantsCount(id: string): number {
     let n = 0;
@@ -288,4 +303,11 @@ export function subscribeUndo(cb: () => void): () => void {
 
 export function undoVersionNow(): number {
   return undoVersion;
+}
+
+// Module-level state must never be split across HMR generations — a hot update that
+// swapped this module would strand components on a fresh empty instance. Decline hot
+// updates so edits here trigger a FULL reload instead.
+if (import.meta.hot) {
+  import.meta.hot.decline();
 }

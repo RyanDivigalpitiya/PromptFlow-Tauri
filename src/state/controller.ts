@@ -9,6 +9,7 @@ export function dbg(msg: string) {
 import type { KeyDecision } from "../lib/keys";
 import { inheritableKind, type NodeKind } from "../lib/types";
 import { mirror } from "./mirror";
+import { useSelection } from "./selection";
 import { useWindowState, type CaretIntent } from "./windowState";
 
 /** The outline's gesture semantics — the port of OutlineView's glue between key
@@ -100,6 +101,29 @@ export async function performDecision(
     case "arrowDown": {
       const next = neighborNode(nodeId, 1);
       if (next) ws().focusNode(next.nodeId, "main", { type: "start" });
+      break;
+    }
+    case "extendSelectUp":
+    case "extendSelectDown": {
+      // ⇧↑/⇧↓ at a boundary line grows a NODE selection from the caret's node to its
+      // nearest visible sibling; no visible sibling → stay native (no-op here).
+      const node = mirror.get(nodeId);
+      if (!node) break;
+      const dir = decision === "extendSelectUp" ? -1 : 1;
+      const sibs = mirror.childrenOf(node.parent);
+      let i = sibs.indexOf(nodeId) + dir;
+      while (
+        i >= 0 &&
+        i < sibs.length &&
+        ws().hideCompleted &&
+        mirror.get(sibs[i])?.isCompleted
+      ) {
+        i += dir;
+      }
+      if (i < 0 || i >= sibs.length) break;
+      ws().clearFocus();
+      (document.activeElement as HTMLElement | null)?.blur();
+      useSelection.getState().start(nodeId, sibs[i]);
       break;
     }
     default:
@@ -237,18 +261,33 @@ export function setCollapsedAll(collapsed: boolean) {
   s.collapseAll(parents);
 }
 
+function subtreeLines(nodeId: string, lines: string[], depth = 0) {
+  const n = mirror.get(nodeId);
+  if (!n) return;
+  if (n.kind !== "line") {
+    lines.push("  ".repeat(depth) + "- " + n.text);
+    if (n.note !== "") lines.push("  ".repeat(depth + 1) + n.note);
+  }
+  for (const k of mirror.childrenOf(nodeId)) subtreeLines(k, lines, depth + 1);
+}
+
 /** Copy a node's whole subtree to the clipboard as an indented "- " bullet list. */
 export async function copySubtree(nodeId: string) {
   const lines: string[] = [];
-  const walk = (id: string, depth: number) => {
-    const n = mirror.get(id);
-    if (!n) return;
-    if (n.kind !== "line") {
-      lines.push("  ".repeat(depth) + "- " + n.text);
-      if (n.note !== "") lines.push("  ".repeat(depth + 1) + n.note);
-    }
-    for (const k of mirror.childrenOf(id)) walk(k, depth + 1);
-  };
-  walk(nodeId, 0);
+  subtreeLines(nodeId, lines);
   await navigator.clipboard.writeText(lines.join("\n"));
+}
+
+/** ⌘C on a multi-selection: every member's full subtree, collapsed included. */
+export async function copyBlock(ids: string[]) {
+  const lines: string[] = [];
+  for (const id of ids) subtreeLines(id, lines);
+  await navigator.clipboard.writeText(lines.join("\n"));
+}
+
+// Module-level state must never be split across HMR generations — a hot update that
+// swapped this module would strand components on a fresh empty instance. Decline hot
+// updates so edits here trigger a FULL reload instead.
+if (import.meta.hot) {
+  import.meta.hot.decline();
 }

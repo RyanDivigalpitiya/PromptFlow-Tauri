@@ -3,11 +3,10 @@ import { OutlineLayout } from "../lib/layout";
 import {
   addRelative,
   copySubtree,
-  dbg,
   deleteAndFocusPrev,
   drillInto,
-  toggleCompleted,
 } from "../state/controller";
+import { glyphMouseDown } from "../state/dragGesture";
 import { mirror, nodeVersion, subscribeNode } from "../state/mirror";
 import { useWindowState } from "../state/windowState";
 import { Glyph } from "./Glyphs";
@@ -191,6 +190,12 @@ export interface NodeRowProps {
   showGuides: boolean;
   guideColor: string;
   highlightColor: string;
+  /** Member of the live multi-selection. */
+  isSelected: boolean;
+  /** Descendant of a selected member (lighter tint). */
+  isSelTinted: boolean;
+  /** Part of the subtree being dragged (dimmed in place). */
+  isDragDimmed: boolean;
 }
 
 export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
@@ -213,12 +218,7 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
         width: OutlineLayout.bulletHitSize(p.fontSize),
         height: OutlineLayout.lineHeight(p.fontSize),
       }}
-      onMouseDown={(e) => e.preventDefault()}
-      onClick={() => {
-        dbg(`glyph click kind=${rec.kind} id=${p.nodeId.slice(0, 8)}`);
-        if (rec.kind === "checkbox") void toggleCompleted(p.nodeId);
-        else if (!isLine) drillInto(p.nodeId);
-      }}
+      onMouseDown={(e) => glyphMouseDown(e, p.nodeId, p.depth, rec.kind)}
     >
       <Glyph
         kind={rec.kind}
@@ -262,12 +262,17 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
 
   return (
     <div
-      className={"node-row kind-" + rec.kind}
+      className={
+        "node-row kind-" +
+        rec.kind +
+        (p.isSelected ? " selected" : p.isSelTinted ? " sel-tint" : "")
+      }
       style={{
         position: "relative",
         paddingLeft: OutlineLayout.documentHInset + indent,
         paddingRight: OutlineLayout.documentHInset,
         fontSize: p.fontSize,
+        opacity: p.isDragDimmed ? 0.35 : undefined,
       }}
     >
       {p.showGuides && (
@@ -302,6 +307,9 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
                       ? p.highlightColor
                       : "rgba(255,255,255,0.35)",
                 }}
+                onMouseDown={(e) =>
+                  glyphMouseDown(e, p.nodeId, p.depth, rec.kind)
+                }
               />
               {firstLine}
               <NoteEditor nodeId={p.nodeId} isNoteFocused={p.isNoteFocused} />

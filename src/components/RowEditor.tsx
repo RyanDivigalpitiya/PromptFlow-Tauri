@@ -21,6 +21,7 @@ import {
   toggleHighlight,
 } from "../state/controller";
 import { mirror, nodeVersion, subscribeNode } from "../state/mirror";
+import { useSelection } from "../state/selection";
 import { useWindowState } from "../state/windowState";
 
 /** Map a click point to a character offset inside a rendered text element. */
@@ -326,6 +327,17 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
         // Without this, the mousedown's DEFAULT action (post-handler focus steal to
         // body) blurs the textarea the click just focused.
         e.preventDefault();
+        const sel = useSelection.getState();
+        if (e.shiftKey) {
+          // Shift-click extends a NODE selection from the focused node / live anchor.
+          const anchor =
+            sel.anchor ?? useWindowState.getState().focusId ?? p.nodeId;
+          (document.activeElement as HTMLElement | null)?.blur();
+          useWindowState.getState().clearFocus();
+          sel.start(anchor, p.nodeId);
+          return;
+        }
+        sel.clear();
         const offset =
           staticRef.current &&
           textOffsetFromPoint(staticRef.current, e.clientX, e.clientY);

@@ -13,9 +13,45 @@ import {
 } from "../lib/flatten";
 import { OutlineLayout, Theme } from "../lib/layout";
 import { addAtBottom, appendChildAt, publishRows } from "../state/controller";
+import { useDrag } from "../state/drag";
+import { publishDragEnv } from "../state/dragGesture";
 import { mirror, subscribeStructure } from "../state/mirror";
+import { useSelection } from "../state/selection";
 import { useWindowState } from "../state/windowState";
 import { AddChildRow, NodeRow } from "./NodeRow";
+
+/** Drop marker + floating ghost while a drag is live. Only this component re-renders
+ * per pointer move — the rows themselves stay untouched. */
+function DragOverlay({ fontSize }: { fontSize: number }) {
+  const nodeId = useDrag((s) => s.nodeId);
+  const projection = useDrag((s) => s.projection);
+  const pointerX = useDrag((s) => s.pointerX);
+  const pointerY = useDrag((s) => s.pointerY);
+  const ghostText = useDrag((s) => s.ghostText);
+  if (!nodeId) return null;
+  const isChildDrop = projection && projection.afterId === null && projection.parentId !== null;
+  const ballX = projection
+    ? isChildDrop
+      ? OutlineLayout.contentLeadingInset(projection.depth, fontSize)
+      : OutlineLayout.bulletCenterInset(projection.depth, fontSize)
+    : 0;
+  return (
+    <>
+      {projection && (
+        <div className="drop-marker" style={{ top: projection.markerY - 1 }}>
+          <span className="drop-ball" style={{ left: ballX - 3 }} />
+          <span
+            className="drop-line"
+            style={{ left: ballX + 5, right: OutlineLayout.documentHInset }}
+          />
+        </div>
+      )}
+      <div className="drag-ghost" style={{ left: pointerX + 14, top: pointerY + 12 }}>
+        {ghostText}
+      </div>
+    </>
+  );
+}
 
 /** Ids of every node with a highlighted (⌘⇧F) descendant at any depth — ONE full
  * forest walk per structural change (the OutlineView.highlightAncestorIDs port). */
@@ -84,14 +120,34 @@ export function OutlineView() {
 
   const items = virtualizer.getVirtualItems();
 
+  // Geometry for the drag projection: every flattened row's content-space extent
+  // (measured when rendered, estimated otherwise — same numbers the virtualizer uses).
+  publishDragEnv({
+    scrollEl: scrollRef.current,
+    getFrames: () => {
+      const frames = new Map<string, { minY: number; maxY: number }>();
+      const cache = virtualizer.measurementsCache;
+      const n = Math.min(cache.length, rows.length);
+      for (let i = 0; i < n; i++) {
+        const m = cache[i];
+        frames.set(rows[i].id, { minY: m.start, maxY: m.end });
+      }
+      return frames;
+    },
+  });
+
+  const selResolved = useSelection((s) => s.resolved);
+  const dragSubtree = useDrag((s) => s.subtree);
+
   return (
     <div
       className="outline-scroll"
       ref={scrollRef}
       onMouseDown={(e) => {
-        // Blank-background click → defocus (the viewport-filling clear-tap port).
+        // Blank-background click → defocus + clear selection (the clear-tap port).
         if (e.target === e.currentTarget) {
           useWindowState.getState().clearFocus();
+          useSelection.getState().clear();
           (document.activeElement as HTMLElement | null)?.blur();
         }
       }}
@@ -124,6 +180,12 @@ export function OutlineView() {
                   showGuides={true}
                   guideColor={Theme.defaultIndentGuideHex}
                   highlightColor={Theme.defaultHighlightHex}
+                  isSelected={selResolved?.ids.includes(row.nodeId) ?? false}
+                  isSelTinted={
+                    (selResolved?.tint.has(row.nodeId) ?? false) &&
+                    !(selResolved?.ids.includes(row.nodeId) ?? false)
+                  }
+                  isDragDimmed={dragSubtree.has(row.nodeId)}
                 />
               ) : (
                 <AddChildRow
@@ -145,6 +207,7 @@ export function OutlineView() {
             </div>
           );
         })}
+        <DragOverlay fontSize={fontSize} />
       </div>
       <div className="bottom-add">
         <button className="add-child-btn" onClick={() => void addAtBottom()}>
