@@ -1,0 +1,480 @@
+/* PromptFlow — dark "liquid glass" theme. The window itself is transparent with a
+   behind-window blur (Tauri windowEffects); the app lays a dark wash over it, so the
+   glass reads through everything. */
+
+:root {
+  --bg-tint: rgba(10, 10, 14, 0.45);
+  --text: rgba(255, 255, 255, 0.92);
+  --text-dim: rgba(255, 255, 255, 0.55);
+  --text-faint: rgba(255, 255, 255, 0.35);
+  --accent: #3b82f6;
+  --complete: #06ff9a;
+  --row-line-height: 1.35;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  background: transparent;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui,
+    sans-serif;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+  cursor: default;
+}
+
+.app-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-tint);
+}
+
+/* ---------- Top bar (overlay title bar: traffic lights float at the left) ---------- */
+
+.topbar {
+  height: 46px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: 0 14px 0 84px;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.topbar-left,
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.topbar-center {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.topbar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar-title.app {
+  color: var(--text-faint);
+}
+
+.bar-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  width: 26px;
+  height: 24px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bar-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text);
+}
+
+.bar-btn:disabled {
+  opacity: 0.3;
+}
+
+.bar-btn.active {
+  color: var(--accent);
+}
+
+/* ---------- Outline scroll host ---------- */
+
+.outline-scroll {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  position: relative;
+}
+
+.outline-inner {
+  position: relative;
+  width: 100%;
+}
+
+.vrow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+
+/* ---------- Rows ---------- */
+
+.node-row {
+  line-height: var(--row-line-height);
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+.row-inner {
+  display: flex;
+  align-items: flex-start;
+}
+
+.indent-guide {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.glyph-slot {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+}
+
+.glyph-dot,
+.glyph-box,
+.glyph-ring,
+.glyph-dash {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  margin-left: 6px;
+}
+
+.firstline {
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+/* The editor HUGS its text (inline sizing up to the available width) so the chevron
+   cluster can sit right after the last character — prompt panels opt out. */
+.editor-hug {
+  flex: 0 1 auto;
+  min-width: 10px;
+  max-width: 100%;
+}
+
+.editor-hug.full {
+  flex: 1 1 auto;
+}
+
+.tap-trailing {
+  flex: 1 1 0;
+  align-self: stretch;
+  min-height: 1em;
+}
+
+/* ---------- Text: static spans + the one live textarea ---------- */
+
+.node-text-wrap,
+.node-text-static {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
+}
+
+.node-text-wrap {
+  display: inline-block;
+  max-width: 100%;
+  min-height: 1.35em;
+}
+
+.grow-wrap {
+  display: grid;
+  width: 100%;
+}
+
+.grow-wrap::after {
+  content: attr(data-value) " ";
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  visibility: hidden;
+  grid-area: 1 / 1;
+  font: inherit;
+  line-height: inherit;
+}
+
+.grow-wrap > .node-textarea {
+  grid-area: 1 / 1;
+  width: 100%;
+  resize: none;
+  overflow: hidden;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  line-height: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  caret-color: var(--accent);
+  padding: 0;
+}
+
+.editor-hug:not(.full) .grow-wrap {
+  width: auto;
+  min-width: 10px;
+}
+
+.node-note-static,
+.note-wrap,
+.note-textarea {
+  font-size: 0.82em;
+  color: var(--text-dim);
+}
+
+.node-note-static {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
+}
+
+/* ---------- Trailing cluster (chevron + hover actions) ---------- */
+
+.trailing-cluster {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+}
+
+.chevron,
+.row-action {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 4px;
+}
+
+.chevron svg {
+  transition: transform 0.15s ease;
+}
+
+.chevron.collapsed svg {
+  transform: rotate(-90deg);
+}
+
+.chevron:hover,
+.row-action:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.row-actions {
+  display: inline-flex;
+  align-items: center;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  height: 100%;
+}
+
+.firstline:hover .row-actions,
+.row-menu-anchor:has(.row-menu) .row-actions {
+  opacity: 1;
+}
+
+.firstline:hover .chevron {
+  color: var(--text-dim);
+}
+
+/* ---------- Node menu ---------- */
+
+.row-menu-anchor {
+  position: relative;
+  display: inline-flex;
+  height: 100%;
+}
+
+.menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+.row-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 41;
+  min-width: 130px;
+  background: rgba(34, 34, 40, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+
+.row-menu button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 12.5px;
+  padding: 5px 10px;
+  border-radius: 5px;
+}
+
+.row-menu button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.row-menu button.danger {
+  color: #ff6b6b;
+}
+
+/* ---------- Kind-specific ---------- */
+
+.line-content {
+  display: flex;
+  align-items: center;
+  min-height: 1.35em;
+}
+
+.node-divider {
+  flex: 1;
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.prompt-panel {
+  position: relative;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.045);
+  padding: 10px 34px 10px 12px;
+  min-height: 58px;
+}
+
+.prompt-line-bullet {
+  position: absolute;
+  left: -14px;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 2px;
+}
+
+.prompt-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.prompt-panel:hover .prompt-actions,
+.prompt-panel:focus-within .prompt-actions {
+  opacity: 1;
+}
+
+.prompt-actions .row-action {
+  width: 22px;
+  height: 22px;
+  font-size: 13px;
+}
+
+/* ---------- Placeholders ---------- */
+
+.add-child-row {
+  display: flex;
+  align-items: center;
+}
+
+.add-child-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 1em;
+  line-height: 1;
+  height: 1.35em;
+  border-radius: 4px;
+  opacity: 0.6;
+}
+
+.add-child-btn:hover {
+  opacity: 1;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.hidden-completed-hint {
+  margin-left: 8px;
+  color: var(--text-faint);
+  font-size: 0.85em;
+  font-style: italic;
+}
+
+.bottom-add {
+  padding: 4px 18px 24px;
+  display: flex;
+  align-items: center;
+}
+
+/* ---------- Scrollbar ---------- */
+
+.outline-scroll::-webkit-scrollbar {
+  width: 9px;
+}
+
+.outline-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 5px;
+}
+
+.outline-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
+}

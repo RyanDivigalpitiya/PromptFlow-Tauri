@@ -1,51 +1,68 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { useEffect, useState } from "react";
+import { OutlineView } from "./components/OutlineView";
+import { TopBar } from "./components/TopBar";
+import { api } from "./lib/api";
+import { setCollapsedAll } from "./state/controller";
+import { mirror, startMirror } from "./state/mirror";
+import { useWindowState } from "./state/windowState";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+export default function App() {
+  const [ready, setReady] = useState(false);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+  useEffect(() => {
+    void startMirror().then(() => setReady(true));
+  }, []);
 
+  // Deleted nodes must never linger as focus/drill/history targets.
+  useEffect(() => {
+    return mirror.onDeleted((ids) => useWindowState.getState().purgeDeleted(ids));
+  }, []);
+
+  // Window-level shortcuts (the OutlineView keyboardShortcuts / commands port).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const s = useWindowState.getState();
+      const meta = e.metaKey;
+      if (!meta) return;
+      if (!e.shiftKey && (e.key === "=" || e.key === "+")) {
+        e.preventDefault();
+        s.adjustFont(1);
+      } else if (!e.shiftKey && e.key === "-") {
+        e.preventDefault();
+        s.adjustFont(-1);
+      } else if (!e.shiftKey && e.key === "0") {
+        e.preventDefault();
+        s.resetFont();
+      } else if (e.key === "[") {
+        e.preventDefault();
+        s.goBack();
+      } else if (e.key === "]") {
+        e.preventDefault();
+        s.goForward();
+      } else if (e.shiftKey && (e.key === "d" || e.key === "D")) {
+        e.preventDefault();
+        setCollapsedAll(false); // ⌘⇧D expand all (per window)
+      } else if (e.shiftKey && (e.key === "e" || e.key === "E")) {
+        e.preventDefault();
+        setCollapsedAll(true); // ⌘⇧E collapse all (per window)
+      } else if (!e.shiftKey && (e.key === "z" || e.key === "Z")) {
+        // Normally consumed by the native Edit menu; fallback if it wasn't.
+        e.preventDefault();
+        void api.undo();
+      } else if (e.shiftKey && (e.key === "z" || e.key === "Z")) {
+        e.preventDefault();
+        void api.redo();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  if (!ready) return <div className="app-shell" />;
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    <div className="app-shell">
+      <TopBar />
+      <OutlineView />
+    </div>
   );
 }
-
-export default App;
