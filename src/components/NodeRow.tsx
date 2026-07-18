@@ -4,6 +4,11 @@ import { OutlineLayout } from "../lib/layout";
 import { addRelative, drillInto } from "../state/controller";
 import { glyphMouseDown } from "../state/dragGesture";
 import { mirror, nodeVersion, subscribeNode } from "../state/mirror";
+import {
+  completingVersion,
+  isCompleting,
+  subscribeCompleting,
+} from "../state/rowAnim";
 import { useWindowState } from "../state/windowState";
 import { Glyph } from "./Glyphs";
 import { NoteEditor, RowEditor } from "./RowEditor";
@@ -186,8 +191,11 @@ export interface NodeRowProps {
 
 export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
   useSyncExternalStore(subscribeNode(p.nodeId), () => nodeVersion(p.nodeId));
+  useSyncExternalStore(subscribeCompleting, completingVersion);
   const rec = mirror.get(p.nodeId);
   if (!rec) return null;
+  // Plays the check-draw/pop once, right after the user completes this node.
+  const justCompleted = rec.isCompleted && isCompleting(p.nodeId);
 
   const scale = OutlineLayout.scale(p.fontSize);
   const indent = p.depth * OutlineLayout.indentPerLevel * scale;
@@ -273,7 +281,8 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
       className={
         "node-row kind-" +
         rec.kind +
-        (p.isSelected ? " selected" : p.isSelTinted ? " sel-tint" : "")
+        (p.isSelected ? " selected" : p.isSelTinted ? " sel-tint" : "") +
+        (justCompleted ? " just-completed" : "")
       }
       style={{
         position: "relative",

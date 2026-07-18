@@ -10,6 +10,7 @@ import type { KeyDecision } from "../lib/keys";
 import { toMarkdown } from "../lib/runs";
 import { inheritableKind, type NodeKind } from "../lib/types";
 import { mirror } from "./mirror";
+import { markCompleting } from "./rowAnim";
 import { useSelection } from "./selection";
 import { useWindowState, type CaretIntent } from "./windowState";
 
@@ -141,6 +142,9 @@ export async function toggleCompleted(
   const node = mirror.get(nodeId);
   if (!node || node.kind === "line") return;
   const completing = !node.isCompleted;
+  // Play the check/pop the moment the user acts (before the store round-trip), so the
+  // row is already flagged when its completed delta re-renders it.
+  if (completing) markCompleting(nodeId);
   await api.toggleCompleted(nodeId);
   if (!completing) return;
   const s = ws();

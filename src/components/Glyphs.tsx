@@ -84,6 +84,8 @@ export const Glyph = memo(function Glyph(p: GlyphProps) {
           ) : (
             p.isCompleted && (
               <path
+                className="glyph-check"
+                pathLength={1}
                 d={`M ${d * 0.28} ${d * 0.52} L ${d * 0.45} ${d * 0.68} L ${d * 0.74} ${d * 0.32}`}
                 fill="none"
                 stroke={Theme.completeColor}

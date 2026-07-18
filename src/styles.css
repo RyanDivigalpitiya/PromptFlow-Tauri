@@ -221,6 +221,46 @@ body {
   min-height: 1em;
 }
 
+/* ---------- Completion animation ----------
+   Completing a node: the glyph pops and (checkboxes) the check strokes itself in,
+   while the text eases to its struck-through, dimmed state. */
+@keyframes glyphPop {
+  0% {
+    transform: scale(1);
+  }
+  38% {
+    transform: scale(1.28);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.node-row.just-completed .glyph-slot {
+  animation: glyphPop 0.44s ease;
+}
+
+@keyframes drawCheck {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.node-row.just-completed .glyph-check {
+  stroke-dasharray: 1;
+  animation: drawCheck 0.3s 0.05s ease both;
+}
+
+/* The completed look (line-through + dim) eases in rather than snapping. */
+.node-text-static,
+.node-text-wrap,
+.node-editor {
+  transition: opacity 0.3s ease;
+}
+
 /* ---------- Text: static spans + the one live textarea ---------- */
 
 .node-text-wrap,
