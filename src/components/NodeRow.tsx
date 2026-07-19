@@ -1,4 +1,4 @@
-import { memo, useSyncExternalStore } from "react";
+import { memo, useSyncExternalStore, type CSSProperties } from "react";
 import { api } from "../lib/api";
 import { OutlineLayout } from "../lib/layout";
 import { addRelative, drillInto, toggleCollapse } from "../state/controller";
@@ -179,6 +179,15 @@ export interface NodeRowProps {
    * (not read from the store here) so it clears when the animation ends: this
    * component is memo'd and would otherwise keep a stale class. */
   isEntering: boolean;
+  /** Horizontal FLIP offset in px while a Tab/⇧Tab/undo reparent glides: the row is
+   * already laid out at its NEW indent, and this shifts it back to where it was
+   * painted so it can transition forward. null = not gliding. RENDERED, never written
+   * imperatively — React stays the single owner of the row's style, so a stale offset
+   * is impossible (the same reason `isEntering` is a prop). */
+  glideX: number | null;
+  /** True for the one commit that APPLIES that offset, where it must land with the
+   * transition off (the FLIP's invert step). See isGlideArming. */
+  glideArming: boolean;
   hasHighlightedDescendant: boolean;
   fontSize: number;
   showGuides: boolean;
@@ -286,7 +295,9 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
         rec.kind +
         (p.isSelected ? " selected" : p.isSelTinted ? " sel-tint" : "") +
         (justCompleted ? " just-completed" : "") +
-        (p.isEntering ? " entering" : "")
+        (p.isEntering ? " entering" : "") +
+        (p.glideX !== null ? " gliding" : "") +
+        (p.glideX !== null && p.glideArming ? " glide-arm" : "")
       }
       style={{
         position: "relative",
@@ -294,6 +305,16 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
         paddingRight: OutlineLayout.documentHInset,
         fontSize: p.fontSize,
         opacity: p.isDragDimmed ? 0.35 : undefined,
+        // A custom property, not `transform`: the transform has to land on .row-inner,
+        // NOT on .node-row, whose absolutely-positioned .indent-guide children are a
+        // column SHARED with every other row — translating the row would drag its
+        // guides off that column and visibly bend the ruler against its static
+        // neighbours for the whole animation. Custom properties inherit, so this one
+        // inline style reaches .row-inner (and AddChildRow's button/hint) with no prop
+        // plumbing, while the guides — which never reference the var — stay put.
+        ...(p.glideX !== null
+          ? ({ "--pf-glide-x": `${p.glideX}px` } as CSSProperties)
+          : null),
       }}
     >
       {p.showGuides && (
@@ -382,17 +403,27 @@ export const AddChildRow = memo(function AddChildRow(p: {
   hiddenCount: number | null;
   showGuides: boolean;
   guideColor: string;
+  /** See NodeRowProps.glideX — a "+" placeholder rides with the subtree it belongs to. */
+  glideX: number | null;
+  glideArming: boolean;
   onAdd: (parentId: string) => void;
 }) {
   const scale = OutlineLayout.scale(p.fontSize);
   const indent = p.depth * OutlineLayout.indentPerLevel * scale;
   return (
     <div
-      className="node-row add-child-row"
+      className={
+        "node-row add-child-row" +
+        (p.glideX !== null ? " gliding" : "") +
+        (p.glideX !== null && p.glideArming ? " glide-arm" : "")
+      }
       style={{
         position: "relative",
         paddingLeft: OutlineLayout.documentHInset + indent,
         fontSize: p.fontSize,
+        ...(p.glideX !== null
+          ? ({ "--pf-glide-x": `${p.glideX}px` } as CSSProperties)
+          : null),
       }}
     >
       {p.showGuides && (

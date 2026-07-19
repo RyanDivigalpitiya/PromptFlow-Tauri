@@ -33,12 +33,18 @@
  *
  * `runCollapseAnim(...)` is the ONE choke point every collapse mutation routes through
  * (see controller's toggleCollapse/setCollapsed/setCollapsedAll).
+ *
+ * THE TAB GLIDE (indent/outdent) also lives here, at the bottom of the file — it shares
+ * this module's `.rows-animating` class, its teardown timer and its `glideBand`, and
+ * having two owners for any of those would be a bug. Unlike the collapse it is driven
+ * from the DELTA rather than the gesture, so ⌘Z and another window's edit glide too.
  */
 
 import { flushSync } from "react-dom";
 import type { RenderRow } from "../lib/flatten";
-import { mirror } from "./mirror";
+import { mirror, setStructureCommit } from "./mirror";
 import { measureFrames } from "./perfMeter";
+import { useWindowState } from "./windowState";
 
 /** Fallback duration, used only if the CSS variable can't be read. The REAL duration
  * is `--collapse-anim-dur` in styles.css — the single source of truth, read live by
@@ -77,7 +83,7 @@ function animDurationMs(): number {
   return cssDurationMs("--collapse-anim-dur", COLLAPSE_ANIM_MS);
 }
 
-export type AnimMode = "expand" | "collapse";
+export type AnimMode = "expand" | "collapse" | "glide";
 
 // ---- signal (useSyncExternalStore-shaped) ----
 let animating = false;
@@ -89,6 +95,29 @@ let drawerShowing = false;
 let animRootId: string | null = null;
 let version = 0;
 const listeners = new Set<() => void>();
+
+// ---- tab-glide signal (see the driver at the bottom of the file) ----
+/** More reparented ROOTS than a gesture can plausibly produce ⇒ a bulk reshuffle
+ * (import, a whole-document move). Snap instead. */
+const GLIDE_MAX_ROOTS = 64;
+/** Moved-root id → how many LEVELS its subtree moved (+1 = indented one level). */
+let glideRoots: Map<string, number> | null = null;
+/** "idle": flags only — no offset yet, so the rows still paint where they were.
+ * "invert": rows are laid out at their NEW indent but painted at the old one, with the
+ *   transition SUPPRESSED (`.glide-arm`) — see the CSS note on why that suppression is
+ *   the whole ballgame.
+ * "play": the offset is released to 0 and the transition is allowed — the commit the
+ *   motion actually runs from. */
+let glidePhase: "idle" | "invert" | "play" = "idle";
+/** A drag already tells the whole story (drop marker, ghost under the cursor, the row
+ * dimmed in place) and its projection frames are un-animated, so a glide on top would
+ * disagree with them. Expiring rather than a bare flag, so a cancelled drop can't
+ * poison the next Tab — and the CALLER must arm it only for a drop that genuinely
+ * reparents, since only a reparent delta reaches the seam that drains it. */
+let suppressUntil = 0;
+export function suppressGlideOnce(): void {
+  suppressUntil = performance.now() + 2000;
+}
 
 export function subscribeAnim(cb: () => void): () => void {
   listeners.add(cb);
@@ -109,6 +138,53 @@ export function isDrawerShowing(): boolean {
  * toggle — i.e. it should play the entrance. Always false during a collapse. */
 export function isEntering(id: string): boolean {
   return animating && mode === "expand" && !prevIds.has(id);
+}
+/** Absent from the flatten this animation started from, whatever its kind. Such a row
+ * has no old position to slide from, and the virtualizer places it at an ESTIMATED
+ * height until its ResizeObserver reports the real one, so it must be excluded from the
+ * survivor reflow transition (`.rows-animating .vrow:not(.entering-row)`). On the
+ * expand/collapse paths this is exactly `isEntering`; it exists separately so a GLIDE —
+ * which can also create rows, e.g. the destination parent's "+" placeholder — gets that
+ * exclusion WITHOUT also firing the rowEnter keyframe, whose animation declaration
+ * would outrank the glide's own transform. */
+export function isNewRow(id: string): boolean {
+  return animating && !prevIds.has(id);
+}
+/** Resolve a row's glide delta by walking UP the (already-mutated) mirror to a moved
+ * root — cheaper and steadier than enumerating descendants, which for a collapsed
+ * 5000-node subtree would allocate 5000 entries to move ~0 rendered rows. */
+function glideDelta(nodeId: string): number | null {
+  const roots = glideRoots;
+  if (!roots) return null;
+  let cur: string | null = nodeId;
+  const seen = new Set<string>();
+  while (cur) {
+    const d = roots.get(cur);
+    if (d !== undefined) return d;
+    if (seen.has(cur)) break; // cycle guard, as elsewhere in the mirror
+    seen.add(cur);
+    cur = mirror.get(cur)?.parent ?? null;
+  }
+  return null;
+}
+/** How many LEVELS this row must be shifted back by right now: the negative of its
+ * depth change while inverted, 0 once released, null when it isn't gliding at all (no
+ * class, no transform). OutlineView converts levels → px, so NodeRow never has to know
+ * this module exists. */
+export function glideLevels(nodeId: string): number | null {
+  if (!glideRoots || glidePhase === "idle") return null;
+  const d = glideDelta(nodeId);
+  if (d === null) return null;
+  return glidePhase === "invert" ? -d : 0;
+}
+/** True during the INVERT commit, when the offset must be applied with the transition
+ * switched off. Without this the offset and its transition declaration would arrive in
+ * the same style change, and a transition takes its property/duration from the
+ * AFTER-change style — so the row would transition none→offset (i.e. never actually
+ * paint at the old position) and the release would then cancel it at ~0ms elapsed. The
+ * result was a horizontal SNAP, verified in WebKit; this flag is the fix. */
+export function isGlideArming(): boolean {
+  return glideRoots !== null && glidePhase === "invert";
 }
 function bump() {
   version += 1;
@@ -342,6 +418,11 @@ export function endAnimNow(): void {
     drawerShowing = false;
     prevIds = new Set();
     animRootId = null;
+    // Teardown is a PROP change, not a class the row remembers: the next render emits
+    // every row with no `.gliding` and no offset. That's why onWheel's guard, the
+    // unmount cleanup and runCollapseAnim's preempt all cancel a glide for free.
+    glideRoots = null;
+    glidePhase = "idle";
     bump(); // real rows become visible again in this commit
   }
   removeOverlays();
@@ -418,6 +499,151 @@ export function runCollapseAnim(
   }
   endTimer = setTimeout(endAnimNow, dur + TEARDOWN_BUFFER_MS);
 }
+
+// ---- the tab glide (indent / outdent) ----
+
+/** `id`'s depth as the flatten would compute it, in the CURRENT (post-mutation) mirror.
+ * Drill-aware: flattenDrillRoot rebases the drill root to 0. Null when the node has
+ * left the drilled subtree entirely — ⇧Tab on a direct child of the drill root removes
+ * it from the view, and there is nothing left on screen to glide. */
+function modelDepth(id: string, drill: string | null): number | null {
+  if (id === drill) return 0;
+  let d = 0;
+  let p = mirror.get(id)?.parent ?? null;
+  const seen = new Set([id]);
+  while (p) {
+    if (seen.has(p)) return null;
+    seen.add(p);
+    d++;
+    if (p === drill) return d;
+    p = mirror.get(p)?.parent ?? null;
+  }
+  return drill === null ? d : null;
+}
+
+/** Decide whether this reparent can glide, and by how many levels per moved root. Null
+ * ⇒ publish normally (snap). Each bail is its own reason:
+ *   - too many roots         : a bulk reshuffle, not a gesture
+ *   - not in the old flatten : it wasn't on screen. Import mints FRESH ids, so every
+ *                              row misses here and that whole path self-excludes
+ *   - lands under a collapse : it will be absent from the new flatten, so React
+ *                              unmounts it and there is nothing to transform
+ *   - modelDepth null        : it left the drilled subtree
+ *   - delta 0                : a same-level move — vertical only, already handled */
+function planGlide(reparented: readonly string[]): Map<string, number> | null {
+  if (reparented.length === 0 || reparented.length > GLIDE_MAX_ROOTS) return null;
+  const st = useWindowState.getState();
+  const want = new Set(reparented);
+  const wasDepth = new Map<string, number>();
+  for (const r of env.rows()) {
+    if (r.kind === "node" && want.has(r.nodeId)) wasDepth.set(r.nodeId, r.depth);
+  }
+  const out = new Map<string, number>();
+  for (const id of reparented) {
+    const was = wasDepth.get(id);
+    if (was === undefined) continue;
+    const now = modelDepth(id, st.drill);
+    if (now === null || now === was) continue;
+    let p = mirror.get(id)?.parent ?? null;
+    let hidden = false;
+    const seen = new Set<string>();
+    // Stops at the drill root, like modelDepth: flattenDrillRoot ignores the root's own
+    // collapse and never looks above it, so a collapsed ancestor at or above the root
+    // hides nothing — testing it would wrongly suppress the glide for every child of a
+    // drill root that happens to be collapsed at home level (⌘⇧E then drill in).
+    while (p && p !== st.drill && !hidden && !seen.has(p)) {
+      seen.add(p);
+      if (st.collapsed.has(p)) hidden = true;
+      p = mirror.get(p)?.parent ?? null;
+    }
+    if (hidden) continue;
+    out.set(id, now - was);
+  }
+  return out.size > 0 ? out : null;
+}
+
+/**
+ * TAB GLIDE — a reparented row slides into its new indent instead of snapping there.
+ *
+ * Driven from the DELTA rather than the gesture, so ONE implementation covers every
+ * path that can reparent: Tab/⇧Tab, block Tab on a selection, ⌘Z/⇧⌘Z (which has no
+ * frontend call site at all — the native pf-undo item goes straight to the store), and
+ * an edit made in another window. It also means a no-op mutation (Tab on a first
+ * sibling, ⇧Tab at the root) emits no delta and so arms nothing at all.
+ *
+ * THREE commits, because a transition needs its FROM value to have been resolved as a
+ * separate style change before the TO value is written:
+ *
+ *   1  flags only, rows UNCHANGED   ─ forced reflow ─▶ arms `.rows-animating` (vertical)
+ *   2  new depths AND the inversion ─ forced reflow ─▶ resolves the FROM x (horizontal)
+ *   3  release the inversion                        ─▶ both axes run to final
+ *
+ * Commits 1→2 are runCollapseAnim's pair verbatim: the survivors' OLD translateY has to
+ * be a resolved style before commit 2 writes the new one. Commits 2→3 are the classic
+ * FLIP invert-then-play, and the inversion in commit 2 MUST be un-transitioned — hence
+ * `.glide-arm`. Note the rule is NOT "a transition only starts if the previous style
+ * already declared it": a transition takes its property and duration from the
+ * AFTER-change style, which is exactly why `startDrawer` can add `.drawer-anim` and the
+ * new transform together. Getting that backwards makes commit 2 start a
+ * none→offset transition that commit 3 then cancels at ~0ms, and the row snaps.
+ *
+ * All three run in one task with no paint between, so X and Y start on the same frame —
+ * the same reason startDrawer() is deferred until after apply().
+ *
+ * paddingLeft is NEVER animated: every intermediate value re-wraps the text, changes
+ * the row's height, and drives the virtualizer's ResizeObserver to reposition the whole
+ * list on the main thread each frame. The row is laid out at its final indent from
+ * commit 2 and TRANSLATED back, so the motion stays pure compositor work.
+ */
+setStructureCommit((reparented, publish) => {
+  const suppressed = performance.now() < suppressUntil;
+  suppressUntil = 0;
+  const inner = env.inner;
+  const roots = suppressed || !inner ? null : planGlide(reparented);
+  if (!roots || !inner) {
+    publish();
+    return;
+  }
+
+  endAnimNow(); // one owner for `.rows-animating` and the teardown timer
+
+  // env.rows() is the LAST RENDERED flatten — still pre-mutation here, since React
+  // hasn't re-rendered yet. The same source runCollapseAnim's expand path reads.
+  prevIds = new Set(env.rows().map((r) => r.id));
+  mode = "glide";
+  drawerShowing = false;
+  // Reuse the drawer's band anchor. At commit 1 (old flatten) glideBand mounts ~one
+  // screenful below the moved node's OLD block — exactly the rows an outdent travels
+  // past. Without it, overscan(14) leaves them unrendered and they snap from a seam
+  // while the moved row glides (the drawer's "one cause, two symptoms" bug).
+  animRootId = roots.keys().next().value ?? null;
+  glideRoots = roots;
+  animating = true;
+
+  // COMMIT 1 — flags only. structureVersion is untouched, so OutlineView's `rows` memo
+  // returns the SAME array: every row re-renders at its old depth and old translateY,
+  // and glideLevels() is null ("idle"), so no row gains `.gliding` yet.
+  glidePhase = "idle";
+  flushSync(bump);
+  void inner.offsetHeight;
+
+  // COMMIT 2 — the real structural change AND the inversion, together.
+  glidePhase = "invert";
+  flushSync(() => {
+    bump();
+    publish();
+  });
+  void inner.offsetHeight;
+
+  // COMMIT 3 — release. Still before paint, so the horizontal transition starts on the
+  // same frame as the vertical one armed in commit 2.
+  glidePhase = "play";
+  flushSync(bump);
+
+  const dur = animDurationMs();
+  if (import.meta.env.DEV) measureFrames("glide", dur + 120);
+  endTimer = setTimeout(endAnimNow, dur + TEARDOWN_BUFFER_MS);
+});
 
 // Module-level state must never be split across HMR generations — decline hot updates.
 if (import.meta.hot) {

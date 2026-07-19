@@ -91,6 +91,24 @@ function setUndoState(canUndo: boolean, canRedo: boolean) {
   undoListeners.forEach((cb) => cb());
 }
 
+/** Wrapper around a delta's structural notification, installed by the animation layer
+ * so a REPARENT can be split into the multi-commit sequence a CSS transition needs (a
+ * transition only starts if the property's transition was already in the element's
+ * RESOLVED style before its value changed — see collapseAnim.ts). The wrapper MUST call
+ * `publish` exactly once, synchronously; the default just does.
+ *
+ * Called ONLY when some node actually changed parent, so a keystroke, a completion
+ * toggle and a same-level reorder (⌥↑/↓) never reach it. Exactly one owner, like the
+ * animation's other singletons. */
+type StructureCommit = (
+  reparented: readonly string[],
+  publish: () => void,
+) => void;
+let structureCommit: StructureCommit = (_ids, publish) => publish();
+export function setStructureCommit(fn: StructureCommit) {
+  structureCommit = fn;
+}
+
 function applyDelta(delta: Delta) {
   if (!loaded) return;
   if (delta.rev <= rev) return; // stale echo (e.g. snapshot already covered it)
@@ -103,6 +121,7 @@ function applyDelta(delta: Delta) {
   let structural = false;
   const touched: string[] = [];
   const deleted = new Set<string>();
+  const reparented: string[] = [];
   for (const op of delta.ops) {
     if (op.type === "upsert") {
       const rec = op.node;
@@ -119,6 +138,10 @@ function applyDelta(delta: Delta) {
         structural = true;
         if (old.parent) touched.push(old.parent);
         if (rec.parent) touched.push(rec.parent);
+        // A changed PARENT changes the row's depth, so it must glide into its new
+        // indent rather than snap. A changed position alone (⌥↑/↓, a same-level drag)
+        // moves it only vertically, which the reflow transition already covers.
+        if (old.parent !== rec.parent) reparented.push(rec.id);
       }
       if (old && old.isCompleted !== rec.isCompleted) {
         // Visibility under hide-completed + parent progress rings both change.
@@ -142,9 +165,16 @@ function applyDelta(delta: Delta) {
       structural = true;
     }
   }
-  for (const id of touched) if (nodes.has(id)) bumpNode(id);
-  if (deleted.size > 0) deletedHooks.forEach((h) => h(deleted));
-  if (structural) notifyStructure();
+  // Routed through the seam ONLY for a reparent, so the animation layer can wrap the
+  // notification in its commit sequence. `load()`/`reload()` deliberately bypass it: a
+  // full snapshot (first load, rev-gap resync) must never animate.
+  const publish = () => {
+    for (const id of touched) if (nodes.has(id)) bumpNode(id);
+    if (deleted.size > 0) deletedHooks.forEach((h) => h(deleted));
+    if (structural) notifyStructure();
+  };
+  if (structural && reparented.length > 0) structureCommit(reparented, publish);
+  else publish();
   setUndoState(delta.canUndo, delta.canRedo);
 }
 

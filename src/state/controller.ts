@@ -56,6 +56,26 @@ async function applyOut(
   if (out.newNode) ws().focusNode(out.newNode, "main", caret);
 }
 
+/** Client-side mirror of Store::indent's target rule (store.rs): the nearest previous
+ * sibling, skipping completed ones under hide-completed; null when there is none or it
+ * is a divider. Advisory only — the store stays authoritative; this exists so the
+ * destination can be EXPANDED before the invoke. `expandMany(out.expand)` runs after
+ * the awaited delta, and in between the moved row is absent from the flatten: React
+ * unmounts it and remounts it as a brand-new row a commit later, which costs a
+ * one-frame flash, the caret, and any glide. Same total work, one commit earlier. */
+export function indentTargetParent(
+  nodeId: string,
+  hideCompleted: boolean,
+): string | null {
+  const rec = mirror.get(nodeId);
+  if (!rec) return null;
+  const sibs = mirror.childrenOf(rec.parent);
+  let i = sibs.indexOf(nodeId) - 1;
+  while (i >= 0 && hideCompleted && mirror.get(sibs[i])?.isCompleted) i--;
+  if (i < 0) return null;
+  return mirror.get(sibs[i])?.kind === "line" ? null : sibs[i];
+}
+
 // MARK: Key decisions
 
 export async function performDecision(
@@ -86,8 +106,11 @@ export async function performDecision(
       await toggleCompleted(nodeId, { spawnNext: true });
       break;
     case "indent": {
-      const out = await api.indent(nodeId, ws().hideCompleted);
-      ws().expandMany(out.expand);
+      const hide = ws().hideCompleted;
+      const target = indentTargetParent(nodeId, hide);
+      if (target) ws().expandMany([target]);
+      const out = await api.indent(nodeId, hide);
+      ws().expandMany(out.expand); // idempotent; usually a no-op after the above
       break;
     }
     case "outdent":

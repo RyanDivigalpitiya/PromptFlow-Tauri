@@ -17,9 +17,12 @@ import {
   animVersion,
   endAnimNow,
   glideBand,
+  glideLevels,
   isAnimating,
   isDrawerShowing,
   isEntering,
+  isGlideArming,
+  isNewRow,
   publishAnimEnv,
   subscribeAnim,
 } from "../state/collapseAnim";
@@ -193,6 +196,9 @@ export function OutlineView() {
       // Any overlap with the viewport ⇒ already present; don't reposition.
       if (m.end > top && m.start < bottom) return;
     }
+    // A programmatic scroll mid-animation reprograms every translateY AND scrollTop at
+    // once, and it isn't a wheel event, so onWheel's guard never sees it.
+    if (isAnimating()) endAnimNow();
     virtualizer.scrollToIndex(idx, { align: "auto" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusId, focusEpoch, rows]);
@@ -226,6 +232,9 @@ export function OutlineView() {
     },
   });
 
+  // Hoisted out of the row map: one read each per render, not one per row.
+  const glideScale = OutlineLayout.scale(fontSize);
+  const glideArming = isGlideArming();
   const selResolved = useSelection((s) => s.resolved);
   const dragSubtree = useDrag((s) => s.subtree);
   const showGuides = useSettings((s) => s.showIndentGuides);
@@ -268,12 +277,22 @@ export function OutlineView() {
           // the animation ends — a stale `entering` would wrongly exclude that row from
           // the reflow transition on the NEXT toggle.
           const entering = isEntering(row.id);
+          // Two deliberately distinct concepts: `isNewRow` excludes a row that has no
+          // OLD position from the reflow transition (all three animations need that),
+          // while `entering` additionally plays the rowEnter fade, which only the bulk
+          // expand path wants — its keyframe outranks inline style and would mask a
+          // glide's transform.
+          const isNew = isNewRow(row.id);
+          // Levels → px here, so NodeRow never has to know the anim module exists.
+          const lv = glideLevels(row.nodeId);
+          const glideX =
+            lv === null ? null : lv * OutlineLayout.indentPerLevel * glideScale;
           return (
             <div
               key={vi.key}
               data-index={vi.index}
               ref={virtualizer.measureElement}
-              className={"vrow" + (entering ? " entering-row" : "")}
+              className={"vrow" + (isNew ? " entering-row" : "")}
               style={{ transform: `translateY(${vi.start}px)` }}
             >
               {row.kind === "node" ? (
@@ -288,6 +307,8 @@ export function OutlineView() {
                   isNoteFocused={focusId === row.nodeId && focusField === "note"}
                   isDrillRoot={drill === row.nodeId}
                   isEntering={entering}
+                  glideX={glideX}
+                  glideArming={glideArming}
                   hasHighlightedDescendant={highlightAncestors.has(row.nodeId)}
                   fontSize={fontSize}
                   showGuides={showGuides}
@@ -309,6 +330,8 @@ export function OutlineView() {
                   fontSize={fontSize}
                   showGuides={showGuides}
                   guideColor={guideColor}
+                  glideX={glideX}
+                  glideArming={glideArming}
                   hiddenCount={
                     hideCompleted
                       ? hiddenCompletedCount(

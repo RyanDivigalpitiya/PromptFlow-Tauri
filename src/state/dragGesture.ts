@@ -1,6 +1,7 @@
 import { api } from "../lib/api";
 import { OutlineLayout } from "../lib/layout";
 import type { NodeKind } from "../lib/types";
+import { endAnimNow, isAnimating, suppressGlideOnce } from "./collapseAnim";
 import { drillInto, toggleCompleted, visibleRows } from "./controller";
 import { projectDrop, useDrag, type DropCandidate } from "./drag";
 import { mirror } from "./mirror";
@@ -65,6 +66,9 @@ export function glyphMouseDown(
 ) {
   if (e.button !== 0) return;
   e.preventDefault();
+  // The drop projection reads the virtualizer's (un-animated) frames, so never let a
+  // gesture start against rows that are still mid-glide.
+  if (isAnimating()) endAnimNow();
   const startClientX = e.clientX;
   const startClientY = e.clientY;
   let dragging = false;
@@ -168,6 +172,12 @@ export function glyphMouseDown(
     const block = d.block;
     d.reset();
     if (!proj) return;
+    // A drop already tells the whole story — marker, ghost, dimmed row — so the row
+    // should simply BE at the projected spot when the drag ends, not fly there after.
+    // ONLY for a drop that actually reparents: the suppression is drained by the
+    // reparent seam, so arming it for a same-parent reorder (which emits position-only
+    // ops and never reaches the seam) would leave it set and eat the next Tab's glide.
+    if (proj.parentId !== (mirror.get(nodeId)?.parent ?? null)) suppressGlideOnce();
     void (async () => {
       const out =
         block.length > 1

@@ -196,6 +196,44 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   toggle in dev, plus ⌘⌃⇧8 idle baseline) — because rAF is 60Hz-capped it measures
   MAIN-THREAD health (a steady ~16.7ms ⇒ no jank, the real cause of "choppy"), NOT the
   compositor's true fps; it can't read past 60.
+- **Tab glide** (the bottom of `collapseAnim.ts`; CSS `.node-row.gliding` / `.glide-arm`):
+  Tab/⇧Tab slides the moved row into its new indent instead of snapping. Driven from the
+  DELTA, not the gesture — `mirror.ts`'s `setStructureCommit` seam hands the animation
+  layer any delta that changed a node's PARENT (a position-only change, ⌥↑/↓, never
+  reaches it) — so ⌘Z and another window's edit glide with ONE implementation, and a
+  no-op Tab emits no delta and arms nothing. THREE flushSync commits: flags → new depths
+  + inverted offset (transition OFF) → release. **`paddingLeft` is never animated** (each
+  intermediate value re-wraps text, changes row height, and makes the ResizeObserver
+  reposition the list every frame); the row is laid out at its final indent and
+  TRANSLATED back. The offset is a `--pf-glide-x` custom property on `.node-row` that
+  inherits to `.row-inner` — never a transform on `.node-row` itself, whose
+  `.indent-guide` children are a column shared with every other row and would visibly
+  bend. **`.glide-arm` (transition: none for the invert commit) is load-bearing**: a
+  transition takes its property/duration from the AFTER-change style, so applying the
+  offset and its transition together starts a `none→offset` transition — the row never
+  paints at the old position and the release cancels it at ~0ms, i.e. a snap (verified in
+  WebKit). NOTE this means the rule stated below for the collapse — "a transition only
+  starts if the previously RESOLVED style already carried it" — is NOT the real CSS rule;
+  what a transition needs is its FROM value resolved as a separate style change. The
+  collapse's two-flushSync split is still required, but for that reason. The vertical
+  half is free: `.rows-animating` is armed at commit 1 and `glideBand` (anchored on the
+  moved node) keeps the rows it travels past mounted.
+- **Progress wedge** (`Glyphs.tsx` `Wedge`; CSS `.glyph-wedge` / `.glyph-tint`): the
+  parent pie fills radially, clockwise from 12 o'clock, as children complete. Drawn as a
+  STROKED circle — path radius R/2, `stroke-width` R, so the band covers radii [0,R]
+  exactly, pixel-identical to the filled sector it replaced — with `pathLength=1` so the
+  fraction is ONE interpolable number, `stroke-dashoffset`. The old `sectorPath` couldn't
+  animate: its segment list changed shape across the fraction and the large-arc flag
+  flipped at ½ (and React writes `d` as an attribute, where a CSS transition never
+  reaches it). Driven by the fraction VALUE, never a "just changed" flag, so it covers
+  remote windows / ⌘Z / block toggles / auto-archive — and because a transition needs a
+  resolved previous value it can never self-start on mount, so a wedge scrolling back
+  into view paints at its true fraction. Keep `Wedge` a COMPONENT: in the checkbox branch
+  it alternates with the check mark at the same child index, and React never reconciles a
+  component element with a host one. Timing is `--wedge-anim-dur` (320ms ease-out),
+  deliberately NOT `--collapse-anim-dur` — that one gets dialled past 500ms to debug the
+  drawer. Unlike everything else here it is a main-thread repaint (WebKit composites only
+  transform/opacity/filter), which at 14×14px is free.
 - **Drag** (`drag.ts` + `dragGesture.ts`): `projectDrop` is the pure port of the Swift
   projection (gap by `midY <= pointerY`, depth band `[minDepth, prev.depth+1]`, divider
   can't parent, drill floor 1). Frames come from `virtualizer.measurementsCache`

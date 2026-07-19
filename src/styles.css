@@ -17,6 +17,14 @@
      eyeballing the animation frame by frame — restore 300ms before shipping. */
   --collapse-anim-dur: 300ms;
   --collapse-anim-ease: cubic-bezier(0.83, 0, 0.17, 1);
+  /* Parent progress wedge — DELIBERATELY NOT --collapse-anim-dur. That one is the
+     drawer's clock and gets dialled past 500ms to eyeball a frame (see the note
+     above), which would put every wedge in the document into slow motion. The wedge
+     belongs to the COMPLETION family (glyphPop 0.44s / drawCheck 0.3s) and wants an
+     ease-OUT — commit to the new value at once, then settle. The drawer's near-step
+     ease-in-out reads as a snap across a 5px radius. */
+  --wedge-anim-dur: 320ms;
+  --wedge-anim-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
 * {
@@ -173,6 +181,40 @@ body {
   will-change: transform;
 }
 
+/* 1b. Horizontal glide (Tab / ⇧Tab, and the undo of one). `paddingLeft` is NEVER
+      animated: every intermediate value re-wraps the text, changes the row's height,
+      and drives the virtualizer's ResizeObserver to reposition the whole list on the
+      main thread each frame. The row is laid out at its FINAL indent from the first
+      structural commit and TRANSLATED back to its old x, then released — so the motion
+      is pure compositor work like everything else in this file, and the vertical glide
+      (rule 1 above) rides the same clock.
+
+      The transform sits on the row's CONTENT, never on `.node-row` itself: that
+      element's absolutely-positioned `.indent-guide` children form a column shared
+      with every other row, and sliding them would bend the ruler. `--pf-glide-x` is
+      set on `.node-row` and inherits down to exactly the parts that should move.
+
+      `.glide-arm` is the FLIP's invert step and it is LOAD-BEARING. A transition takes
+      its property and duration from the AFTER-change style, so applying the offset and
+      the transition in one style change starts a `none → offset` transition instead:
+      the row never paints at its old position, and releasing the offset one commit
+      later cancels that transition at ~0ms elapsed. The row then snaps the full indent
+      and nothing animates (verified in WebKit). So the offset must land with the
+      transition OFF, be resolved, and only then be released. */
+.node-row.gliding > .row-inner,
+.node-row.gliding > .add-child-btn,
+.node-row.gliding > .hidden-completed-hint {
+  transform: translateX(var(--pf-glide-x, 0px));
+  transition: transform var(--collapse-anim-dur) var(--collapse-anim-ease);
+  will-change: transform;
+}
+
+.node-row.glide-arm > .row-inner,
+.node-row.glide-arm > .add-child-btn,
+.node-row.glide-arm > .hidden-completed-hint {
+  transition: none;
+}
+
 /* 2. Entering rows (expand): fade + a short drop-in. The transform is on `.node-row`
       (a child of `.vrow`), so it composes with the virtualizer's translateY rather than
       overriding it. */
@@ -254,8 +296,13 @@ body {
   will-change: auto;
 }
 
+/* `animation` alone doesn't reach a TRANSITION, and `.drawer-content .vrow` above
+   scopes to the .vrow itself, not its descendants — so the progress wedge inside a
+   clone would keep its own transition declaration. A clone's inline style never
+   changes, so nothing could actually start; this just refuses to pay for the layer. */
 .drawer-content * {
   animation: none !important;
+  transition: none !important;
 }
 
 /* While the drawer presents the block, the REAL rows must not double-draw through it.
@@ -297,6 +344,7 @@ body {
    break the dissolve. Only the overlay itself fades. */
 .collapse-ghosts * {
   animation: none !important;
+  transition: none !important;
 }
 
 /* ---------- Rows ---------- */
@@ -403,6 +451,40 @@ body {
 .node-row.just-completed .glyph-check {
   stroke-dasharray: 1;
   animation: drawCheck 0.3s 0.05s ease both;
+}
+
+/* ---------- Parent progress wedge ----------
+   The pie is a stroked circle (path radius R/2, stroke-width R, so the band covers
+   radii [0,R] — pixel-identical to the filled sector it replaced). The only thing that
+   changes as children complete is ONE interpolable number: stroke-dashoffset.
+   `pathLength=1` on the path (Glyphs.tsx) normalizes the dash units, so
+   `stroke-dasharray: 1` is the whole circle and offset (1−f) leaves path positions
+   [0, f] stroked — filling CLOCKWISE FROM 12 O'CLOCK, continuous through ½ and through
+   full. Same pathLength+dasharray idiom drawCheck below already proves works here.
+
+   NOT compositor work, unlike everything in the collapse section: WebKit hands Core
+   Animation only transform/opacity/filter, so stroke geometry repaints on the main
+   thread at the webview's 60Hz rAF cap. At 14x14px that is a trivial layer repaint.
+   The only true-120Hz alternative is two rotating half-discs, which costs re-expressing
+   the ring, the centre dot and the checkbox border as HTML — revisit only if 60Hz ever
+   reads as choppy here. */
+.glyph-wedge {
+  stroke-dasharray: 1;
+  transition:
+    stroke-dashoffset var(--wedge-anim-dur) var(--wedge-anim-ease),
+    stroke var(--wedge-anim-dur) var(--wedge-anim-ease);
+}
+
+/* A parent's ring/dot/border goes green the instant its pie completes — cross-fade it
+   on the same clock, or it snaps against a still-filling wedge. Scoped to PARENTS in
+   Glyphs.tsx. Side effect: those same colors carry the ⌘⇧F highlight, so a highlight
+   toggle now cross-fades on a parent while a leaf's snaps (a leaf bullet is an HTML
+   span with `background` and could not share this rule anyway). To drop that
+   asymmetry, delete this rule and keep the transition on .glyph-wedge alone. */
+.glyph-tint {
+  transition:
+    stroke var(--wedge-anim-dur) var(--wedge-anim-ease),
+    fill var(--wedge-anim-dur) var(--wedge-anim-ease);
 }
 
 /* The completed look (line-through + dim) eases in rather than snapping. */

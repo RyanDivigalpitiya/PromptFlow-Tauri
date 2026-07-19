@@ -4,8 +4,10 @@ import { OutlineView } from "./components/OutlineView";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { TopBar } from "./components/TopBar";
 import { api, onRowMenuAction } from "./lib/api";
+import { endAnimNow } from "./state/collapseAnim";
 import {
   copyBlock,
+  indentTargetParent,
   performRowMenuAction,
   setCollapsed,
   setCollapsedAll,
@@ -53,6 +55,12 @@ function handleSelectionKey(e: KeyboardEvent): boolean {
     if (e.shiftKey) {
       void api.outdentBlock(ids).then(() => sel.refresh());
     } else {
+      // Expand the destination BEFORE the invoke — same reason as the single-node Tab
+      // (see indentTargetParent). `ids[0]` is the block's first node in sibling order,
+      // matching Rust's normalized_block, because a selection is a contiguous
+      // one-level sibling range.
+      const target = indentTargetParent(ids[0], s.hideCompleted);
+      if (target) s.expandMany([target]);
       void api.indentBlock(ids, s.hideCompleted).then((out) => {
         s.expandMany(out.expand);
         sel.refresh();
@@ -128,6 +136,10 @@ export default function App() {
       e.preventDefault();
       const scale = (e as { scale?: number }).scale;
       if (anchor > 0 && typeof scale === "number") {
+        // A scale change invalidates every px offset an animation is mid-way through
+        // (indents, drawer height), and a pinch is not a wheel event, so
+        // OutlineView's onWheel guard never sees it. Cheap when nothing is running.
+        endAnimNow();
         useWindowState.getState().setFont(anchor * scale);
       }
     };
@@ -187,12 +199,15 @@ export default function App() {
         );
       } else if (!e.shiftKey && (e.key === "=" || e.key === "+")) {
         e.preventDefault();
+        endAnimNow(); // a scale change invalidates in-flight px offsets — see the pinch
         s.adjustFont(1);
       } else if (!e.shiftKey && e.key === "-") {
         e.preventDefault();
+        endAnimNow();
         s.adjustFont(-1);
       } else if (!e.shiftKey && e.key === "0") {
         e.preventDefault();
+        endAnimNow();
         s.resetFont();
       } else if (e.key === "[") {
         e.preventDefault();
