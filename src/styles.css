@@ -194,8 +194,72 @@ body {
   }
 }
 
-.node-row.entering {
+/* Only the BULK path (⌘⇧E/⌘⇧D) fades rows in — a single-node expand shows the drawer
+   instead, and the real rows stay hidden behind it until teardown. */
+.outline-inner:not(.drawer-showing) .node-row.entering {
   animation: rowEnter var(--collapse-anim-dur) var(--collapse-anim-ease) both;
+}
+
+/* ---------- The drawer (single-node expand/collapse) ----------
+   Three nested raw-DOM layers appended to .outline-inner (React never sees them):
+
+     .drawer-clip    static, pinned at the parent's bottom edge B, overflow:hidden
+       .drawer-sweep overflow:hidden, height H, translateY(-H) -> 0   [the clip EDGE]
+         .drawer-content  translateY(H-CAP) -> 0                     [the rows inside]
+           .vrow clones, positioned block-local
+
+   The intersection of the two clips is exactly [B, B + H*f], which is where the rows
+   below now start — so the edge and the content below tile at every instant. Both
+   moving layers animate ONLY transform, and both clips are plain rectangular
+   overflow, so the whole thing composites without per-frame main-thread work. */
+.drawer-clip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.drawer-sweep {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  overflow: hidden;
+  will-change: transform;
+}
+
+.drawer-content {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  will-change: transform;
+}
+
+.drawer-clip.drawer-anim .drawer-sweep,
+.drawer-clip.drawer-anim .drawer-content {
+  transition: transform var(--collapse-anim-dur) var(--collapse-anim-ease);
+}
+
+/* Clones are .vrow descendants of .rows-animating and would otherwise each inherit the
+   survivor transition AND its own compositing layer. They are inert snapshots: the only
+   things that move are the two layers above them. */
+.drawer-content .vrow {
+  transition: none !important;
+  will-change: auto;
+}
+
+.drawer-content * {
+  animation: none !important;
+}
+
+/* While the drawer presents the block, the REAL rows must not double-draw through it.
+   `visibility` (never `display:none`) so they keep their layout boxes and the
+   virtualizer's ResizeObserver still reports their true heights. */
+.drawer-showing .vrow.entering-row {
+  visibility: hidden;
 }
 
 /* 3. Leaving rows (collapse): cloned out of the live DOM into this one overlay

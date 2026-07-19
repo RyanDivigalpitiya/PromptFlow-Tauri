@@ -312,9 +312,10 @@ export function drillInto(nodeId: string) {
 export function toggleCollapse(id: string) {
   const s = ws();
   const willCollapse = !s.collapsed.has(id);
+  // The root is passed for BOTH directions — the drawer hangs off it either way.
   runCollapseAnim(
     willCollapse ? "collapse" : "expand",
-    willCollapse ? [id] : [],
+    [id],
     visibleRows(),
     () => s.toggleCollapse(id),
   );
@@ -330,7 +331,7 @@ export function setCollapsed(id: string, value: boolean) {
   if (s.collapsed.has(id) === value) return;
   runCollapseAnim(
     value ? "collapse" : "expand",
-    value ? [id] : [],
+    [id],
     visibleRows(),
     () => s.setCollapsed(id, value),
   );

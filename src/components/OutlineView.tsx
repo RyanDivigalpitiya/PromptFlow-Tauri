@@ -16,8 +16,9 @@ import {
   animVersion,
   endAnimNow,
   isAnimating,
+  isDrawerShowing,
   isEntering,
-  publishAnimContainer,
+  publishAnimEnv,
   subscribeAnim,
 } from "../state/collapseAnim";
 import { addAtBottom, appendChildAt, dbg, publishRows } from "../state/controller";
@@ -117,14 +118,9 @@ export function OutlineView() {
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const innerRef = useRef<HTMLDivElement | null>(null);
-  // Publish `.outline-inner` (the virtualizer's coordinate space) so the collapse
-  // animation can pin its ghost overlay there.
   useEffect(() => {
-    publishAnimContainer(innerRef.current);
-    return () => {
-      endAnimNow(); // drop any live overlay/timer before the container goes away
-      publishAnimContainer(null);
-    };
+    // Drop any live overlay/timer before the container goes away.
+    return () => endAnimNow();
   }, []);
   const rowEstimate =
     OutlineLayout.lineHeight(fontSize) + OutlineLayout.rowVerticalPadding * 2;
@@ -160,6 +156,17 @@ export function OutlineView() {
   }, [focusId, focusEpoch, rows]);
 
   const items = virtualizer.getVirtualItems();
+
+  // Geometry for the expand/collapse drawer: it needs the parent's bottom edge and the
+  // revealed block's height, both in the virtualizer's content space. Republished every
+  // render (like publishDragEnv) so a toggle always reads current measurements.
+  publishAnimEnv({
+    inner: innerRef.current,
+    scrollEl: scrollRef.current,
+    measureAt: (i) => virtualizer.measurementsCache[i],
+    totalSize: () => virtualizer.getTotalSize(),
+    rows: () => rows,
+  });
 
   // Geometry for the drag projection: every flattened row's content-space extent
   // (measured when rendered, estimated otherwise — same numbers the virtualizer uses).
@@ -204,7 +211,11 @@ export function OutlineView() {
     >
       <div
         ref={innerRef}
-        className={"outline-inner" + (isAnimating() ? " rows-animating" : "")}
+        className={
+          "outline-inner" +
+          (isAnimating() ? " rows-animating" : "") +
+          (isDrawerShowing() ? " drawer-showing" : "")
+        }
         style={{ height: virtualizer.getTotalSize() }}
       >
         {items.map((vi) => {
