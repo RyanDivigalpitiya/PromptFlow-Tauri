@@ -152,12 +152,6 @@ body {
   width: 100%;
 }
 
-/* Virtualized rows are transformed siblings (each its own stacking context, painted
-   in DOM order) — without this, later rows paint OVER an open ⋯ menu. */
-.vrow:has(.row-menu) {
-  z-index: 5;
-}
-
 /* ---------- Expand / collapse animation ----------
    Entirely GPU-composited (transform + opacity), driven by CSS transitions/keyframes —
    no per-frame React, so it holds 120Hz. Three parts, orchestrated by collapseAnim.ts.
@@ -549,8 +543,7 @@ body {
 }
 
 .firstline:hover .row-actions,
-.prompt-wrap:hover .row-actions,
-.row-actions:has(.row-menu) {
+.prompt-wrap:hover .row-actions {
   opacity: 1;
 }
 
@@ -559,52 +552,12 @@ body {
   color: var(--text-dim);
 }
 
-/* ---------- Node menu ---------- */
-
-.row-menu-anchor {
-  position: relative;
-  display: inline-flex;
-  height: 100%;
-}
-
+/* The row ⋯ menu is a native NSMenu (`popup_row_menu`), so it has no CSS. This backdrop
+   belongs to the SETTINGS panel, which is still an in-app popover. */
 .menu-backdrop {
   position: fixed;
   inset: 0;
   z-index: 40;
-}
-
-.row-menu {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  z-index: 41;
-  min-width: 10em;
-  background: rgb(37, 37, 43);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 0.6em;
-  padding: 0.3em;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
-  display: flex;
-  flex-direction: column;
-}
-
-.row-menu button {
-  appearance: none;
-  border: none;
-  background: transparent;
-  color: var(--text);
-  text-align: left;
-  font-size: 0.92em;
-  padding: 0.38em 0.77em;
-  border-radius: 0.38em;
-}
-
-.row-menu button:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.row-menu button.danger {
-  color: #ff6b6b;
 }
 
 /* ---------- Kind-specific ---------- */

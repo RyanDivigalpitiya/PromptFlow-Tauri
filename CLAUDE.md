@@ -225,7 +225,8 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   ⌘E/⌘D collapse/expand focused, ⌘⇧E/⌘⇧D collapse/expand ALL, ⌘Z/⇧⌘Z fallback,
   ⌘⌃⇧7 seed, ⌘⌃⇧8 idle perf baseline); (3) `handleSelectionKey` capture-phase (block ops
   while a node selection is
-  live; its Escape yields to an open ⋯ row-menu — one layer per press). Plus native menu accelerators (⌘N/⌘Z/⇧⌘Z + clipboard roles —
+  live; an open ⋯ menu is a modal NSMenu, so Escape closes IT and never reaches the
+  webview — one layer per press, with no in-app guard). Plus native menu accelerators (⌘N/⌘Z/⇧⌘Z + clipboard roles —
   the predefined cut/copy/paste/select_all items are REQUIRED; a macOS webview gets no
   ⌘C/⌘V without them). The Window submenu is registered via
   `set_as_windows_menu_for_nsapp()` AFTER `app.set_menu(...)` — muda resolves the
@@ -267,9 +268,10 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   New chrome CSS should be em, not px. The ⋯ menu is a NATIVE macOS NSMenu built in Rust
   (`popup_row_menu`) and popped at the button's bottom-left; the chosen item comes back to
   the OPENING window as a `row-menu-action` event and is replayed through the existing
-  gestures by `performRowMenuAction` (controller.ts). AppKit owns dismissal, so there is
-  no backdrop div and no in-app capture mousedown/Escape closer — the `.row-menu*` rules
-  in styles.css and the `.row-menu` guard in `handleSelectionKey` are both dead. The
+  gestures by `performRowMenuAction` (controller.ts). AppKit owns dismissal, so it needs
+  no CSS, no backdrop div and no in-app capture mousedown/Escape closer — don't reinstate
+  any of them. (`.menu-backdrop` survives for the SETTINGS popover, which is still
+  in-app.) The
   `.grow-wrap::after` mirror appends `\200B` (never a real space — that widened the
   editor and made the cluster jump on click-to-edit).
 - **Column math**: `OutlineLayout` (`lib/layout.ts`) matches the Swift constants exactly

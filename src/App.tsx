@@ -29,9 +29,9 @@ function handleSelectionKey(e: KeyboardEvent): boolean {
     sel.refresh();
   };
   if (e.key === "Escape") {
-    // An open ⋯ menu is the topmost layer — let its own Escape handler close
-    // it and keep the selection (native NSMenu peels one layer per press).
-    if (document.querySelector(".row-menu")) return false;
+    // No ⋯-menu guard needed: that menu is a native NSMenu running AppKit's own modal
+    // loop, so while it's open Escape closes IT and never reaches the webview at all.
+    // One layer per press, for free.
     e.preventDefault();
     sel.clear();
     return true;
