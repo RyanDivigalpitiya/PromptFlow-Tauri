@@ -403,6 +403,10 @@ export const AddChildRow = memo(function AddChildRow(p: {
   hiddenCount: number | null;
   showGuides: boolean;
   guideColor: string;
+  /** A derived "+" row enters and leaves with its parent's child list — creating a FIRST
+   * child mints two rows for one insert. The leave side already ghosts it (the diff is by
+   * ROW id), so it has to play the entrance too or the two directions aren't mirrors. */
+  isEntering: boolean;
   /** See NodeRowProps.glideX — a "+" placeholder rides with the subtree it belongs to. */
   glideX: number | null;
   glideArming: boolean;
@@ -414,6 +418,7 @@ export const AddChildRow = memo(function AddChildRow(p: {
     <div
       className={
         "node-row add-child-row" +
+        (p.isEntering ? " entering" : "") +
         (p.glideX !== null ? " gliding" : "") +
         (p.glideX !== null && p.glideArming ? " glide-arm" : "")
       }

@@ -17,6 +17,14 @@
      eyeballing the animation frame by frame — restore 300ms before shipping. */
   --collapse-anim-dur: 300ms;
   --collapse-anim-ease: cubic-bezier(0.83, 0, 0.17, 1);
+  /* The ENTERING row's OPACITY only — deliberately NOT --collapse-anim-ease. That curve
+     is a near-step ease-in-out: opacity would stay under ~0.1 for the first ~105ms of a
+     300ms run and cross 0.5 only at 150ms. Every Enter lands the caret in a fresh
+     entering row, so on the one thing the user is TYPING INTO that is a character or two
+     they cannot read. The DURATION stays shared; only this curve differs, and only where
+     the fading thing is a caret target rather than the moving thing — contrast
+     .drawer-content, which is the opposite case and must keep the shared curve. */
+  --enter-fade-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
   /* Parent progress wedge — DELIBERATELY NOT --collapse-anim-dur. That one is the
      drawer's clock and gets dialled past 500ms to eyeball a frame (see the note
      above), which would put every wedge in the document into slow motion. The wedge
@@ -218,22 +226,37 @@ body {
 /* 2. Entering rows (expand): fade + a short drop-in. The transform is on `.node-row`
       (a child of `.vrow`), so it composes with the virtualizer's translateY rather than
       overriding it. */
-@keyframes rowEnter {
+/* Split into two animations so movement and opacity can carry different curves (one
+   keyframe rule has exactly one timing function). Both are transform/opacity only, so
+   both are still handed to Core Animation and composite at the display's native rate. */
+@keyframes rowEnterLift {
   from {
-    opacity: 0;
     transform: translateY(-6px);
   }
 
   to {
-    opacity: 1;
     transform: translateY(0);
   }
 }
 
-/* Only the BULK path (⌘⇧E/⌘⇧D) fades rows in — a single-node expand shows the drawer
-   instead, and the real rows stay hidden behind it until teardown. */
+@keyframes rowEnterFade {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+/* Fires whenever no drawer is presenting the block: the BULK path (⌘⇧E/⌘⇧D) and every
+   runRowsAnim entrance — node creation, un-completing under hide-completed, and toggling
+   hide-completed OFF. A single-node expand shows the drawer instead, and its real rows
+   stay hidden behind it until teardown. */
 .outline-inner:not(.drawer-showing) .node-row.entering {
-  animation: rowEnter var(--collapse-anim-dur) var(--collapse-anim-ease) both;
+  animation:
+    rowEnterLift var(--collapse-anim-dur) var(--collapse-anim-ease) both,
+    rowEnterFade var(--collapse-anim-dur) var(--enter-fade-ease) both;
 }
 
 /* ---------- The drawer (single-node expand/collapse) ----------

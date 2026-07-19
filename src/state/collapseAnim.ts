@@ -35,13 +35,14 @@
  * (see controller's toggleCollapse/setCollapsed/setCollapsedAll).
  *
  * THE TAB GLIDE (indent/outdent) also lives here, at the bottom of the file — it shares
- * this module's `.rows-animating` class, its teardown timer and its `glideBand`, and
+ * this module's `.rows-animating` class, its teardown timer and its `mountBand`, and
  * having two owners for any of those would be a bug. Unlike the collapse it is driven
  * from the DELTA rather than the gesture, so ⌘Z and another window's edit glide too.
  */
 
 import { flushSync } from "react-dom";
-import type { RenderRow } from "../lib/flatten";
+import { flattenDrillRoot, flattenRoots, type RenderRow } from "../lib/flatten";
+import { anchorRowId, diffRows } from "../lib/rowBands";
 import { mirror, setStructureCommit } from "./mirror";
 import { measureFrames } from "./perfMeter";
 import { useWindowState } from "./windowState";
@@ -90,9 +91,14 @@ let animating = false;
 let mode: AnimMode = "expand";
 let prevIds: ReadonlySet<string> = new Set();
 let drawerShowing = false;
-/** The single node being toggled (null for the bulk ⌘⇧E/⌘⇧D path) — the anchor
- * `glideBand` hangs off. */
-let animRootId: string | null = null;
+/** The row id the mount band hangs off. For a collapse/expand toggle and the tab glide
+ * it is the toggled/moved NODE and the band starts after its child block; for the
+ * enter/leave/reorder paths it is a SURVIVING row and the band starts AT it. Null for
+ * the bulk ⌘⇧E/⌘⇧D path. */
+let animAnchorId: string | null = null;
+/** True when `animAnchorId` names a parent whose child block must be skipped before the
+ * band begins (the drawer/glide anchor); false when the anchor row itself starts it. */
+let animAnchorSkipBlock = true;
 let version = 0;
 const listeners = new Set<() => void>();
 
@@ -214,13 +220,14 @@ export function publishAnimEnv(e: AnimEnv | null): void {
 }
 
 /**
- * The extra index band OutlineView must keep MOUNTED for the duration of a single-node
- * toggle, on top of the virtualizer's natural window. Null when no such animation is live.
+ * The extra index band OutlineView must keep MOUNTED for the duration of an animation,
+ * on top of the virtualizer's natural window. Null when no such animation is live.
  *
- * WHY: a CSS transition only starts when the element already carried a RESOLVED style
- * carrying it — the same rule that forces the two flushSyncs below. A row the virtualizer
- * had NOT rendered before the toggle is created for the FIRST time in commit 2, with its
- * final translateY as its only computed style, so it cannot transition: it paints at the
+ * WHY: a transition needs its FROM value resolved as a SEPARATE style change, on an
+ * element that was already mounted at its old position — the same rule that forces the
+ * two flushSyncs below. A row the virtualizer had NOT rendered before the change is
+ * created for the FIRST time in commit 2, with its final translateY as its only computed
+ * style, so it has no before-change value and cannot transition: it paints at the
  * destination while its neighbours glide. The natural window reaches only `overscan` rows
  * past the viewport, so ANY subtree taller than that pushes the rows that must glide
  * outside it — which is why small subtrees animated correctly and large ones snapped from
@@ -228,37 +235,44 @@ export function publishAnimEnv(e: AnimEnv | null): void {
  * commit 2 (their new position is below the window), leaving a blank strip under the
  * sweeping edge — one cause, two symptoms.
  *
- * The rows that must glide are always the ones immediately AFTER the toggled parent's
- * block, and never more than one viewport's worth — nothing that is off-screen when the
- * animation ends can be seen to snap. So this is ~a screenful no matter how tall the
- * subtree is; the cost does not grow with H.
+ * The rows that must glide are always the ones from the anchor down, and never more than
+ * one viewport's worth — nothing off-screen when the animation ends can be seen to snap.
+ * So this is ~a screenful no matter how tall the change is; the cost does not grow with H.
  *
- * `rows` must be the CURRENT flatten. The block scan re-derives itself in whichever index
- * space it is called in, so ONE rule covers all four states: pre-collapse / post-expand
- * the block is present and the band lands past it (the rows to add / to keep);
- * post-collapse / pre-expand the block is absent, the band degenerates onto rows the
- * natural window already holds, and it costs nothing.
+ * `rows` must be the CURRENT flatten. The scan re-derives itself in whichever index space
+ * it is called in, so ONE rule covers every state: the anchor is a row that exists in
+ * BOTH flattens by construction (a survivor, or the toggled parent), so the band lands
+ * past it either way, and where the block is absent it degenerates onto rows the natural
+ * window already holds and costs nothing.
  */
-export function glideBand(
+export function mountBand(
   rows: RenderRow[],
   count: number,
   rowEstimate: number,
 ): { lo: number; hi: number } | null {
-  if (!animating || !animRootId) return null;
-  const viewport = env.scrollEl?.clientHeight ?? 0;
+  if (!animating || !animAnchorId) return null;
+  const sc = env.scrollEl;
+  const viewport = sc?.clientHeight ?? 0;
   if (viewport <= 0) return null;
   const n = Math.min(rows.length, count);
-  const p = rows.findIndex((r) => r.kind === "node" && r.nodeId === animRootId);
-  if (p < 0) return null;
-  const depth = rows[p].depth;
-  let e = p + 1;
-  while (e < n && rows[e].depth > depth) e++;
-  if (e >= n) return null; // the block runs to the end — nothing below it to glide
+  // By ROW id, so an "add:*" placeholder can anchor the band too.
+  const p = rows.findIndex((r) => r.id === animAnchorId);
+  if (p < 0 || p >= n) return null;
+  let e = p;
+  if (animAnchorSkipBlock) {
+    const depth = rows[p].depth;
+    e = p + 1;
+    while (e < n && rows[e].depth > depth) e++;
+  }
+  if (e >= n) return null; // runs to the end — nothing below it to glide
   const first = env.measureAt(e);
   if (!first) return null;
   // Walk real (or estimated) extents rather than dividing by rowEstimate, so a viewport
-  // full of short rows (dividers) is still covered end to end. Bounded by the viewport.
-  const limit = first.start + viewport + rowEstimate;
+  // full of short rows (dividers) is still covered end to end. Anchored at the viewport
+  // BOTTOM as well as at the band start, so a change beginning above the fold still
+  // mounts everything that will travel through view. Bounded by the viewport, never by H.
+  const limit =
+    Math.max(first.start, (sc?.scrollTop ?? 0) + viewport) + viewport + rowEstimate;
   let hi = e;
   while (hi + 1 < n) {
     const m = env.measureAt(hi + 1);
@@ -269,6 +283,21 @@ export function glideBand(
 }
 
 // ---- overlays ----
+/** Let a ghost overlay live out its dissolve on its own, then drop it. `animationend`
+ * does the work; the timer is the belt-and-braces path for the cases that never fire one
+ * (an overlay detached from the document, a zero-duration animation under reduced
+ * motion), so an overlay can never be leaked into the DOM. */
+function detachGhosts(el: HTMLElement) {
+  let done = false;
+  const drop = () => {
+    if (done) return;
+    done = true;
+    el.remove();
+  };
+  el.addEventListener("animationend", drop, { once: true });
+  setTimeout(drop, animDurationMs() + TEARDOWN_BUFFER_MS * 4);
+}
+
 let ghostOverlay: HTMLElement | null = null;
 let drawerEl: HTMLElement | null = null;
 /** Applies the `to` transforms; split from the build so BOTH the drawer's transition and
@@ -279,7 +308,16 @@ let endTimer: ReturnType<typeof setTimeout> | null = null;
 
 function removeOverlays() {
   if (ghostOverlay) {
-    ghostOverlay.remove();
+    // NOT removed here. The ghost overlay is a self-contained, fixed-duration dissolve
+    // that owns no live rows, so yanking it mid-fade is pure loss — with the near-step
+    // curve it is still near full opacity a third of the way in, and it would POP out
+    // exactly where it exists to prevent a pop. Two leaves 100ms apart (⌘Enter, ⌘Enter
+    // under hide-completed) is an ordinary rhythm and hits this every time. Detach the
+    // reference so a new overlay can be raised, and let this one finish and self-remove
+    // (ghostLeave ends at opacity 0 with `both`, and the overlay is pointer-events:none,
+    // so it is invisible and inert from then on). The DRAWER, by contrast, must still be
+    // torn down synchronously below: it HIDES the real rows behind it.
+    detachGhosts(ghostOverlay);
     ghostOverlay = null;
   }
   if (drawerEl) {
@@ -289,26 +327,53 @@ function removeOverlays() {
   startDrawer = null;
 }
 
-/** Clone the currently-rendered rows of the collapsing subtree into a fade-out overlay,
- * pinned at their pre-collapse positions. Reached ONLY when a single-node collapse can't
- * build a drawer — bulk ⌘⇧E passes no roots and returns here immediately. */
-function captureGhosts(prevRows: RenderRow[], collapseRoots: string[]) {
+/** Clone the leaving rows into ONE fade-out overlay, pinned at their pre-change
+ * positions. The two callers name the leavers two different ways:
+ *   - collapse fallback (`collapseRoots`): the subtree, root row EXCLUDED — it stays;
+ *   - leave animation (`leavingIds`): exact ROW ids from the flatten diff — the leaving
+ *     node's own row IS included, and so are its derived "add:*" rows.
+ * The mirror is ALREADY mutated when the delta seam runs, so `mirror.descendants` is
+ * empty for a deleted id and the collapseRoots derivation could never be reused there.
+ * Bulk ⌘⇧E passes neither and returns immediately — no ghosts on that path, by design. */
+function captureGhosts(
+  prevRows: RenderRow[],
+  collapseRoots: string[] | null,
+  leavingIds: ReadonlySet<string> | null,
+) {
   const inner = env.inner;
-  if (!inner || collapseRoots.length === 0) return;
-  const roots = new Set(collapseRoots);
-  const leaving = new Set<string>();
-  for (const r of collapseRoots) for (const d of mirror.descendants(r)) leaving.add(d);
+  if (!inner) return;
+  let keep: (row: RenderRow) => boolean;
+  if (leavingIds) {
+    if (leavingIds.size === 0) return;
+    keep = (row) => leavingIds.has(row.id);
+  } else {
+    if (!collapseRoots || collapseRoots.length === 0) return;
+    const roots = new Set(collapseRoots);
+    const leaving = new Set<string>();
+    for (const r of collapseRoots) for (const d of mirror.descendants(r)) leaving.add(d);
+    // Keep the collapsing parent's own node row; drop its "+" add-row, its descendants
+    // and their add-rows (all carry a nodeId inside the subtree).
+    keep = (row) =>
+      !(row.kind === "node" && roots.has(row.nodeId)) && leaving.has(row.nodeId);
+  }
 
   const overlay = document.createElement("div");
   overlay.className = "collapse-ghosts";
   inner.querySelectorAll<HTMLElement>(".vrow").forEach((v) => {
     const row = prevRows[Number(v.getAttribute("data-index"))];
-    if (!row) return;
-    // Keep the collapsing parent's own node row; drop its "+" add-row, its descendants
-    // and their add-rows (all carry a nodeId inside the subtree).
-    if (row.kind === "node" && roots.has(row.nodeId)) return;
-    if (!leaving.has(row.nodeId)) return;
-    overlay.appendChild(v.cloneNode(true));
+    if (!row || !keep(row)) return;
+    const c = v.cloneNode(true) as HTMLElement;
+    // A clone is an inert snapshot: never editable, never focusable, never wearing the
+    // marker classes the live rows use. buildDrawer already did this; captureGhosts did
+    // not — harmless while it only ever cloned a collapsing subtree, but a deletion
+    // makes cloning the FOCUSED contenteditable the normal case.
+    c.classList.remove("entering-row");
+    c.removeAttribute("contenteditable");
+    c.querySelectorAll("[contenteditable]").forEach((n) =>
+      n.removeAttribute("contenteditable"),
+    );
+    c.setAttribute("aria-hidden", "true");
+    overlay.appendChild(c);
   });
   if (overlay.childNodes.length > 0) {
     inner.appendChild(overlay);
@@ -417,7 +482,8 @@ export function endAnimNow(): void {
     animating = false;
     drawerShowing = false;
     prevIds = new Set();
-    animRootId = null;
+    animAnchorId = null;
+    animAnchorSkipBlock = true;
     // Teardown is a PROP change, not a class the row remembers: the next render emits
     // every row with no `.gliding` and no offset. That's why onWheel's guard, the
     // unmount cleanup and runCollapseAnim's preempt all cancel a glide for free.
@@ -455,7 +521,7 @@ export function runCollapseAnim(
   if (m === "collapse") {
     // The leaving rows are still in the DOM right now — clone before applying.
     const ok = rootId ? buildDrawer("collapse", rootId, prevRows) : false;
-    if (!ok) captureGhosts(prevRows, roots);
+    if (!ok) captureGhosts(prevRows, roots, null);
     drawerShowing = ok;
   } else {
     // Hide the entering rows from their very first commit, so the drawer (built below,
@@ -464,13 +530,14 @@ export function runCollapseAnim(
   }
   // Set BEFORE commit 1: the band's rows must mount in the same commit that adds
   // `.rows-animating`, so the forced reflow below arms them with a before-change style.
-  animRootId = rootId;
+  animAnchorId = rootId;
+  animAnchorSkipBlock = true;
   animating = true;
 
   // COMMIT 1 — flags only, rows UNCHANGED. Then force a style resolution. This is what
-  // makes the rows below actually glide: a CSS transition only starts if the element's
-  // previously RESOLVED style already carried the transition. Letting React batch the
-  // class in with the new positions leaves the survivors with no before-change style to
+  // makes the rows below actually glide: a transition needs its FROM value resolved as a
+  // SEPARATE style change, on an element already mounted at its old position. Letting
+  // React batch the class in with the new positions gives the survivors nothing to
   // animate from, and they snap to their new spot (shipped bug, fixed). Don't collapse
   // these two flushes back into one.
   flushSync(bump);
@@ -498,6 +565,96 @@ export function runCollapseAnim(
     measureFrames(`collapse:${m}`, dur + 120);
   }
   endTimer = setTimeout(endAnimNow, dur + TEARDOWN_BUFFER_MS);
+}
+
+// ---- row enter / leave / reorder (creation, deletion, hide-completed, ⌥↑↓) ----
+
+/** More entering+leaving rows than a gesture can plausibly produce ⇒ a bulk rewrite;
+ * snap. This guard, plus the op-count and origin bails in the seam, is what keeps
+ * import/replace_all, the auto-archive sweep, seed_demo (⌘⌃⇧7) and a large undo off the
+ * animation path. Precedent: GLIDE_MAX_ROOTS.
+ *
+ * Set generously, because the COST does not scale with it: the ghost overlay clones only
+ * the rows the virtualizer has RENDERED (~a screenful), and everything else here is one
+ * O(rows) diff that the flatten already pays for. Hiding completed rows in a well-used
+ * document routinely moves >64 rows and is unmistakably a gesture, so a tight cap would
+ * mostly just refuse to animate the very case this was built for. */
+const ROWS_ANIM_MAX_CHANGED = 200;
+
+/**
+ * THE entry point for creation / deletion / hide-completed / ⌥↑↓ — every row change that
+ * is NOT a disclosure toggle and NOT a reparent. Returns false when it declines, and the
+ * caller must then run `apply()` itself, un-animated.
+ *
+ * NO NEW VISUAL PRIMITIVE. This is the bulk ⌘⇧E/⌘⇧D path plus the collapse ghost
+ * fallback, fired from a FLATTEN DIFF instead of from a collapse gesture:
+ *   entering rows → mode "expand" → isEntering → `.node-row.entering` → rowEnter fade
+ *   leaving  rows → one `.collapse-ghosts` overlay → ghostLeave (fade + drift)
+ *   everyone else → the `.rows-animating` reflow, which IS the row area opening/closing
+ * — so creation and deletion are the same two rules with the sign flipped, which is
+ * exactly the symmetry that was asked for.
+ *
+ * `drawerShowing` is ALWAYS false here, deliberately. A clip needs
+ * `.drawer-showing .vrow.entering-row { visibility: hidden }` on the real row so it can't
+ * double-draw, and in WebKit a visibility:hidden element is not a focusable area:
+ * el.focus() (RowEditor's layout effect) is a silent no-op, its deps are
+ * [isFocused, focusEpoch] so it is never retried, the caret isn't painted and the row
+ * isn't hit-testable. Keystrokes into a freshly created node would be DROPPED, not merely
+ * delayed — and every Enter lands the caret in a fresh entering row. The clip exists for
+ * the H≈1200px subtree case, which a creation never is.
+ *
+ * ORDERING is load-bearing and mirrors runCollapseAnim exactly: ghosts are cloned FIRST,
+ * before commit 1 (which re-renders every mounted row); then the flags flip on, then TWO
+ * flushSyncs with a forced reflow between, so every moving row is style-resolved at its
+ * OLD translateY as a separate style change before the new one is written.
+ */
+export function runRowsAnim(
+  prevRows: RenderRow[],
+  nextRows: RenderRow[],
+  apply: () => void,
+  label: string,
+): boolean {
+  const inner = env.inner;
+  if (!inner) return false;
+  const d = diffRows(prevRows, nextRows);
+  if (d.firstChanged < 0) return false; // flatten unchanged — nothing to animate
+  // Mixed directions have no coherent single motion, and import/replace_all mints FRESH
+  // ids so EVERY row both leaves and enters — that whole path self-excludes here.
+  if (d.entering.size > 0 && d.leaving.size > 0) return false;
+  if (d.entering.size + d.leaving.size > ROWS_ANIM_MAX_CHANGED) return false;
+
+  endAnimNow(); // one owner for `.rows-animating`, the overlays and the teardown timer
+
+  prevIds = new Set(prevRows.map((r) => r.id));
+  // "expand" is the only mode isEntering() answers for; with nothing entering, "collapse"
+  // just means "fade nothing in" — which is also the pure-reorder (⌥↑/↓) case.
+  mode = d.entering.size > 0 ? "expand" : "collapse";
+  drawerShowing = false;
+  // On a LEAVE the anchor must sit PAST the removed block, so the band's reach scales
+  // with the removed height (see anchorRowId).
+  animAnchorId = anchorRowId(
+    prevRows,
+    d,
+    new Set(nextRows.map((r) => r.id)),
+    d.leaving.size > 0,
+  );
+  animAnchorSkipBlock = false;
+  animating = true;
+
+  if (d.leaving.size > 0) captureGhosts(prevRows, null, d.leaving);
+
+  // COMMIT 1 — flags only, rows UNCHANGED; then resolve that style.
+  flushSync(bump);
+  void inner.offsetHeight;
+
+  // COMMIT 2 — the rows change. Survivors transition old → new from here; entering rows
+  // mount already wearing `.entering` and start rowEnter on their first paint.
+  flushSync(apply);
+
+  const dur = animDurationMs();
+  if (import.meta.env.DEV) measureFrames(`rows:${label}`, dur + 120);
+  endTimer = setTimeout(endAnimNow, dur + TEARDOWN_BUFFER_MS);
+  return true;
 }
 
 // ---- the tab glide (indent / outdent) ----
@@ -595,12 +752,78 @@ function planGlide(reparented: readonly string[]): Map<string, number> | null {
  * list on the main thread each frame. The row is laid out at its final indent from
  * commit 2 and TRANSLATED back, so the motion stays pure compositor work.
  */
-setStructureCommit((reparented, publish) => {
+setStructureCommit((c, publish) => {
+  // Drained on ANY structural delta now: a same-parent drag drop emits position-only ops,
+  // which reach this seam as `moved`.
   const suppressed = performance.now() < suppressUntil;
   suppressUntil = 0;
   const inner = env.inner;
-  const roots = suppressed || !inner ? null : planGlide(reparented);
-  if (!roots || !inner) {
+  // Cheap bails FIRST. Note what is NOT here: endAnimNow(). This seam sees every
+  // structural delta including ⌘⇧F highlight flips, which move nothing — an unconditional
+  // teardown at the top would kill a live drawer on every ⌘⇧F. Classify, THEN tear down.
+  if (
+    !inner ||
+    suppressed ||
+    c.origin === "auto-archive" || // the deferred launch sweep: unprompted, never animate
+    c.opCount > DELTA_MAX_OPS
+  ) {
+    publish();
+    return;
+  }
+
+  // 1. REPARENT → the tab glide, which owns its own three-commit sequence.
+  if (c.reparented.length > 0) {
+    runGlide(c.reparented, inner, publish);
+    return;
+  }
+
+  // 2. Nothing that can move a row ⇒ don't even flatten. This is the ⌘⇧F highlight-flip
+  //    exit: structural (the breadcrumb walk is global), but no row moves.
+  if (
+    c.inserted.length === 0 &&
+    c.deleted.size === 0 &&
+    c.moved.length === 0 &&
+    c.completionFlips.length === 0
+  ) {
+    publish();
+    return;
+  }
+
+  // 3. purgeDeleted resets `drill` INSIDE publish when the drill root dies, replacing the
+  //    whole view. That is navigation, not a row change, and the flatten computed here
+  //    would be for a doomed view.
+  const st = useWindowState.getState();
+  if (st.drill && c.deleted.has(st.drill)) {
+    publish();
+    return;
+  }
+
+  // 4. The flatten is a pure function of the ALREADY-MUTATED mirror (upserts are eager,
+  //    and a delete's sibling-list removal is eager too — only the record survives into
+  //    publish), so this is byte-exact what OutlineView's memo will produce in commit 2.
+  const next = st.drill
+    ? flattenDrillRoot(st.drill, st.collapsed, st.hideCompleted, st.keepVisible)
+    : flattenRoots(st.collapsed, st.hideCompleted, st.keepVisible);
+  const label =
+    c.deleted.size > 0 ? "leave" : c.inserted.length > 0 ? "enter" : "reorder";
+  // env.rows() is the LAST RENDERED flatten — still pre-mutation here, since React hasn't
+  // re-rendered yet.
+  if (!runRowsAnim(env.rows(), next, publish, label)) publish();
+});
+
+/** Ops beyond this are a bulk reshuffle, not a gesture: import/replace_all, Clear
+ * Completed, seed_demo (⌘⌃⇧7, ~11k inserts), a large undo. Publish and snap — cheaper
+ * than flattening twice to discover the same thing. */
+const DELTA_MAX_OPS = 400;
+
+/** The tab glide's three-commit sequence (see the doc comment above the seam). */
+function runGlide(
+  reparented: readonly string[],
+  inner: HTMLElement,
+  publish: () => void,
+) {
+  const roots = planGlide(reparented);
+  if (!roots) {
     publish();
     return;
   }
@@ -612,11 +835,12 @@ setStructureCommit((reparented, publish) => {
   prevIds = new Set(env.rows().map((r) => r.id));
   mode = "glide";
   drawerShowing = false;
-  // Reuse the drawer's band anchor. At commit 1 (old flatten) glideBand mounts ~one
+  // Reuse the drawer's band anchor. At commit 1 (old flatten) mountBand mounts ~one
   // screenful below the moved node's OLD block — exactly the rows an outdent travels
   // past. Without it, overscan(14) leaves them unrendered and they snap from a seam
   // while the moved row glides (the drawer's "one cause, two symptoms" bug).
-  animRootId = roots.keys().next().value ?? null;
+  animAnchorId = roots.keys().next().value ?? null;
+  animAnchorSkipBlock = true;
   glideRoots = roots;
   animating = true;
 
@@ -643,7 +867,7 @@ setStructureCommit((reparented, publish) => {
   const dur = animDurationMs();
   if (import.meta.env.DEV) measureFrames("glide", dur + 120);
   endTimer = setTimeout(endAnimNow, dur + TEARDOWN_BUFFER_MS);
-});
+}
 
 // Module-level state must never be split across HMR generations — decline hot updates.
 if (import.meta.hot) {

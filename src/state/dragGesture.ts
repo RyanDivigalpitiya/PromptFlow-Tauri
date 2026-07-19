@@ -174,10 +174,11 @@ export function glyphMouseDown(
     if (!proj) return;
     // A drop already tells the whole story — marker, ghost, dimmed row — so the row
     // should simply BE at the projected spot when the drag ends, not fly there after.
-    // ONLY for a drop that actually reparents: the suppression is drained by the
-    // reparent seam, so arming it for a same-parent reorder (which emits position-only
-    // ops and never reaches the seam) would leave it set and eat the next Tab's glide.
-    if (proj.parentId !== (mirror.get(nodeId)?.parent ?? null)) suppressGlideOnce();
+    // Armed unconditionally: the seam now sees EVERY structural delta, so a same-parent
+    // drop reaches it as a reorder and drains the suppression — it can no longer leak
+    // into the next Tab. And it must be armed either way, or the settle would animate
+    // and disagree with the drop marker, whose projection frames are un-animated.
+    suppressGlideOnce();
     void (async () => {
       const out =
         block.length > 1

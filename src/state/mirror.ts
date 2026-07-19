@@ -91,20 +91,41 @@ function setUndoState(canUndo: boolean, canRedo: boolean) {
   undoListeners.forEach((cb) => cb());
 }
 
-/** Wrapper around a delta's structural notification, installed by the animation layer
- * so a REPARENT can be split into the multi-commit sequence a CSS transition needs (a
- * transition only starts if the property's transition was already in the element's
- * RESOLVED style before its value changed — see collapseAnim.ts). The wrapper MUST call
- * `publish` exactly once, synchronously; the default just does.
+/** What a structural delta did to the row set, classified in ONE pass over the ops so
+ * the animation layer can dispatch without re-deriving any of it. */
+export interface StructureChange {
+  /** The mutating window's label, or "undo"/"redo"/"auto-archive". */
+  origin: string;
+  /** Op count — the cheap bulk guard (import, seed_demo, Clear Completed). */
+  opCount: number;
+  /** Upserts with no previous record. */
+  inserted: string[];
+  /** Delete ops. `delete_subtree` lists every descendant, so this is the whole set. */
+  deleted: ReadonlySet<string>;
+  /** Parent changed ⇒ depth changed. The tab glide's input. */
+  reparented: string[];
+  /** Position changed but parent did NOT (⌥↑/↓, a same-level drag) — vertical only. */
+  moved: string[];
+  /** isCompleted flipped — a visibility change under hide-completed, a restyle otherwise. */
+  completionFlips: string[];
+}
+
+/** Wrapper around a delta's structural notification, installed by the animation layer so
+ * a row change can be split into the multi-commit sequence a CSS transition needs. (A
+ * transition takes its property and duration from the AFTER-change style; what it needs
+ * is its FROM value resolved as a SEPARATE style change, on an element that was already
+ * mounted at its old position — see collapseAnim.ts.) The wrapper MUST call `publish`
+ * exactly once, synchronously; the default just does.
  *
- * Called ONLY when some node actually changed parent, so a keystroke, a completion
- * toggle and a same-level reorder (⌥↑/↓) never reach it. Exactly one owner, like the
- * animation's other singletons. */
-type StructureCommit = (
-  reparented: readonly string[],
-  publish: () => void,
-) => void;
-let structureCommit: StructureCommit = (_ids, publish) => publish();
+ * Called for EVERY structural delta — insert, delete, reparent, reorder, completion flip
+ * — so the wrapper must CLASSIFY before it tears anything down: a ⌘⇧F highlight flip is
+ * structural (the breadcrumb walk is global) but moves no row, and an unconditional
+ * endAnimNow() at the top would rip a live drawer out on every highlight toggle.
+ * `load()`/`reload()` deliberately bypass this seam: a full snapshot (first launch,
+ * rev-gap resync) must NEVER animate. Exactly one owner — this OVERWRITES, there is no
+ * registry, and a second installer would silently steal the animation. */
+type StructureCommit = (c: StructureChange, publish: () => void) => void;
+let structureCommit: StructureCommit = (_c, publish) => publish();
 export function setStructureCommit(fn: StructureCommit) {
   structureCommit = fn;
 }
@@ -122,6 +143,11 @@ function applyDelta(delta: Delta) {
   const touched: string[] = [];
   const deleted = new Set<string>();
   const reparented: string[] = [];
+  const inserted: string[] = [];
+  const moved: string[] = [];
+  const completionFlips: string[] = [];
+  /** Records whose map entries are dropped in publish(), not here — see the note there. */
+  const pendingDeletes: string[] = [];
   for (const op of delta.ops) {
     if (op.type === "upsert") {
       const rec = op.node;
@@ -130,6 +156,7 @@ function applyDelta(delta: Delta) {
       if (!old) {
         insertSorted(rec.parent, rec.id);
         structural = true;
+        inserted.push(rec.id);
         // The parent's row shows a chevron/ring the moment it gains a first child.
         if (rec.parent) touched.push(rec.parent);
       } else if (old.parent !== rec.parent || old.position !== rec.position) {
@@ -142,10 +169,12 @@ function applyDelta(delta: Delta) {
         // indent rather than snap. A changed position alone (⌥↑/↓, a same-level drag)
         // moves it only vertically, which the reflow transition already covers.
         if (old.parent !== rec.parent) reparented.push(rec.id);
+        else moved.push(rec.id);
       }
       if (old && old.isCompleted !== rec.isCompleted) {
         // Visibility under hide-completed + parent progress rings both change.
         structural = true;
+        completionFlips.push(rec.id);
         if (rec.parent) touched.push(rec.parent);
       }
       if (old && old.isHighlighted !== rec.isHighlighted) {
@@ -156,25 +185,53 @@ function applyDelta(delta: Delta) {
     } else {
       const old = nodes.get(op.id);
       if (old) {
-        nodes.delete(op.id);
+        // The sibling-list removal is EAGER, so a flatten taken at the seam is already
+        // the exact post-delta one (a parent's derived "add:" row drops with its last
+        // child, which an id filter over the old flatten could not reproduce). The
+        // RECORD and its version survive until publish() — see the note there.
         removeFromParent(old.parent, op.id);
+        pendingDeletes.push(op.id);
         if (old.parent) touched.push(old.parent);
       }
-      nodeVersions.delete(op.id);
       deleted.add(op.id);
       structural = true;
     }
   }
-  // Routed through the seam ONLY for a reparent, so the animation layer can wrap the
-  // notification in its commit sequence. `load()`/`reload()` deliberately bypass it: a
-  // full snapshot (first load, rev-gap resync) must never animate.
+  // EVERY structural delta is routed through the seam so the animation layer can wrap
+  // the notification in its commit sequence; it classifies and declines cheaply.
+  // `load()`/`reload()` deliberately bypass it: a full snapshot (first load, rev-gap
+  // resync) must never animate.
   const publish = () => {
+    // Drained HERE, not in the op loop: the animation layer's seam runs BEFORE publish,
+    // and its first commit re-renders every mounted row. With the record already gone
+    // NodeRow renders null, and nodeVersions.delete changes that row's
+    // useSyncExternalStore snapshot, forcing the re-render past `memo` — so the leaving
+    // rows would blank out, change height, and drive the virtualizer's ResizeObserver to
+    // reposition the whole list WHILE `.rows-animating` is on. Deferring keeps them
+    // rendering their (already-detached) records through commit 1, which is exactly what
+    // a leave animation needs them to do.
+    for (const id of pendingDeletes) {
+      nodes.delete(id);
+      nodeVersions.delete(id);
+    }
     for (const id of touched) if (nodes.has(id)) bumpNode(id);
     if (deleted.size > 0) deletedHooks.forEach((h) => h(deleted));
     if (structural) notifyStructure();
   };
-  if (structural && reparented.length > 0) structureCommit(reparented, publish);
-  else publish();
+  if (structural) {
+    structureCommit(
+      {
+        origin: delta.origin,
+        opCount: delta.ops.length,
+        inserted,
+        deleted,
+        reparented,
+        moved,
+        completionFlips,
+      },
+      publish,
+    );
+  } else publish();
   setUndoState(delta.canUndo, delta.canRedo);
 }
 

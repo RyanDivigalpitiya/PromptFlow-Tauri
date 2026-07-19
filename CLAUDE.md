@@ -21,7 +21,7 @@ npm install                  # once
 scripts/dev.sh [store.sqlite]  # tauri dev against an ISOLATED store (default /tmp/promptflow-tauri-dev.sqlite)
 scripts/build.sh             # release bundle -> src-tauri/target/release/bundle/macos/PromptFlow.app
 scripts/verify.sh            # launch smoke test of the release build (throwaway store, polls for a window)
-npm test                     # vitest: 4 suites / 25 tests (resolveKey, wrap, bold, projectDrop)
+npm test                     # vitest: 5 suites / 36 tests (resolveKey, wrap, bold, projectDrop, rowBands)
 cd src-tauri && cargo test   # 12 tests (store mutations/undo, archive round-trip + collect)
 npx tsc --noEmit             # typecheck (strict; noUnusedLocals/Parameters)
 ```
@@ -196,6 +196,43 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   toggle in dev, plus ⌘⌃⇧8 idle baseline) — because rAF is 60Hz-capped it measures
   MAIN-THREAD health (a steady ~16.7ms ⇒ no jank, the real cause of "choppy"), NOT the
   compositor's true fps; it can't read past 60.
+- **Row enter / leave / reorder** (`runRowsAnim` in `collapseAnim.ts` + `lib/rowBands.ts`):
+  creation, deletion, the hide-completed toggle, the just-completed grace expiry and
+  ⌥↑/↓ all route through ONE entry point that adds **no new visual primitive** — it fires
+  the bulk ⌘⇧E/⌘⇧D look from a FLATTEN DIFF instead of from a collapse gesture: entering
+  rows get `.entering` (rowEnter), leaving rows are cloned into one `.collapse-ghosts`
+  overlay, everyone else rides the `.rows-animating` reflow, which IS the row area
+  opening/closing. So creation and deletion are the same two rules with the sign flipped.
+  The diff runs over the FLATTEN, never the delta's ops: `add:<id>` placeholder rows are
+  derived, so a first child mints TWO rows for ONE insert; a completion flip under
+  hide-completed removes a whole subtree with no delete op at all; and the hide-completed
+  toggle and grace expiry aren't deltas. A change that moves nothing (⌘⇧F, a completion
+  flip while hide-completed is OFF) falls out as `firstChanged === -1`.
+  **`drawerShowing` is always false here, deliberately**: a clip needs `visibility:hidden`
+  on the real row, and in WebKit that element is not focusable — `el.focus()` silently
+  no-ops and is never retried, so keystrokes into a freshly created node would be DROPPED,
+  not merely delayed (every Enter lands the caret in a fresh entering row). The clip
+  exists for the H≈1200px subtree case, which a creation never is.
+  Two trigger kinds: DELTAS reach `mirror.ts`'s widened `setStructureCommit` seam, which
+  now fires for EVERY structural delta and passes a classified `StructureChange` — so it
+  must CLASSIFY before tearing anything down (an unconditional `endAnimNow()` would kill a
+  live drawer on every ⌘⇧F). PER-WINDOW changes get a controller wrapper
+  (`setHideCompleted`, `holdVisible`), same house rule as `toggleCollapse`: never call the
+  `useWindowState` setter directly or it snaps. **The just-completed grace timer lives in
+  the controller, not the store** — as a bare `set` it had no arming commit and the row
+  vanished without animating. A delete's `nodes.delete`/`nodeVersions.delete` are DEFERRED
+  into `publish()` while `removeFromParent` stays eager: the flatten taken at the seam is
+  then exactly post-delta, while the leaving rows keep rendering through commit 1 (with
+  the record already gone they would blank out mid-animation and re-trigger the
+  ResizeObserver). `mountBand` (was `glideBand`) anchors on a SURVIVING row here rather
+  than skipping a parent's block — and WHICH survivor is load-bearing, because the band's
+  reach is measured from the anchor's old y: an ENTER anchors just before the change
+  (survivors move down), a LEAVE just past the removed block, so the removed height is
+  already in the anchor's y and the reach scales with it. Anchor a leave above the block
+  and every survivor more than ~2 viewports down snaps. A ghost overlay is never torn down
+  mid-fade either (`detachGhosts`): it owns no live rows, so it is left to finish and
+  self-remove — two leaves 100ms apart is an ordinary rhythm, and yanking the first would
+  pop exactly where the overlay exists to prevent a pop.
 - **Tab glide** (the bottom of `collapseAnim.ts`; CSS `.node-row.gliding` / `.glide-arm`):
   Tab/⇧Tab slides the moved row into its new indent instead of snapping. Driven from the
   DELTA, not the gesture — `mirror.ts`'s `setStructureCommit` seam hands the animation

@@ -16,7 +16,7 @@ import { OutlineLayout } from "../lib/layout";
 import {
   animVersion,
   endAnimNow,
-  glideBand,
+  mountBand,
   glideLevels,
   isAnimating,
   isDrawerShowing,
@@ -131,13 +131,13 @@ export function OutlineView() {
   const rowEstimate =
     OutlineLayout.lineHeight(fontSize) + OutlineLayout.rowVerticalPadding * 2;
 
-  // The natural window plus, during a single-node expand/collapse, the rows that have to
-  // GLIDE with the drawer's edge (see `glideBand`). A row absent from the DOM when the
+  // The natural window plus, during any animated row change, the rows that have to
+  // GLIDE with the change (see `mountBand`). A row absent from the DOM when the
   // animation arms has no before-change style and can only snap to its new position, so
   // `overscan` alone caps the animation at subtrees of ~14 rows.
   //
   // Identity is STABLE while idle — none of the deps change on a scroll tick — so
-  // `getVirtualIndexes`' memo short-circuits exactly as before and `glideBand` isn't even
+  // `getVirtualIndexes`' memo short-circuits exactly as before and `mountBand` isn't even
   // called. It changes on the anim bump, which is commit 1 of `runCollapseAnim`: that is
   // the one moment it MUST change, because there `count` and the range are still
   // identical and a stable identity would be memoized away, mounting nothing.
@@ -145,7 +145,7 @@ export function OutlineView() {
     (range: Range) => {
       const a0 = Math.max(range.startIndex - range.overscan, 0);
       const a1 = Math.min(range.endIndex + range.overscan, range.count - 1);
-      const band = glideBand(rows, range.count, rowEstimate);
+      const band = mountBand(rows, range.count, rowEstimate);
       // Never extend ABOVE the natural window: virtual-core compensates with a real
       // scrollTo the first time it measures a never-sized row that starts above the
       // scroll offset, which would jump the view mid-animation.
@@ -330,6 +330,7 @@ export function OutlineView() {
                   fontSize={fontSize}
                   showGuides={showGuides}
                   guideColor={guideColor}
+                  isEntering={entering}
                   glideX={glideX}
                   glideArming={glideArming}
                   hiddenCount={

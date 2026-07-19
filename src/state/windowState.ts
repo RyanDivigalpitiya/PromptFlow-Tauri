@@ -54,7 +54,11 @@ interface WindowState {
   focusNode(id: string | null, field?: FocusField, caret?: CaretIntent): void;
   clearFocus(): void;
   setExemptPruneOnce(id: string | null): void;
-  holdVisible(id: string, ms?: number): void;
+  /** Add to the just-completed grace set. TIMER-FREE by design: the release has to run
+   * through controller.holdVisible so it can animate, exactly as a collapse has to run
+   * through controller.setCollapsed. A bare `set({keepVisible})` snaps. */
+  holdVisible(id: string): void;
+  releaseVisible(ids: readonly string[]): void;
   toggleFocusPane(): void;
   /** Drop references to deleted nodes (fired from the mirror's delete hook). */
   purgeDeleted(ids: Set<string>): void;
@@ -198,17 +202,19 @@ export const useWindowState = create<WindowState>((set, get) => ({
     set({ exemptPruneOnce: id });
   },
 
-  holdVisible(id, ms = 1400) {
-    const next = new Set(get().keepVisible);
+  holdVisible(id) {
+    const cur = get().keepVisible;
+    if (cur.has(id)) return;
+    const next = new Set(cur);
     next.add(id);
     set({ keepVisible: next });
-    setTimeout(() => {
-      const cur = get().keepVisible;
-      if (!cur.has(id)) return;
-      const after = new Set(cur);
-      after.delete(id);
-      set({ keepVisible: after });
-    }, ms);
+  },
+  releaseVisible(ids) {
+    const cur = get().keepVisible;
+    const next = new Set(cur);
+    for (const id of ids) next.delete(id);
+    if (next.size === cur.size) return;
+    set({ keepVisible: next });
   },
 
   toggleFocusPane() {

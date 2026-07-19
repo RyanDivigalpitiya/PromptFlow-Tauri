@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { OutlineLayout, Theme } from "../lib/layout";
+import { setHideCompleted } from "../state/controller";
 import { mirror } from "../state/mirror";
 import { useSettings } from "../state/settings";
 import { useWindowState } from "../state/windowState";
@@ -81,7 +82,7 @@ export function SettingsPanel() {
     const out = await invoke<{ archived: number; path: string }>(
       "clear_completed",
     );
-    useWindowState.getState().setHideCompleted(false);
+    setHideCompleted(false);
     setNotice(`Archived ${out.archived} nodes to ${out.path.split("/").pop()}.`);
   };
 

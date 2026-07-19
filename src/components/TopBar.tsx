@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { OutlineLayout } from "../lib/layout";
+import { setHideCompleted } from "../state/controller";
 import { mirror, nodeVersion, subscribeNode } from "../state/mirror";
 import { useSettings } from "../state/settings";
 import { useWindowState } from "../state/windowState";
@@ -92,7 +93,7 @@ export function TopBar() {
         </button>
         <button
           className={"bar-btn" + (hideCompleted ? " active" : "")}
-          onClick={() => s().setHideCompleted(!hideCompleted)}
+          onClick={() => setHideCompleted(!hideCompleted)}
           title={hideCompleted ? "Show completed" : "Hide completed"}
         >
           <svg width={14 * ts} height={14 * ts} viewBox="0 0 14 14">

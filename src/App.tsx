@@ -7,6 +7,7 @@ import { api, onRowMenuAction } from "./lib/api";
 import { endAnimNow } from "./state/collapseAnim";
 import {
   copyBlock,
+  holdVisible,
   indentTargetParent,
   performRowMenuAction,
   setCollapsed,
@@ -70,6 +71,11 @@ function handleSelectionKey(e: KeyboardEvent): boolean {
     return true;
   }
   if (e.metaKey && e.key === "Enter") {
+    // Mirrors controller.toggleCompleted: arm the grace BEFORE the invoke, as ONE hold,
+    // so the whole block waits and then leaves in a single animation.
+    if (s.hideCompleted) {
+      holdVisible(ids.filter((id) => !mirror.get(id)?.isCompleted));
+    }
     void api.toggleCompletedBlock(ids).then(() => sel.refresh());
     done();
     return true;

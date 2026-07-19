@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { api } from "../lib/api";
-import type { RenderRow } from "../lib/flatten";
+import { flattenDrillRoot, flattenRoots, type RenderRow } from "../lib/flatten";
 
 /** Dev diagnostics to the terminal (see commands::log_msg). */
 export function dbg(msg: string) {
@@ -9,7 +9,7 @@ export function dbg(msg: string) {
 import type { KeyDecision } from "../lib/keys";
 import { toMarkdown } from "../lib/runs";
 import { inheritableKind, type NodeKind } from "../lib/types";
-import { runCollapseAnim } from "./collapseAnim";
+import { runCollapseAnim, runRowsAnim } from "./collapseAnim";
 import { mirror } from "./mirror";
 import { markCompleting } from "./rowAnim";
 import { useSelection } from "./selection";
@@ -169,12 +169,17 @@ export async function toggleCompleted(
   // Play the check/pop the moment the user acts (before the store round-trip), so the
   // row is already flagged when its completed delta re-renders it.
   if (completing) markCompleting(nodeId);
+  // Armed BEFORE the invoke. store://delta is emitted synchronously inside the Rust
+  // command and can land before the invoke promise resolves, leaving a window where the
+  // node is completed and NOT yet in keepVisible — the flatten drops it, so the row
+  // unmounts and remounts a tick later. It is also load-bearing for the animation: with
+  // the grace already armed, the completion delta produces an IDENTICAL flatten,
+  // runRowsAnim declines, and the leave is owned solely by the grace timer. Pre-arming is
+  // inert if the toggle fails, since keepVisible is only consulted for completed nodes.
+  if (completing && ws().hideCompleted) holdVisible(nodeId);
   await api.toggleCompleted(nodeId);
   if (!completing) return;
   const s = ws();
-  // Under hide-completed, hold the just-completed node on screen briefly before it
-  // slips away (the grace set the flatten's keepVisible reads).
-  if (s.hideCompleted) s.holdVisible(nodeId);
   if (!opts.spawnNext) return;
   // Never spawn for the drill root — the sibling would render outside the drilled view.
   if (s.drill === nodeId) return;
@@ -386,6 +391,67 @@ export function setCollapsedAll(collapsed: boolean) {
   runCollapseAnim(collapsed ? "collapse" : "expand", [], visibleRows(), apply);
 }
 
+/** The rows a PER-WINDOW change is about to produce, computed WITHOUT applying it. The
+ * flatten is pure over (mirror, collapsed, hideCompleted, keepVisible, drill), so the
+ * animation can diff the exact next rows up front. One extra flatten per gesture (<8ms
+ * even at 11k rows — see OutlineView's dbg threshold): a one-shot cost, not per-frame. */
+function previewRows(over: {
+  hideCompleted?: boolean;
+  keepVisible?: ReadonlySet<string>;
+}): RenderRow[] {
+  const s = ws();
+  const hide = over.hideCompleted ?? s.hideCompleted;
+  const keep = over.keepVisible ?? s.keepVisible;
+  return s.drill
+    ? flattenDrillRoot(s.drill, s.collapsed, hide, keep)
+    : flattenRoots(s.collapsed, hide, keep);
+}
+
+function animatedApply(nextRows: RenderRow[], apply: () => void, label: string) {
+  if (!runRowsAnim(visibleRows(), nextRows, apply, label)) apply();
+}
+
+/** Animated hide-completed toggle. Same house rule as toggleCollapse: NEVER call
+ * `useWindowState.setHideCompleted` directly, or the change snaps. (Subscribing to
+ * zustand inside collapseAnim instead is not an option — a store listener fires AFTER
+ * the state object is swapped, so a flushSync from it would render `.rows-animating`
+ * and the new `rows` in ONE commit, which is the snap this whole dance exists to
+ * avoid.) Call sites: TopBar, SettingsPanel. */
+export function setHideCompleted(on: boolean) {
+  const s = ws();
+  if (s.hideCompleted === on) return;
+  animatedApply(
+    previewRows({ hideCompleted: on }),
+    () => s.setHideCompleted(on),
+    `hideCompleted:${on}`,
+  );
+}
+
+/** Hold just-completed nodes on screen, then animate them away. The timer lives HERE and
+ * not in windowState: the store's old inline setTimeout was a bare `set` with no arming
+ * commit — the exact analogue of calling setCollapsed directly — so the row vanished
+ * without animating. A BLOCK is released in ONE apply, so N rows leave together instead
+ * of N animations tearing each other down. Also serves revealNode's 60s reveal holds. */
+export function holdVisible(ids: string | readonly string[], ms = 1400) {
+  const list = typeof ids === "string" ? [ids] : [...ids];
+  if (list.length === 0) return;
+  for (const id of list) ws().holdVisible(id);
+  setTimeout(() => {
+    const s = ws();
+    const live = list.filter((id) => s.keepVisible.has(id));
+    if (live.length === 0) return; // un-completed or deleted meanwhile
+    const keep = new Set(s.keepVisible);
+    for (const id of live) keep.delete(id);
+    // If the nodes were un-completed or hide-completed was switched off meanwhile the
+    // flatten is unchanged, runRowsAnim declines, and the release still happens.
+    animatedApply(
+      previewRows({ keepVisible: keep }),
+      () => s.releaseVisible(live),
+      "graceExpiry",
+    );
+  }, ms);
+}
+
 /** Reveal a node from the focus pane: go Home if it's outside the current drill,
  * expand its collapsed ancestors, un-hide completed ancestors transiently (the
  * revealKeep semantics), then focus it — the presence-gated scroll effect lands it
@@ -400,10 +466,11 @@ export function revealNode(nodeId: string) {
   }
   s.expandMany(ancestors);
   if (s.hideCompleted) {
-    for (const a of ancestors) {
-      if (mirror.get(a)?.isCompleted) s.holdVisible(a, 60_000);
-    }
-    if (node.isCompleted) s.holdVisible(nodeId, 60_000);
+    // ONE hold, so the whole revealed chain leaves together in a single animation when
+    // the (long) reveal grace expires.
+    const held = ancestors.filter((a) => mirror.get(a)?.isCompleted);
+    if (node.isCompleted) held.push(nodeId);
+    holdVisible(held, 60_000);
   }
   s.focusNode(nodeId, "main", { type: "end" });
 }
