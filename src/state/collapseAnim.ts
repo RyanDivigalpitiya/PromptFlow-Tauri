@@ -305,27 +305,35 @@ export function runCollapseAnim(
     const ok = rootId ? buildDrawer("collapse", rootId, prevRows) : false;
     if (!ok) captureGhosts(prevRows, roots);
     drawerShowing = ok;
-    animating = true;
-    bump();
-    apply();
-  } else if (rootId) {
-    // The entering rows don't exist yet. Hide them from their very first commit, flush
-    // that commit so they mount AND measure, then clone them into the drawer.
-    drawerShowing = true;
-    animating = true;
-    bump();
-    flushSync(apply);
+  } else {
+    // Hide the entering rows from their very first commit, so the drawer (built below,
+    // once they exist) is the only thing drawing them.
+    drawerShowing = rootId !== null;
+  }
+  animating = true;
+
+  // COMMIT 1 — flags only, rows UNCHANGED. Then force a style resolution. This is what
+  // makes the rows below actually glide: a CSS transition only starts if the element's
+  // previously RESOLVED style already carried the transition. Letting React batch the
+  // class in with the new positions leaves the survivors with no before-change style to
+  // animate from, and they snap to their new spot (shipped bug, fixed). Don't collapse
+  // these two flushes back into one.
+  flushSync(bump);
+  void env.inner?.offsetHeight;
+
+  // COMMIT 2 — the actual row change. Survivors transition old -> new from here.
+  flushSync(apply);
+
+  if (m === "expand" && rootId) {
+    // The entering rows exist and are measured now — clone them into the drawer.
     if (!buildDrawer("expand", rootId, env.rows())) {
       drawerShowing = false; // fall back to the plain entrance fade
       bump();
     }
-  } else {
-    drawerShowing = false;
-    animating = true;
-    bump();
-    apply();
   }
 
+  // Started only now, in the same task as commit 2, so the drawer's transition shares a
+  // frame with the survivors' — a one-frame offset would show as a seam.
   startDrawer?.();
 
   // Teardown tracks the LIVE css duration, so every part runs to completion no matter
