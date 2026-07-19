@@ -137,15 +137,34 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   `toggleCollapse`/`setCollapsed`/`setCollapsedAll` → `runCollapseAnim`, never
   `useWindowState.*Collapse*` directly (raw calls skip the animation). The one
   deliberate exception is `revealNode`'s `expandMany` (a focus-pane navigation jump,
-  not a manual disclosure) — it stays un-animated, like the SwiftUI original. Three GPU-composited parts, no per-frame React: (1) below-rows slide via
+  not a manual disclosure) — it stays un-animated, like the SwiftUI original.
+  **A SINGLE-NODE toggle plays the DRAWER**; only bulk ⌘⇧E/⌘⇧D fall back to the older
+  fade + `.collapse-ghosts` dissolve (they have no single parent to hang a drawer off).
+  The drawer is three raw-DOM layers appended to `.outline-inner` (React never sees
+  them), built by `buildDrawer`: `.drawer-clip` (static, pinned at the parent's bottom
+  edge B, `overflow:hidden`) ▸ `.drawer-sweep` (`overflow:hidden`, height H,
+  `translateY(-H)→0`) ▸ `.drawer-content` (`translateY(H−CAP)→0` + opacity 0→1) holding
+  `.vrow` clones positioned block-local. **The reveal edge is a CLIP boundary, not a
+  content boundary** — that's the whole trick: the two clips intersect to exactly
+  `[B, B+H·f]`, which is where the rows below now start, so drawer and below-content
+  TILE EXACTLY at every instant for any easing. H is correctness; CAP
+  (`DRAWER_PULL_PX`) is pure taste. **Do NOT "fix" CAP up to H**: a literal rigid
+  drawer is geometrically forced to reveal the subtree BOTTOM-first (the band shows
+  block-local `[H(1−f), H]`), needs rows the virtualizer never rendered, and at
+  H≈1200px/190ms moves ~100px/frame (strobes). Movement and fade share ONE
+  duration+curve — decoupling the fade's timing was tried and reads as jarring.
+  Other GPU-composited parts, no per-frame React: (1) below-rows slide via
   a `transition: transform` GATED to a transient `.rows-animating` class on
   `.outline-inner` — an always-on transition makes plain SCROLLING lag (the virtualizer
   repositions every `.vrow` on each scroll tick), so `onWheel` calls `endAnimNow()` to
-  bail mid-flight; (2) entering rows (expand) fade in via a keyframe, flagged by
-  `isEntering` = a fresh row absent from `prevIds` captured pre-toggle; (3) leaving rows
-  (collapse) are `cloneNode`'d into ONE `.collapse-ghosts` overlay that fades out —
-  cheap and React never sees it (safe only because a collapse produces no vrow
-  insertions). The reflow transition is scoped to SURVIVORS (`:not(.entering-row)`) —
+  bail mid-flight; (2) entering rows (expand) are `visibility:hidden` behind the drawer
+  (never `display:none` — they must keep layout boxes so the ResizeObserver still
+  measures them), or fade in via a keyframe on the bulk path; `isEntering` = a fresh row
+  absent from `prevIds` captured pre-toggle. **`runCollapseAnim` MUST keep its two
+  separate `flushSync`es with a forced `offsetHeight` read between** — a CSS transition
+  only starts if the element's previously RESOLVED style already carried it, so batching
+  the `.rows-animating` class in with the new positions leaves survivors with nothing to
+  animate from and they SNAP (shipped bug, fixed). The reflow transition is scoped to SURVIVORS (`:not(.entering-row)`) —
   an entering row has no old position and is placed with an ESTIMATED height until its
   ResizeObserver reports the real one, so transitioning it animated that correction and
   made a parent's FIRST expand visibly re-space its children (the size cache is empty
