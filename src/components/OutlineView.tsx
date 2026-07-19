@@ -1,5 +1,6 @@
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { useVirtualizer, type Range } from "@tanstack/react-virtual";
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -15,6 +16,7 @@ import { OutlineLayout } from "../lib/layout";
 import {
   animVersion,
   endAnimNow,
+  glideBand,
   isAnimating,
   isDrawerShowing,
   isEntering,
@@ -85,8 +87,9 @@ export function OutlineView() {
     mirror.structureVersion(),
   );
   // Re-render when an expand/collapse animation starts or ends, so `.outline-inner`
-  // gains/loses the gated `.rows-animating` transition class.
-  useSyncExternalStore(subscribeAnim, animVersion);
+  // gains/loses the gated `.rows-animating` transition class — and so `rangeExtractor`
+  // below gets a fresh identity at exactly that moment (see there).
+  const animTick = useSyncExternalStore(subscribeAnim, animVersion);
   const collapsed = useWindowState((s) => s.collapsed);
   const hideCompleted = useWindowState((s) => s.hideCompleted);
   const keepVisible = useWindowState((s) => s.keepVisible);
@@ -124,12 +127,51 @@ export function OutlineView() {
   }, []);
   const rowEstimate =
     OutlineLayout.lineHeight(fontSize) + OutlineLayout.rowVerticalPadding * 2;
+
+  // The natural window plus, during a single-node expand/collapse, the rows that have to
+  // GLIDE with the drawer's edge (see `glideBand`). A row absent from the DOM when the
+  // animation arms has no before-change style and can only snap to its new position, so
+  // `overscan` alone caps the animation at subtrees of ~14 rows.
+  //
+  // Identity is STABLE while idle — none of the deps change on a scroll tick — so
+  // `getVirtualIndexes`' memo short-circuits exactly as before and `glideBand` isn't even
+  // called. It changes on the anim bump, which is commit 1 of `runCollapseAnim`: that is
+  // the one moment it MUST change, because there `count` and the range are still
+  // identical and a stable identity would be memoized away, mounting nothing.
+  const rangeExtractor = useCallback(
+    (range: Range) => {
+      const a0 = Math.max(range.startIndex - range.overscan, 0);
+      const a1 = Math.min(range.endIndex + range.overscan, range.count - 1);
+      const band = glideBand(rows, range.count, rowEstimate);
+      // Never extend ABOVE the natural window: virtual-core compensates with a real
+      // scrollTo the first time it measures a never-sized row that starts above the
+      // scroll offset, which would jump the view mid-animation.
+      const lo = band ? Math.max(band.lo, a0) : 0;
+      const hi = band ? Math.min(band.hi, range.count - 1) : -1;
+      const out: number[] = [];
+      const push = (from: number, to: number) => {
+        for (let i = from; i <= to; i++) out.push(i);
+      };
+      if (hi < lo) {
+        push(a0, a1); // no band (or it fell inside/behind the window)
+      } else if (lo > a1 + 1) {
+        push(a0, a1); // natural window …
+        push(lo, hi); // … plus a disjoint band, still strictly ascending
+      } else {
+        push(Math.min(a0, lo), Math.max(a1, hi)); // they touch — one run
+      }
+      return out;
+    },
+    [animTick, rows, rowEstimate],
+  );
+
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => rowEstimate,
     getItemKey: (i) => rows[i].id,
     overscan: 14,
+    rangeExtractor,
     // The document's top margin — must be the virtualizer's own padding (a CSS
     // padding on the container is invisible to its translateY positioning).
     paddingStart: OutlineLayout.documentVInset,

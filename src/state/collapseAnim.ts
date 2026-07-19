@@ -83,6 +83,9 @@ let animating = false;
 let mode: AnimMode = "expand";
 let prevIds: ReadonlySet<string> = new Set();
 let drawerShowing = false;
+/** The single node being toggled (null for the bulk ⌘⇧E/⌘⇧D path) — the anchor
+ * `glideBand` hangs off. */
+let animRootId: string | null = null;
 let version = 0;
 const listeners = new Set<() => void>();
 
@@ -131,6 +134,61 @@ let env: AnimEnv = EMPTY_ENV;
 
 export function publishAnimEnv(e: AnimEnv | null): void {
   env = e ?? EMPTY_ENV;
+}
+
+/**
+ * The extra index band OutlineView must keep MOUNTED for the duration of a single-node
+ * toggle, on top of the virtualizer's natural window. Null when no such animation is live.
+ *
+ * WHY: a CSS transition only starts when the element already carried a RESOLVED style
+ * carrying it — the same rule that forces the two flushSyncs below. A row the virtualizer
+ * had NOT rendered before the toggle is created for the FIRST time in commit 2, with its
+ * final translateY as its only computed style, so it cannot transition: it paints at the
+ * destination while its neighbours glide. The natural window reaches only `overscan` rows
+ * past the viewport, so ANY subtree taller than that pushes the rows that must glide
+ * outside it — which is why small subtrees animated correctly and large ones snapped from
+ * a seam downward (shipped bug, fixed). On EXPAND the same rows are instead unmounted in
+ * commit 2 (their new position is below the window), leaving a blank strip under the
+ * sweeping edge — one cause, two symptoms.
+ *
+ * The rows that must glide are always the ones immediately AFTER the toggled parent's
+ * block, and never more than one viewport's worth — nothing that is off-screen when the
+ * animation ends can be seen to snap. So this is ~a screenful no matter how tall the
+ * subtree is; the cost does not grow with H.
+ *
+ * `rows` must be the CURRENT flatten. The block scan re-derives itself in whichever index
+ * space it is called in, so ONE rule covers all four states: pre-collapse / post-expand
+ * the block is present and the band lands past it (the rows to add / to keep);
+ * post-collapse / pre-expand the block is absent, the band degenerates onto rows the
+ * natural window already holds, and it costs nothing.
+ */
+export function glideBand(
+  rows: RenderRow[],
+  count: number,
+  rowEstimate: number,
+): { lo: number; hi: number } | null {
+  if (!animating || !animRootId) return null;
+  const viewport = env.scrollEl?.clientHeight ?? 0;
+  if (viewport <= 0) return null;
+  const n = Math.min(rows.length, count);
+  const p = rows.findIndex((r) => r.kind === "node" && r.nodeId === animRootId);
+  if (p < 0) return null;
+  const depth = rows[p].depth;
+  let e = p + 1;
+  while (e < n && rows[e].depth > depth) e++;
+  if (e >= n) return null; // the block runs to the end — nothing below it to glide
+  const first = env.measureAt(e);
+  if (!first) return null;
+  // Walk real (or estimated) extents rather than dividing by rowEstimate, so a viewport
+  // full of short rows (dividers) is still covered end to end. Bounded by the viewport.
+  const limit = first.start + viewport + rowEstimate;
+  let hi = e;
+  while (hi + 1 < n) {
+    const m = env.measureAt(hi + 1);
+    if (!m || m.start >= limit) break;
+    hi++;
+  }
+  return { lo: e, hi };
 }
 
 // ---- overlays ----
@@ -282,6 +340,7 @@ export function endAnimNow(): void {
     animating = false;
     drawerShowing = false;
     prevIds = new Set();
+    animRootId = null;
     bump(); // real rows become visible again in this commit
   }
   removeOverlays();
@@ -321,6 +380,9 @@ export function runCollapseAnim(
     // once they exist) is the only thing drawing them.
     drawerShowing = rootId !== null;
   }
+  // Set BEFORE commit 1: the band's rows must mount in the same commit that adds
+  // `.rows-animating`, so the forced reflow below arms them with a before-change style.
+  animRootId = rootId;
   animating = true;
 
   // COMMIT 1 — flags only, rows UNCHANGED. Then force a style resolution. This is what

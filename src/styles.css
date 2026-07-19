@@ -12,10 +12,11 @@
   --row-line-height: 1.35;
   /* Expand/collapse animation timing — THE single source of truth. collapseAnim.ts
      reads this live (animDurationMs) to time its teardown, so retuning it needs no JS
-     change. NOTE: anything much above ~250ms here is a SLOWED-DOWN value for eyeballing
-     the animation frame by frame — restore ~190ms before shipping. */
-  --collapse-anim-dur: 5000ms;
-  --collapse-anim-ease: cubic-bezier(0.37, 0, 0.63, 1);
+     change. 300ms on a symmetric ease-in-out is the SHIPPING value (tuned by eye against
+     the drawer). NOTE: anything much above ~500ms here is a SLOWED-DOWN value for
+     eyeballing the animation frame by frame — restore 300ms before shipping. */
+  --collapse-anim-dur: 300ms;
+  --collapse-anim-ease: cubic-bezier(0.83, 0, 0.17, 1);
 }
 
 * {

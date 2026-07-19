@@ -164,7 +164,22 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   separate `flushSync`es with a forced `offsetHeight` read between** — a CSS transition
   only starts if the element's previously RESOLVED style already carried it, so batching
   the `.rows-animating` class in with the new positions leaves survivors with nothing to
-  animate from and they SNAP (shipped bug, fixed). The reflow transition is scoped to SURVIVORS (`:not(.entering-row)`) —
+  animate from and they SNAP (shipped bug, fixed). **The same rule caps the animation at
+  the VIRTUALIZER's window**, so `OutlineView`'s `rangeExtractor` unions the natural range
+  with `glideBand()` — the ~one screenful of rows immediately after the toggled block —
+  for the toggle's duration. `overscan` (14) alone reaches only ~14 rows past the
+  viewport, so any taller subtree left the rows that must glide un-rendered at commit 1:
+  on collapse they were created fresh in commit 2 wearing only their FINAL transform and
+  snapped from a seam downward, and on expand they were UNMOUNTED instead, leaving a blank
+  strip under the sweeping edge (one cause, two symptoms; shipped bug, fixed). The band is
+  anchored to the block END, so it re-derives itself in whichever index space it's called
+  in and costs nothing when the block is absent; it is bounded by the viewport, NOT by H.
+  Its `useCallback` identity must change on the anim bump — at commit 1 `count` and the
+  range are unchanged, so a stable identity gets memoized away and mounts nothing. Never
+  extend the band ABOVE the natural window: virtual-core issues a real `scrollTo` the
+  first time it measures a never-sized row starting above the scroll offset. Raising
+  `overscan` globally is NOT the fix — it pays the mount cost on every scroll tick.
+  The reflow transition is scoped to SURVIVORS (`:not(.entering-row)`) —
   an entering row has no old position and is placed with an ESTIMATED height until its
   ResizeObserver reports the real one, so transitioning it animated that correction and
   made a parent's FIRST expand visibly re-space its children (the size cache is empty
