@@ -24,12 +24,31 @@ import type { RenderRow } from "../lib/flatten";
 import { mirror } from "./mirror";
 import { measureFrames } from "./perfMeter";
 
-/** Total animation duration — also the CSS transition/keyframe length (keep in sync
- * with styles.css). Short enough to feel snappy, long enough to read as motion. */
+/** Fallback duration, used only if the CSS variable can't be read. The REAL duration
+ * is `--collapse-anim-dur` in styles.css — the single source of truth, read live by
+ * `animDurationMs()` below, so retuning the animation means editing ONE value. */
 export const COLLAPSE_ANIM_MS = 190;
 /** Extra grace before tearing down the transition class / ghost overlay, so the CSS
  * transition has fully settled (a premature teardown snaps the last frame). */
 const TEARDOWN_BUFFER_MS = 40;
+
+/** The live CSS animation duration in ms. Read per toggle (cheap) rather than mirrored
+ * as a constant: a hardcoded mirror silently desyncs the moment `--collapse-anim-dur`
+ * is retuned, and the teardown timer then yanks the ghost overlay out mid-fade — the
+ * ghosts snap out of existence partway through (shipped bug, fixed). */
+function animDurationMs(): number {
+  try {
+    const raw = getComputedStyle(document.documentElement)
+      .getPropertyValue("--collapse-anim-dur")
+      .trim();
+    // Order matters: "2500ms" also ends with "s".
+    if (raw.endsWith("ms")) return parseFloat(raw) || COLLAPSE_ANIM_MS;
+    if (raw.endsWith("s")) return parseFloat(raw) * 1000 || COLLAPSE_ANIM_MS;
+  } catch {
+    // unreadable (no document / detached) — fall through to the constant
+  }
+  return COLLAPSE_ANIM_MS;
+}
 
 export type AnimMode = "expand" | "collapse";
 
@@ -151,11 +170,14 @@ export function runCollapseAnim(
   bump(); // render 1: class + entering flags on, rows unchanged yet
   apply(); // render 2: new rows; positions transition, entering rows mount with fade
 
+  // Teardown tracks the LIVE css duration, so the ghost fade / row slide always run to
+  // completion no matter how the animation is retuned.
+  const dur = animDurationMs();
   if (import.meta.env.DEV) {
-    measureFrames(`collapse:${m}`, COLLAPSE_ANIM_MS + 120);
+    measureFrames(`collapse:${m}`, dur + 120);
   }
 
-  endTimer = setTimeout(endAnimNow, COLLAPSE_ANIM_MS + TEARDOWN_BUFFER_MS);
+  endTimer = setTimeout(endAnimNow, dur + TEARDOWN_BUFFER_MS);
 }
 
 // Module-level state must never be split across HMR generations — decline hot updates.

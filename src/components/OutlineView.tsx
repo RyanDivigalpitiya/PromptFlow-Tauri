@@ -16,6 +16,7 @@ import {
   animVersion,
   endAnimNow,
   isAnimating,
+  isEntering,
   publishAnimContainer,
   subscribeAnim,
 } from "../state/collapseAnim";
@@ -210,12 +211,16 @@ export function OutlineView() {
           const row = rows[vi.index];
           const prevDepth = rows[vi.index - 1]?.depth ?? -1;
           const nextDepth = rows[vi.index + 1]?.depth ?? -1;
+          // Computed HERE (not inside the memo'd NodeRow) so the flag clears the moment
+          // the animation ends — a stale `entering` would wrongly exclude that row from
+          // the reflow transition on the NEXT toggle.
+          const entering = isEntering(row.id);
           return (
             <div
               key={vi.key}
               data-index={vi.index}
               ref={virtualizer.measureElement}
-              className="vrow"
+              className={"vrow" + (entering ? " entering-row" : "")}
               style={{ transform: `translateY(${vi.start}px)` }}
             >
               {row.kind === "node" ? (
@@ -229,6 +234,7 @@ export function OutlineView() {
                   isFocused={focusId === row.nodeId && focusField === "main"}
                   isNoteFocused={focusId === row.nodeId && focusField === "note"}
                   isDrillRoot={drill === row.nodeId}
+                  isEntering={entering}
                   hasHighlightedDescendant={highlightAncestors.has(row.nodeId)}
                   fontSize={fontSize}
                   showGuides={showGuides}

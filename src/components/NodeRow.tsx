@@ -2,7 +2,6 @@ import { memo, useSyncExternalStore } from "react";
 import { api } from "../lib/api";
 import { OutlineLayout } from "../lib/layout";
 import { addRelative, drillInto, toggleCollapse } from "../state/controller";
-import { isEntering } from "../state/collapseAnim";
 import { glyphMouseDown } from "../state/dragGesture";
 import { mirror, nodeVersion, subscribeNode } from "../state/mirror";
 import {
@@ -176,6 +175,10 @@ export interface NodeRowProps {
   isFocused: boolean;
   isNoteFocused: boolean;
   isDrillRoot: boolean;
+  /** Newly revealed by the in-flight expand — plays the entrance fade. Passed in
+   * (not read from the store here) so it clears when the animation ends: this
+   * component is memo'd and would otherwise keep a stale class. */
+  isEntering: boolean;
   hasHighlightedDescendant: boolean;
   fontSize: number;
   showGuides: boolean;
@@ -283,7 +286,7 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
         rec.kind +
         (p.isSelected ? " selected" : p.isSelTinted ? " sel-tint" : "") +
         (justCompleted ? " just-completed" : "") +
-        (isEntering(p.nodeId) ? " entering" : "")
+        (p.isEntering ? " entering" : "")
       }
       style={{
         position: "relative",

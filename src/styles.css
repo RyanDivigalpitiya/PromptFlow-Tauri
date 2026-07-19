@@ -10,10 +10,13 @@
   --accent: #3b82f6;
   --complete: #06ff9a;
   --row-line-height: 1.35;
-  /* Expand/collapse animation duration — single source (JS mirror: COLLAPSE_ANIM_MS in
-     state/collapseAnim.ts). The decelerate curve suits a snappy 120Hz feel. */
-  --collapse-anim-dur: 190ms;
-  --collapse-anim-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Expand/collapse animation timing — THE single source of truth. collapseAnim.ts
+     reads this live (animDurationMs) to time its teardown, so retuning it needs no JS
+     change. NOTE: 2500ms is a slowed-down value for eyeballing the animation frame by
+     frame — restore ~190ms before shipping. */
+  --collapse-anim-dur: 2500ms;
+  --collapse-anim-ease: cubic-bezier(0.83, 0, 0.17, 1);
+  /* --collapse-anim-ease: cubic-bezier(0.22, 1, 0.36, 1); */
 }
 
 * {
@@ -157,14 +160,21 @@ body {
 
 /* ---------- Expand / collapse animation ----------
    Entirely GPU-composited (transform + opacity), driven by CSS transitions/keyframes —
-   no per-frame React, so it holds 120Hz. Three parts, orchestrated by collapseAnim.ts;
-   all durations mirror COLLAPSE_ANIM_MS there.
+   no per-frame React, so it holds 120Hz. Three parts, orchestrated by collapseAnim.ts.
+   `--collapse-anim-dur` is the SINGLE source of truth: collapseAnim.ts reads it live
+   (animDurationMs) to time its teardown, so retuning it here needs no JS change.
 
    1. Below-row reflow: the virtualizer reassigns each surviving row a new translateY;
       this transition slides them there. The `.rows-animating` class is applied to
       `.outline-inner` ONLY for the toggle window — an always-on transition would make
-      plain scrolling lag (the virtualizer repositions rows on every scroll tick). */
-.rows-animating .vrow {
+      plain scrolling lag (the virtualizer repositions rows on every scroll tick).
+      SURVIVORS ONLY (`:not(.entering-row)`): a newly revealed row has no old position
+      to slide from, and the virtualizer places it with an ESTIMATED height until its
+      ResizeObserver reports the real one. Transitioning that estimate→measured
+      correction made a parent's FIRST expand visibly re-space its children (the cache
+      is empty only that once — later expands reuse measured sizes and looked right).
+      Entering rows mount in place and fade in via rowEnter instead. */
+.rows-animating .vrow:not(.entering-row) {
   transition: transform var(--collapse-anim-dur) var(--collapse-anim-ease);
   will-change: transform;
 }
@@ -177,11 +187,13 @@ body {
     opacity: 0;
     transform: translateY(-6px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);
   }
 }
+
 .node-row.entering {
   animation: rowEnter var(--collapse-anim-dur) var(--collapse-anim-ease) both;
 }
@@ -199,16 +211,19 @@ body {
   pointer-events: none;
   animation: ghostLeave var(--collapse-anim-dur) var(--collapse-anim-ease) both;
 }
+
 @keyframes ghostLeave {
   from {
     opacity: 1;
     transform: translateY(0);
   }
+
   to {
     opacity: 0;
     transform: translateY(-8px);
   }
 }
+
 /* Ghost clones are STATIC snapshots — kill any one-shot animation they carried out of
    the live DOM (a still-present `.entering` fade, or a completion pop): a freshly
    inserted node replays its keyframe, which would fight the overlay's ghostLeave and
@@ -294,9 +309,11 @@ body {
   0% {
     transform: scale(1);
   }
+
   38% {
     transform: scale(1.28);
   }
+
   100% {
     transform: scale(1);
   }
@@ -310,6 +327,7 @@ body {
   from {
     stroke-dashoffset: 1;
   }
+
   to {
     stroke-dashoffset: 0;
   }
@@ -369,7 +387,7 @@ body {
   line-height: inherit;
 }
 
-.grow-wrap > .node-textarea {
+.grow-wrap>.node-textarea {
   grid-area: 1 / 1;
   width: 100%;
   resize: none;
@@ -542,7 +560,7 @@ body {
   align-items: flex-start;
 }
 
-.prompt-wrap > .trailing-cluster {
+.prompt-wrap>.trailing-cluster {
   /* Drop by the panel's top border + padding so the cluster's line box coincides
      with the first text line's — its buttons center on that first line. */
   margin-top: calc(0.5em + 1px);

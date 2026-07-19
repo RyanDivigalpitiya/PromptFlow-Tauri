@@ -145,8 +145,14 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   `isEntering` = a fresh row absent from `prevIds` captured pre-toggle; (3) leaving rows
   (collapse) are `cloneNode`'d into ONE `.collapse-ghosts` overlay that fades out —
   cheap and React never sees it (safe only because a collapse produces no vrow
-  insertions). Duration lives in ONE place per language: CSS `--collapse-anim-dur` ⟷ JS
-  `COLLAPSE_ANIM_MS` (keep in sync). **The webview's rAF is capped at 60Hz (WKWebView on
+  insertions). The reflow transition is scoped to SURVIVORS (`:not(.entering-row)`) —
+  an entering row has no old position and is placed with an ESTIMATED height until its
+  ResizeObserver reports the real one, so transitioning it animated that correction and
+  made a parent's FIRST expand visibly re-space its children (the size cache is empty
+  only that once). `--collapse-anim-dur` in styles.css is the SINGLE source of truth for
+  timing: `animDurationMs()` reads it live so the teardown always tracks it —
+  `COLLAPSE_ANIM_MS` is only a fallback (a hardcoded mirror desynced the moment the CSS
+  was retuned and tore the ghost overlay out mid-fade). **The webview's rAF is capped at 60Hz (WKWebView on
   macOS), but CSS `transform`/`opacity` animations are handed to Core Animation and
   composite at the display's native rate (120Hz on this ProMotion Mac) — so animate with
   CSS transitions, NEVER an rAF loop.** `perfMeter.ts` samples rAF deltas (auto-fires per
