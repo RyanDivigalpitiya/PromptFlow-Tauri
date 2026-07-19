@@ -24,6 +24,7 @@ import {
   isGlideArming,
   isNewRow,
   publishAnimEnv,
+  rowRank,
   subscribeAnim,
 } from "../state/collapseAnim";
 import { addAtBottom, appendChildAt, dbg, publishRows } from "../state/controller";
@@ -203,7 +204,15 @@ export function OutlineView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusId, focusEpoch, rows]);
 
-  const items = virtualizer.getVirtualItems();
+  const natural = virtualizer.getVirtualItems();
+  // While an animation is live, emit the rows in the DOM order they had when it armed —
+  // otherwise React `insertBefore`s any keyed child that moved backwards, and a DOM move
+  // cancels that element's running transition (see `rowRank`). Rows are absolutely
+  // positioned, so the order is invisible; `sort` is stable, so equal ranks (the rows
+  // that are new this animation) keep their index order.
+  const items = isAnimating()
+    ? [...natural].sort((a, b) => rowRank(String(a.key)) - rowRank(String(b.key)))
+    : natural;
 
   // Geometry for the expand/collapse drawer: it needs the parent's bottom edge and the
   // revealed block's height, both in the virtualizer's content space. Republished every

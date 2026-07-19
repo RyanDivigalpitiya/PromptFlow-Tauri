@@ -233,6 +233,20 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   mid-fade either (`detachGhosts`): it owns no live rows, so it is left to finish and
   self-remove — two leaves 100ms apart is an ordinary rhythm, and yanking the first would
   pop exactly where the overlay exists to prevent a pop.
+- **DOM order is frozen while animating** (`rowRank` + the sort in `OutlineView`): every
+  `.vrow` is absolutely positioned by its own transform, so DOM order carries no visual
+  meaning — but it carries a fatal one for animation. When a change REORDERS rows (⌥↑/↓,
+  an outdent past siblings, a drag), React's reconciler sees its keyed children in a new
+  order and `insertBefore`s the ones that moved backwards; **a DOM move detaches and
+  re-attaches the element, which CANCELS its running transition** (measured in WebKit: the
+  moved element sat at its final y for all 22 frames while its partner interpolated).
+  React moves only ONE of two swapped siblings, so ⌥↓ played as half a swap — the row you
+  moved snapped while the row it passed glided (shipped bug, fixed). So while an animation
+  is live the rows render in the order they had when it armed; rows created since sort
+  last, and appending never moves a sibling. Surviving rows keeping their relative order
+  is exactly the condition under which React performs no moves at all. At teardown the
+  order reverts and React does reorder, but nothing is transitioning by then. Sorting only
+  while animating also keeps DOM order equal to visual order at rest.
 - **Tab glide** (the bottom of `collapseAnim.ts`; CSS `.node-row.gliding` / `.glide-arm`):
   Tab/⇧Tab slides the moved row into its new indent instead of snapping. Driven from the
   DELTA, not the gesture — `mirror.ts`'s `setStructureCommit` seam hands the animation

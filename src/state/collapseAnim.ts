@@ -89,7 +89,10 @@ export type AnimMode = "expand" | "collapse" | "glide";
 // ---- signal (useSyncExternalStore-shaped) ----
 let animating = false;
 let mode: AnimMode = "expand";
-let prevIds: ReadonlySet<string> = new Set();
+/** Row id → its index in the flatten this animation started from. Doubles as the
+ * "was present before" test AND as the DOM order to hold stable for the duration — see
+ * `rowRank`. */
+let prevOrder: ReadonlyMap<string, number> = new Map();
 let drawerShowing = false;
 /** The row id the mount band hangs off. For a collapse/expand toggle and the tab glide
  * it is the toggled/moved NODE and the band starts after its child block; for the
@@ -143,7 +146,7 @@ export function isDrawerShowing(): boolean {
 /** True while an expand animation is live AND this row was NOT present before the
  * toggle — i.e. it should play the entrance. Always false during a collapse. */
 export function isEntering(id: string): boolean {
-  return animating && mode === "expand" && !prevIds.has(id);
+  return animating && mode === "expand" && !prevOrder.has(id);
 }
 /** Absent from the flatten this animation started from, whatever its kind. Such a row
  * has no old position to slide from, and the virtualizer places it at an ESTIMATED
@@ -154,7 +157,30 @@ export function isEntering(id: string): boolean {
  * exclusion WITHOUT also firing the rowEnter keyframe, whose animation declaration
  * would outrank the glide's own transform. */
 export function isNewRow(id: string): boolean {
-  return animating && !prevIds.has(id);
+  return animating && !prevOrder.has(id);
+}
+/**
+ * Sort key that holds the rendered rows' DOM ORDER FIXED for the animation's duration.
+ *
+ * Every `.vrow` is absolutely positioned by its own transform, so DOM order carries no
+ * visual meaning — but it carries a fatal one for animation. When a change REORDERS rows
+ * (⌥↑/↓, an outdent past siblings, a drag), React's reconciler sees its keyed children in
+ * a new order and `insertBefore`s the ones that moved backwards. A DOM move detaches and
+ * re-attaches the element, which CANCELS its running transition. React only moves ONE of
+ * two swapped siblings, so the result was exactly half a swap: the row you moved snapped
+ * to its destination while the row it passed glided (measured in WebKit — the moved
+ * element sat at its final y for all 22 frames while its partner interpolated).
+ *
+ * So while an animation is live, render the rows in the order they were in when it armed.
+ * Rows that did not exist then sort last, in their own index order — appending never
+ * moves an existing sibling. Surviving rows therefore keep their relative order, which is
+ * exactly the condition under which React performs no moves at all. At teardown the order
+ * reverts to index order and React does reorder the DOM, but nothing is transitioning by
+ * then, so it costs nothing. Sorting only while animating also keeps DOM order equal to
+ * visual order at rest, which is when it matters for reading order.
+ */
+export function rowRank(id: string): number {
+  return prevOrder.get(id) ?? Number.MAX_SAFE_INTEGER;
 }
 /** Resolve a row's glide delta by walking UP the (already-mutated) mirror to a moved
  * root — cheaper and steadier than enumerating descendants, which for a collapsed
@@ -481,7 +507,7 @@ export function endAnimNow(): void {
   if (animating || drawerShowing) {
     animating = false;
     drawerShowing = false;
-    prevIds = new Set();
+    prevOrder = new Map();
     animAnchorId = null;
     animAnchorSkipBlock = true;
     // Teardown is a PROP change, not a class the row remembers: the next render emits
@@ -513,7 +539,7 @@ export function runCollapseAnim(
   // A new toggle mid-animation: tear the previous one down cleanly first.
   endAnimNow();
 
-  prevIds = new Set(prevRows.map((r) => r.id));
+  prevOrder = new Map(prevRows.map((r, i) => [r.id, i]));
   mode = m;
   // A drawer needs one parent to hang off; bulk ops have no single B/H.
   const rootId = roots.length === 1 ? roots[0] : null;
@@ -625,7 +651,7 @@ export function runRowsAnim(
 
   endAnimNow(); // one owner for `.rows-animating`, the overlays and the teardown timer
 
-  prevIds = new Set(prevRows.map((r) => r.id));
+  prevOrder = new Map(prevRows.map((r, i) => [r.id, i]));
   // "expand" is the only mode isEntering() answers for; with nothing entering, "collapse"
   // just means "fade nothing in" — which is also the pure-reorder (⌥↑/↓) case.
   mode = d.entering.size > 0 ? "expand" : "collapse";
@@ -832,7 +858,7 @@ function runGlide(
 
   // env.rows() is the LAST RENDERED flatten — still pre-mutation here, since React
   // hasn't re-rendered yet. The same source runCollapseAnim's expand path reads.
-  prevIds = new Set(env.rows().map((r) => r.id));
+  prevOrder = new Map(env.rows().map((r, i) => [r.id, i]));
   mode = "glide";
   drawerShowing = false;
   // Reuse the drawer's band anchor. At commit 1 (old flatten) mountBand mounts ~one
