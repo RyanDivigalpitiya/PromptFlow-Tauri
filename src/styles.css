@@ -10,6 +10,10 @@
   --accent: #3b82f6;
   --complete: #06ff9a;
   --row-line-height: 1.35;
+  /* Expand/collapse animation duration — single source (JS mirror: COLLAPSE_ANIM_MS in
+     state/collapseAnim.ts). The decelerate curve suits a snappy 120Hz feel. */
+  --collapse-anim-dur: 190ms;
+  --collapse-anim-ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 * {
@@ -149,6 +153,68 @@ body {
    in DOM order) — without this, later rows paint OVER an open ⋯ menu. */
 .vrow:has(.row-menu) {
   z-index: 5;
+}
+
+/* ---------- Expand / collapse animation ----------
+   Entirely GPU-composited (transform + opacity), driven by CSS transitions/keyframes —
+   no per-frame React, so it holds 120Hz. Three parts, orchestrated by collapseAnim.ts;
+   all durations mirror COLLAPSE_ANIM_MS there.
+
+   1. Below-row reflow: the virtualizer reassigns each surviving row a new translateY;
+      this transition slides them there. The `.rows-animating` class is applied to
+      `.outline-inner` ONLY for the toggle window — an always-on transition would make
+      plain scrolling lag (the virtualizer repositions rows on every scroll tick). */
+.rows-animating .vrow {
+  transition: transform var(--collapse-anim-dur) var(--collapse-anim-ease);
+  will-change: transform;
+}
+
+/* 2. Entering rows (expand): fade + a short drop-in. The transform is on `.node-row`
+      (a child of `.vrow`), so it composes with the virtualizer's translateY rather than
+      overriding it. */
+@keyframes rowEnter {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.node-row.entering {
+  animation: rowEnter var(--collapse-anim-dur) var(--collapse-anim-ease) both;
+}
+
+/* 3. Leaving rows (collapse): cloned out of the live DOM into this one overlay
+      (collapseAnim.captureGhosts), pinned at their pre-collapse positions, faded and
+      drifted upward as the gap closes. One composited opacity layer regardless of how
+      many rows leave. Sits above the sliding survivors so it reads as a dissolve. */
+.collapse-ghosts {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  pointer-events: none;
+  animation: ghostLeave var(--collapse-anim-dur) var(--collapse-anim-ease) both;
+}
+@keyframes ghostLeave {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+/* Ghost clones are STATIC snapshots — kill any one-shot animation they carried out of
+   the live DOM (a still-present `.entering` fade, or a completion pop): a freshly
+   inserted node replays its keyframe, which would fight the overlay's ghostLeave and
+   break the dissolve. Only the overlay itself fades. */
+.collapse-ghosts * {
+  animation: none !important;
 }
 
 /* ---------- Rows ---------- */

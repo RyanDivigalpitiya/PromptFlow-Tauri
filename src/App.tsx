@@ -7,6 +7,7 @@ import { api, onRowMenuAction } from "./lib/api";
 import {
   copyBlock,
   performRowMenuAction,
+  setCollapsed,
   setCollapsedAll,
 } from "./state/controller";
 import { mirror, startMirror, subscribeStructure } from "./state/mirror";
@@ -177,6 +178,13 @@ export default function App() {
         // Dev: ⌘⌃⇧7 seeds a large synthetic tree for performance testing.
         e.preventDefault();
         void api.seedDemo(40, 25, 10).then((n) => console.log(`seeded ${n}`));
+      } else if (e.ctrlKey && e.shiftKey && e.code === "Digit8") {
+        // Dev: ⌘⌃⇧8 measures the idle rAF ceiling (no animation) — tells 60Hz-capped
+        // webview apart from animation jank.
+        e.preventDefault();
+        void import("./state/perfMeter").then((m) =>
+          m.measureFrames("idle-baseline", 600),
+        );
       } else if (!e.shiftKey && (e.key === "=" || e.key === "+")) {
         e.preventDefault();
         s.adjustFont(1);
@@ -203,11 +211,11 @@ export default function App() {
         // port) — no-ops without a focused parent node, like the original.
         e.preventDefault();
         if (s.focusId && mirror.hasChildren(s.focusId))
-          s.setCollapsed(s.focusId, true);
+          setCollapsed(s.focusId, true);
       } else if (!e.shiftKey && !e.altKey && (e.key === "d" || e.key === "D")) {
         e.preventDefault();
         if (s.focusId && mirror.hasChildren(s.focusId))
-          s.setCollapsed(s.focusId, false);
+          setCollapsed(s.focusId, false);
       } else if (!e.shiftKey && (e.key === "z" || e.key === "Z")) {
         // Normally consumed by the native Edit menu; fallback if it wasn't.
         e.preventDefault();

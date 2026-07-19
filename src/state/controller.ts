@@ -9,6 +9,7 @@ export function dbg(msg: string) {
 import type { KeyDecision } from "../lib/keys";
 import { toMarkdown } from "../lib/runs";
 import { inheritableKind, type NodeKind } from "../lib/types";
+import { runCollapseAnim } from "./collapseAnim";
 import { mirror } from "./mirror";
 import { markCompleting } from "./rowAnim";
 import { useSelection } from "./selection";
@@ -306,25 +307,59 @@ export function drillInto(nodeId: string) {
   ws().drillIn(nodeId);
 }
 
+/** Animated collapse toggle — the chevron click and any programmatic single-node
+ * toggle route here so the reveal/hide slides instead of snapping. */
+export function toggleCollapse(id: string) {
+  const s = ws();
+  const willCollapse = !s.collapsed.has(id);
+  runCollapseAnim(
+    willCollapse ? "collapse" : "expand",
+    willCollapse ? [id] : [],
+    visibleRows(),
+    () => s.toggleCollapse(id),
+  );
+}
+
+/** Animated set-collapsed — ⌘E/⌘D and ⌘↑/⌘↓ on a focused parent. No-op if unchanged. */
+export function setCollapsed(id: string, value: boolean) {
+  const s = ws();
+  // The drill root is always shown expanded and can't be collapsed (the chevron locks
+  // it; the keyboard paths must honor the same rule, or flattenDrillRoot ignores the
+  // collapse and we paint phantom ghosts over unchanged rows + poison the collapsed set).
+  if (value && s.drill === id) return;
+  if (s.collapsed.has(id) === value) return;
+  runCollapseAnim(
+    value ? "collapse" : "expand",
+    value ? [id] : [],
+    visibleRows(),
+    () => s.setCollapsed(id, value),
+  );
+}
+
 /** ⌘⇧D expand-all / ⌘⇧E collapse-all — per window. */
 export function setCollapsedAll(collapsed: boolean) {
   const s = ws();
-  if (!collapsed) {
-    s.expandAll();
-    return;
-  }
-  // Collapse-all fills the window's set with every parent's id.
-  const parents: string[] = [];
-  const stack = [...mirror.roots()];
-  while (stack.length > 0) {
-    const id = stack.pop()!;
-    const kids = mirror.childrenOf(id);
-    if (kids.length > 0) {
-      parents.push(id);
-      for (const k of kids) stack.push(k);
+  const apply = () => {
+    if (!collapsed) {
+      s.expandAll();
+      return;
     }
-  }
-  s.collapseAll(parents);
+    // Collapse-all fills the window's set with every parent's id.
+    const parents: string[] = [];
+    const stack = [...mirror.roots()];
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      const kids = mirror.childrenOf(id);
+      if (kids.length > 0) {
+        parents.push(id);
+        for (const k of kids) stack.push(k);
+      }
+    }
+    s.collapseAll(parents);
+  };
+  // Bulk op: animate the below-row slide (and, on expand, the entrance fade) but skip
+  // per-row ghosts — a whole-tree fade would be visual noise. Empty roots ⇒ no ghosts.
+  runCollapseAnim(collapsed ? "collapse" : "expand", [], visibleRows(), apply);
 }
 
 /** Reveal a node from the focus pane: go Home if it's outside the current drill,

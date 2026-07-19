@@ -1,7 +1,8 @@
 import { memo, useSyncExternalStore } from "react";
 import { api } from "../lib/api";
 import { OutlineLayout } from "../lib/layout";
-import { addRelative, drillInto } from "../state/controller";
+import { addRelative, drillInto, toggleCollapse } from "../state/controller";
+import { isEntering } from "../state/collapseAnim";
 import { glyphMouseDown } from "../state/dragGesture";
 import { mirror, nodeVersion, subscribeNode } from "../state/mirror";
 import {
@@ -30,7 +31,6 @@ function TrailingCluster(p: {
 }) {
   const slot = OutlineLayout.disclosureWidth(p.fontSize);
   const icon = Math.round(10 * OutlineLayout.scale(p.fontSize));
-  const s = useWindowState.getState;
   // A drilled-into node is always shown expanded and can't be collapsed (collapsing
   // your zoom root would empty the view) — its chevron is locked open.
   const collapsedDisplay = p.isCollapsed && !p.isDrillRoot;
@@ -48,7 +48,7 @@ function TrailingCluster(p: {
           }
           style={{ width: slot }}
           tabIndex={-1}
-          onClick={p.isDrillRoot ? undefined : () => s().toggleCollapse(p.nodeId)}
+          onClick={p.isDrillRoot ? undefined : () => toggleCollapse(p.nodeId)}
           aria-label={
             p.isDrillRoot
               ? "Expanded (zoomed in)"
@@ -282,7 +282,8 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
         "node-row kind-" +
         rec.kind +
         (p.isSelected ? " selected" : p.isSelTinted ? " sel-tint" : "") +
-        (justCompleted ? " just-completed" : "")
+        (justCompleted ? " just-completed" : "") +
+        (isEntering(p.nodeId) ? " entering" : "")
       }
       style={{
         position: "relative",

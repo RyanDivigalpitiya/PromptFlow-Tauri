@@ -131,6 +131,28 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   container — absolute rows position from the padding-box edge, so CSS padding shifts
   nothing and desynchronizes hit-testing (this bug shipped once; the fix is the
   virtualizer option).
+- **Expand/collapse animation** (`collapseAnim.ts`; CSS `.rows-animating` /
+  `.node-row.entering` / `.collapse-ghosts`): every MANUAL disclosure gesture (chevron,
+  ⌘E/⌘D, ⌘⇧E/⌘⇧D, ⌘↑/⌘↓) routes through the controller wrappers
+  `toggleCollapse`/`setCollapsed`/`setCollapsedAll` → `runCollapseAnim`, never
+  `useWindowState.*Collapse*` directly (raw calls skip the animation). The one
+  deliberate exception is `revealNode`'s `expandMany` (a focus-pane navigation jump,
+  not a manual disclosure) — it stays un-animated, like the SwiftUI original. Three GPU-composited parts, no per-frame React: (1) below-rows slide via
+  a `transition: transform` GATED to a transient `.rows-animating` class on
+  `.outline-inner` — an always-on transition makes plain SCROLLING lag (the virtualizer
+  repositions every `.vrow` on each scroll tick), so `onWheel` calls `endAnimNow()` to
+  bail mid-flight; (2) entering rows (expand) fade in via a keyframe, flagged by
+  `isEntering` = a fresh row absent from `prevIds` captured pre-toggle; (3) leaving rows
+  (collapse) are `cloneNode`'d into ONE `.collapse-ghosts` overlay that fades out —
+  cheap and React never sees it (safe only because a collapse produces no vrow
+  insertions). Duration lives in ONE place per language: CSS `--collapse-anim-dur` ⟷ JS
+  `COLLAPSE_ANIM_MS` (keep in sync). **The webview's rAF is capped at 60Hz (WKWebView on
+  macOS), but CSS `transform`/`opacity` animations are handed to Core Animation and
+  composite at the display's native rate (120Hz on this ProMotion Mac) — so animate with
+  CSS transitions, NEVER an rAF loop.** `perfMeter.ts` samples rAF deltas (auto-fires per
+  toggle in dev, plus ⌘⌃⇧8 idle baseline) — because rAF is 60Hz-capped it measures
+  MAIN-THREAD health (a steady ~16.7ms ⇒ no jank, the real cause of "choppy"), NOT the
+  compositor's true fps; it can't read past 60.
 - **Drag** (`drag.ts` + `dragGesture.ts`): `projectDrop` is the pure port of the Swift
   projection (gap by `midY <= pointerY`, depth band `[minDepth, prev.depth+1]`, divider
   can't parent, drill floor 1). Frames come from `virtualizer.measurementsCache`

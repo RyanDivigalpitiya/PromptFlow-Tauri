@@ -12,6 +12,13 @@ import {
   type RenderRow,
 } from "../lib/flatten";
 import { OutlineLayout } from "../lib/layout";
+import {
+  animVersion,
+  endAnimNow,
+  isAnimating,
+  publishAnimContainer,
+  subscribeAnim,
+} from "../state/collapseAnim";
 import { addAtBottom, appendChildAt, dbg, publishRows } from "../state/controller";
 import { useDrag } from "../state/drag";
 import { publishDragEnv } from "../state/dragGesture";
@@ -75,6 +82,9 @@ export function OutlineView() {
   const structureV = useSyncExternalStore(subscribeStructure, () =>
     mirror.structureVersion(),
   );
+  // Re-render when an expand/collapse animation starts or ends, so `.outline-inner`
+  // gains/loses the gated `.rows-animating` transition class.
+  useSyncExternalStore(subscribeAnim, animVersion);
   const collapsed = useWindowState((s) => s.collapsed);
   const hideCompleted = useWindowState((s) => s.hideCompleted);
   const keepVisible = useWindowState((s) => s.keepVisible);
@@ -105,6 +115,16 @@ export function OutlineView() {
   }, [structureV]);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const innerRef = useRef<HTMLDivElement | null>(null);
+  // Publish `.outline-inner` (the virtualizer's coordinate space) so the collapse
+  // animation can pin its ghost overlay there.
+  useEffect(() => {
+    publishAnimContainer(innerRef.current);
+    return () => {
+      endAnimNow(); // drop any live overlay/timer before the container goes away
+      publishAnimContainer(null);
+    };
+  }, []);
   const rowEstimate =
     OutlineLayout.lineHeight(fontSize) + OutlineLayout.rowVerticalPadding * 2;
   const virtualizer = useVirtualizer({
@@ -166,6 +186,12 @@ export function OutlineView() {
     <div
       className="outline-scroll"
       ref={scrollRef}
+      onWheel={() => {
+        // A user scroll mid-animation would make the gated transform transition lag
+        // every repositioned row — snap to final positions instead. (Uses wheel, not
+        // scroll, so a layout-induced scrollTop clamp on collapse can't self-cancel.)
+        if (isAnimating()) endAnimNow();
+      }}
       onMouseDown={(e) => {
         // Blank-background click → defocus + clear selection (the clear-tap port).
         if (e.target === e.currentTarget) {
@@ -176,7 +202,8 @@ export function OutlineView() {
       }}
     >
       <div
-        className="outline-inner"
+        ref={innerRef}
+        className={"outline-inner" + (isAnimating() ? " rows-animating" : "")}
         style={{ height: virtualizer.getTotalSize() }}
       >
         {items.map((vi) => {

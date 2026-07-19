@@ -24,6 +24,7 @@ import {
   deleteAndFocusPrev,
   moveFocused,
   performDecision,
+  setCollapsed,
   setKindGuarded,
   toggleHighlight,
 } from "../state/controller";
@@ -443,7 +444,7 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
     ) {
       if (mirror.hasChildren(p.nodeId)) {
         e.preventDefault();
-        s.setCollapsed(p.nodeId, e.key === "ArrowUp");
+        setCollapsed(p.nodeId, e.key === "ArrowUp");
       }
       return;
     }
