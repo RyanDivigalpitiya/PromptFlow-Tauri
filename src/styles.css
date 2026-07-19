@@ -539,7 +539,7 @@ body {
     fill var(--wedge-anim-dur) var(--wedge-anim-ease);
 }
 
-/* ---------- Glyph kind morph (⌘1/⌘2) ----------
+/* ---------- Glyph kind morph (⌘1/⌘2/⌘3) ----------
    A kind change draws BOTH glyphs for one beat, as two layers stacked on the glyph slot
    (Glyphs.tsx), and each plays a one-shot keyframe. KEYFRAMES, not transitions: the
    incoming glyph has no previously-resolved value for a transition to start from — a
@@ -575,21 +575,43 @@ body {
   }
 }
 
+@keyframes glyphFadeOut {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes glyphFadeIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
 /* EVERY glyph lives in a layer, morph or no morph — the resting glyph IS the entering
    layer, still mounted, with its animation classes dropped (see Glyphs.tsx: swapping the
    structure at rest would remount the glyph and replay drawCheck).
-   Inset to the SLOT's box rather than shrink-wrapped around the glyph, and the slot's own
-   width/height are inline — so nothing here changes the row's layout (measured identical,
-   box for box, in WebKit). */
+   Inset to the SLOT's box rather than shrink-wrapped around the glyph: the prompt-bar
+   ghost below positions in `em` off this top edge to land on the real bar's y, and the
+   slot's own width/height are inline, so nothing here changes the row's layout
+   (measured identical, box for box, in WebKit). */
 .glyph-layer {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  /* The slot's own mousedown (drill/drag) must keep firing — it is the layers' ancestor
-     and keeps its own box, so hit-testing falls through to it (verified with a real
-     mouse event in WebKit). */
+  /* The prompt-bar ghost is TALLER than the row it's leaving (a one-line row is 1.35em,
+     the bar 1.9em+), so it hangs over the next row for the length of the fade. It must
+     never eat that row's clicks — and the slot's own mousedown (drill/drag) still fires,
+     since it is the layers' ancestor and keeps its own box. */
   pointer-events: none;
 }
 
@@ -628,6 +650,60 @@ body {
 
 .glyph-layer.morph-scale.glyph-enter {
   animation: glyphMorphIn var(--kind-anim-dur) var(--kind-anim-ease) both;
+}
+
+/* To/from a prompt: a full-height bar and a dot share only the glyph COLUMN, so they
+   cross-fade in place — scaling a bar into a dot reads as a stretch. */
+.glyph-layer.morph-fade.glyph-leave,
+.glyph-layer.morph-fade.glyph-enter {
+  animation-duration: var(--kind-anim-dur);
+  animation-timing-function: var(--kind-anim-ease);
+  animation-fill-mode: both;
+}
+
+.glyph-layer.morph-fade.glyph-leave {
+  animation-name: glyphFadeOut;
+}
+
+.glyph-layer.morph-fade.glyph-enter {
+  animation-name: glyphFadeIn;
+}
+
+/* The other half of the prompt cross-fade: the REAL bar (an overlay on the panel, so it
+   can't live in the glyph slot) fading up as the old bullet fades away. The leaving
+   direction can't use this element at all — the panel is already unmounted — and is
+   drawn by .glyph-prompt-ghost instead. */
+.prompt-line-bullet.kind-enter {
+  animation: glyphFadeIn var(--kind-anim-dur) var(--kind-anim-ease) both;
+}
+
+/* Stand-in for .prompt-line-bullet on the leaving layer. Width, colour and HEIGHT come
+   inline from Glyphs.tsx — the height is the real bar's last measured one, because a
+   prompt panel is as tall as its text and a fixed height truncated a 4-line prompt's bar
+   by ~55px on the animation's first frame, at full opacity.
+   The `+ 1px` is the prompt panel's BORDER: `.prompt-line-bullet` is positioned against
+   the panel's PADDING box, while this is positioned against the glyph slot, whose top
+   coincides with the panel's BORDER box (both are flex-start children of .row-inner).
+   Without it the ghost sat exactly 1px high at every font size (measured) — the same
+   compensation NodeRow already applies to `promptBarLeft` horizontally.
+   The height here is only a fallback for a bar that was never measured, and it is exact
+   only where `min-height: 2.5em` governs the panel (2.5em − its 2px of border − 2×0.3em);
+   below fontSize ≈13.3 the natural height wins and this undershoots by up to 0.67px at
+   the ⌘− floor.
+   KNOWN, measured, and deliberate: the bar is taller than the one-line row it is fading
+   out of, so it overhangs it by ~0.57em (9.2px at fontSize 16 — roughly constant, since
+   both the panel and the row grow with the text) and can grip the top of the next row's
+   checkbox at larger sizes. Capping it to the row would truncate every bar at frame 0
+   instead, which is the one thing a fade is supposed to avoid — the overhang is the
+   lesser artifact, but it is the knob to turn if this reads wrong.
+   Centered on the slot, which IS the glyph column the real bar centers on. */
+.glyph-prompt-ghost {
+  position: absolute;
+  top: calc(0.3em + 1px);
+  height: calc(1.9em - 2px);
+  left: 50%;
+  transform: translateX(-50%);
+  border-radius: 99px;
 }
 
 /* The completed look (line-through + dim) eases in rather than snapping. */

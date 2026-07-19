@@ -21,7 +21,7 @@ npm install                  # once
 scripts/dev.sh [store.sqlite]  # tauri dev against an ISOLATED store (default /tmp/promptflow-tauri-dev.sqlite)
 scripts/build.sh             # release bundle -> src-tauri/target/release/bundle/macos/PromptFlow.app
 scripts/verify.sh            # launch smoke test of the release build (throwaway store, polls for a window)
-npm test                     # vitest: 6 suites / 40 tests (resolveKey, wrap, bold, projectDrop, rowBands, kindMorph)
+npm test                     # vitest: 6 suites / 41 tests (resolveKey, wrap, bold, projectDrop, rowBands, kindMorph)
 cd src-tauri && cargo test   # 12 tests (store mutations/undo, archive round-trip + collect)
 npx tsc --noEmit             # typecheck (strict; noUnusedLocals/Parameters)
 ```
@@ -309,30 +309,33 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   drawer. Unlike everything else here it is a main-thread repaint (WebKit composites only
   transform/opacity/filter), which at 14×14px is free.
 - **Glyph kind morph** (`lib/kindMorph.ts` truth table + `useKindMorph`/`Glyph` in
-  `Glyphs.tsx`; CSS `.glyph-layer`): ⌘1/⌘2 cross-animate TWO layers over the glyph slot —
-  bullet↔checkbox are concentric, so the outgoing one collapses to a point at their shared
-  centre while the incoming one grows out of it (`morph-scale`). A PROMPT or a DIVIDER
-  still snaps: those pairs have no designed transition yet, not no possible one.
-  KEYFRAMES, not transitions — an incoming glyph has no resolved from-value, and
-  `animation-fill-mode: both` needs none (measured in WebKit: the animation's clock
-  anchors to the frame its name appeared in, so frame 0 is painted whether the element is
-  fresh or already on screen). Driven off the kind VALUE via a per-row ref, like the
-  wedge, so ⌘Z, the ⌘1/⌘2 block form, the ⋯ menu and a remote window all animate with one
-  implementation, and a row scrolling into view never self-starts. Three things are
-  load-bearing: (1) **the resting glyph IS the entering layer**, permanently mounted under
-  the key `"glyph"` and merely GAINING/losing the animation classes — a shape that returned
-  a bare `<GlyphInk>` at rest and a wrapper while morphing swapped a component element for
-  a host one, which React never reconciles (the `Wedge` rule), remounting the glyph subtree
-  at BOTH edges: measured as `drawCheck` stroking itself a second time when a ⌘2 landed
-  inside `.just-completed`'s 440ms window. (2) that stability costs the keyframe RESTART a
-  remount used to give: a second kind change inside the first morph's window leaves
-  `animation-name` untouched, so the new ink adopted the old clock (or hard-cut in at full
-  size once it had finished) — hence the layout effect that replays the entering layer's
-  animations by hand. The LEAVING layer is the opposite case: recreated per morph, so its
-  `"leave:"+epoch` key restarts it for free. (3) `.glyph-layer.glyph-leave` declares
-  `opacity: 0` **as a resting style**: it is invisible only by fill-mode, and both clone
-  containers force `animation: none !important`, so without it a row cloned mid-morph
-  painted BOTH glyphs at full opacity.
+  `Glyphs.tsx`; CSS `.glyph-layer` / `.glyph-prompt-ghost`): ⌘1/⌘2/⌘3 cross-animate TWO
+  layers over the glyph slot — bullet↔checkbox collapse/grow to a point at their shared
+  centre (`morph-scale`), to/from a prompt cross-fade in place (`morph-fade`, because a
+  full-height bar can't scale into a dot). Anything involving a DIVIDER still snaps: no
+  design yet, not an impossibility. KEYFRAMES, not transitions — an incoming glyph has no
+  resolved from-value, and `animation-fill-mode: both` needs none. Driven off the kind
+  VALUE via a per-row ref, like the wedge, so ⌘Z, the ⌘1/2/3 block form, the ⋯ menu and a
+  remote window all animate with one implementation and a row scrolling into view never
+  self-starts. Three things here are load-bearing:
+  (1) **the resting glyph IS the entering layer**, permanently mounted under the key
+  `"glyph"` and merely GAINING/losing the animation classes — a shape that returned a
+  bare `<GlyphInk>` at rest and a wrapper while morphing swapped a component element for a
+  host one, which React never reconciles (the `Wedge` rule), remounting the glyph subtree
+  at BOTH edges: measured in WebKit as `drawCheck` stroking itself a second time when a ⌘2
+  landed inside `.just-completed`'s 440ms window. The LEAVING layer is the opposite case —
+  recreated per morph, so it keys on the epoch, and that key is what restarts its keyframe.
+  (2) `.glyph-layer.glyph-leave` declares `opacity: 0` **as a resting style**: it is
+  invisible only by fill-mode, and both clone containers force `animation: none !important`,
+  so without it a row cloned mid-morph painted BOTH glyphs at full opacity.
+  (3) the prompt's real bar is an overlay on the PANEL, so a morph out of a prompt has no
+  bar to fade — the leaving layer draws `.glyph-prompt-ghost` in its place, at the real
+  bar's LAST MEASURED height (a fixed height truncated a 4-line prompt's bar by ~55px on
+  frame 0) and offset `+1px` for the panel's border, the vertical twin of the `−1` NodeRow
+  already applies to `promptBarLeft`. NOT covered: converting to/from a prompt also changes
+  the ROW HEIGHT (~18px at fontSize 16), and that still snaps — arming `.rows-animating`
+  for it was measured to look worse, since the growing row's own height is a single-paint
+  change; a real fix is a clip boundary for a growing row, i.e. a design project.
 - **Drag** (`drag.ts` + `dragGesture.ts`): `projectDrop` is the pure port of the Swift
   projection (gap by `midY <= pointerY`, depth band `[minDepth, prev.depth+1]`, divider
   can't parent, drill floor 1). Frames come from `virtualizer.measurementsCache`

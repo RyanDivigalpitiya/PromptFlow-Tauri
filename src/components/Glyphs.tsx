@@ -155,6 +155,9 @@ export interface GlyphProps {
   /** Live kind change — adds a second, outgoing layer over the glyph slot. A STABLE
    * object (component state), so it doesn't defeat the memo. */
   morph: KindMorph | null;
+  /** The height in px the row's real `.prompt-line-bullet` last measured, for the ghost
+   * bar a leaving prompt draws in its place. 0 = never measured (use the CSS fallback). */
+  promptBarH: number;
 }
 
 /**
@@ -192,12 +195,13 @@ export const Glyph = memo(function Glyph(p: GlyphProps) {
   return (
     <>
       {p.morph && (
-        // Draws the OLD kind.
+        // Draws the OLD kind, and is the one branch allowed to draw a prompt's bar
+        // itself: the real bar belongs to the panel, which is already unmounted.
         <span
           className={"glyph-layer glyph-leave" + anim}
           key={"leave:" + p.morph.epoch}
         >
-          <GlyphInk {...p} kind={p.morph.from} />
+          <GlyphInk {...p} kind={p.morph.from} ghostPromptBar />
         </span>
       )}
       <span
@@ -213,11 +217,39 @@ export const Glyph = memo(function Glyph(p: GlyphProps) {
 
 /** One glyph, drawn. Split out of `Glyph` so a morph can render it TWICE (once per
  * kind) without either copy knowing it's in an animation. */
-function GlyphInk(p: GlyphProps) {
+function GlyphInk(
+  p: GlyphProps & {
+    /** Draw a promptDraft as its leading bar rather than as the inert spacer — only
+     * true on a morph's leaving layer (see `Glyph`). */
+    ghostPromptBar?: boolean;
+  },
+) {
   const size = OutlineLayout.bulletHitSize(p.fontSize);
   if (p.kind === "promptDraft") {
-    // Its line-bullet is an overlay on the panel, so the slot is just a spacer.
-    return <span style={{ width: size, height: size, flex: "none" }} />;
+    if (!p.ghostPromptBar) {
+      // Its line-bullet is an overlay on the panel, so the slot is just a spacer.
+      return <span style={{ width: size, height: size, flex: "none" }} />;
+    }
+    // A stand-in for `.prompt-line-bullet` — same width formula NodeRow uses, and the
+    // HEIGHT the real bar last measured at (NodeRow keeps it): a prompt panel is as tall
+    // as its text, and the fixed one-line height this started as truncated a 4-line
+    // prompt's bar by ~55px on the animation's FIRST frame, at full opacity — the one
+    // thing the fade exists to prevent. 0 falls back to the CSS one-line height.
+    return (
+      <span
+        className="glyph-prompt-ghost"
+        style={{
+          height: p.promptBarH > 0 ? p.promptBarH : undefined,
+          width: Math.max(1, Math.round(2.5 * OutlineLayout.scale(p.fontSize)) - 1),
+          // Same tint rule as the real bar (NodeRow) — a ⌘⇧F-highlighted prompt must
+          // not lose its colour on the way out.
+          background:
+            p.isHighlighted || p.hasHighlightedDescendant
+              ? p.highlightColor
+              : "rgba(255,255,255,0.35)",
+        }}
+      />
+    );
   }
   if (p.kind === "line") {
     const stroke = Math.max(1.5, 2.5 * OutlineLayout.scale(p.fontSize) - 1);

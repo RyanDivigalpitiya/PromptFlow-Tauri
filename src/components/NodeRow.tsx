@@ -1,4 +1,4 @@
-import { memo, useSyncExternalStore, type CSSProperties } from "react";
+import { memo, useRef, useSyncExternalStore, type CSSProperties } from "react";
 import { api } from "../lib/api";
 import { OutlineLayout } from "../lib/layout";
 import { addRelative, drillInto, toggleCollapse } from "../state/controller";
@@ -205,9 +205,25 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
   useSyncExternalStore(subscribeNode(p.nodeId), () => nodeVersion(p.nodeId));
   useSyncExternalStore(subscribeCompleting, completingVersion);
   const rec = mirror.get(p.nodeId);
-  // Above the early return — it holds hooks. A live ⌘1/⌘2 kind change renders the glyph
-  // as two cross-animating layers instead of one.
+  // Above the early return — these hold hooks. A live ⌘1/⌘2/⌘3 kind change: the glyph
+  // renders as two cross-animating layers, and (into a prompt) the panel's bar fades up.
   const morph = useKindMorph(rec?.kind);
+  const promptBarRef = useRef<HTMLSpanElement>(null);
+  const lastPromptBarH = useRef(0);
+  // How long the real prompt bar is, for the stand-in the leaving layer draws once the
+  // panel has unmounted. Read HERE, in the render that starts the morph, because React
+  // has not committed yet: the OLD tree is still in the document, so this is the bar's
+  // true height at the instant the user pressed the key. (A layout effect recording it
+  // every commit went stale instead — NodeRow is memo'd over props that carry no WIDTH,
+  // so a window resize re-wraps the panel and re-measures the row without ever
+  // re-rendering this component, and the ghost came out a whole line short.) Later
+  // renders inside the same morph find the ref null and keep the cached value.
+  // getBoundingClientRect, not offsetHeight: the bar is fractionally tall (0.3em
+  // quantizes to 4.797px at fontSize 16) and rounding put the bottom cap a whole DEVICE
+  // pixel off on a 2× display.
+  if (morph?.from === "promptDraft" && promptBarRef.current) {
+    lastPromptBarH.current = promptBarRef.current.getBoundingClientRect().height;
+  }
   if (!rec) return null;
   // Plays the check-draw/pop once, right after the user completes this node.
   const justCompleted = rec.isCompleted && isCompleting(p.nodeId);
@@ -239,6 +255,7 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
         hasHighlightedDescendant={p.hasHighlightedDescendant}
         highlightColor={p.highlightColor}
         morph={morph}
+        promptBarH={lastPromptBarH.current}
       />
     </span>
   );
@@ -365,7 +382,12 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
               }}
             >
               <span
-                className="prompt-line-bullet"
+                ref={promptBarRef}
+                // The prompt half of the kind morph. Any live morph on a row that IS a
+                // prompt is one INTO a prompt (`morph.to` is always the current kind), so
+                // the bar fades up from nothing while the old bullet/checkbox — drawn by
+                // the glyph slot's leaving layer — fades away.
+                className={"prompt-line-bullet" + (morph ? " kind-enter" : "")}
                 style={{
                   left: promptBarLeft,
                   width: promptBarWidth,
