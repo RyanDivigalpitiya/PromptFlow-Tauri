@@ -21,8 +21,8 @@ npm install                  # once
 scripts/dev.sh [store.sqlite]  # tauri dev against an ISOLATED store (default /tmp/promptflow-tauri-dev.sqlite)
 scripts/build.sh             # release bundle -> src-tauri/target/release/bundle/macos/PromptFlow.app
 scripts/verify.sh            # launch smoke test of the release build (throwaway store, polls for a window)
-npm test                     # vitest: 4 suites / 24 tests (resolveKey, wrap, bold, projectDrop)
-cd src-tauri && cargo test   # 10 tests (store mutations/undo, archive round-trip + collect)
+npm test                     # vitest: 4 suites / 25 tests (resolveKey, wrap, bold, projectDrop)
+cd src-tauri && cargo test   # 12 tests (store mutations/undo, archive round-trip + collect)
 npx tsc --noEmit             # typecheck (strict; noUnusedLocals/Parameters)
 ```
 
@@ -138,8 +138,11 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   `useWindowState.*Collapse*` directly (raw calls skip the animation). The one
   deliberate exception is `revealNode`'s `expandMany` (a focus-pane navigation jump,
   not a manual disclosure) — it stays un-animated, like the SwiftUI original.
-  **A SINGLE-NODE toggle plays the DRAWER**; only bulk ⌘⇧E/⌘⇧D fall back to the older
-  fade + `.collapse-ghosts` dissolve (they have no single parent to hang a drawer off).
+  **A SINGLE-NODE toggle plays the DRAWER**; bulk ⌘⇧E/⌘⇧D pass NO roots (there's no
+  single parent to hang a drawer off), so they get only the gated reflow slide plus, on
+  expand, the `.node-row.entering` fade — never ghosts (`captureGhosts` returns early on
+  empty roots). `.collapse-ghosts` is now ONLY the single-node COLLAPSE fallback, for
+  when `buildDrawer` returns false.
   The drawer is three raw-DOM layers appended to `.outline-inner` (React never sees
   them), built by `buildDrawer`: `.drawer-clip` (static, pinned at the parent's bottom
   edge B, `overflow:hidden`) ▸ `.drawer-sweep` (`overflow:hidden`, height H,
@@ -219,8 +222,9 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   has no editor), ⇧⌘C markdown copy, ⌥arrows, ⌘↑/⌘↓ collapse/expand the focused
   parent — childless falls through to the native caret jump, wrap-selection, Escape);
   (2) `App.tsx` window handler (⌘⌥F, ⌘=/−/0 + pinch/ctrl-wheel → `setFont`, ⌘[/],
-  ⌘E/⌘D collapse/expand focused, ⌘⇧E/⌘⇧D collapse/expand ALL, ⌘Z fallback,
-  ⌘⌃⇧7); (3) `handleSelectionKey` capture-phase (block ops while a node selection is
+  ⌘E/⌘D collapse/expand focused, ⌘⇧E/⌘⇧D collapse/expand ALL, ⌘Z/⇧⌘Z fallback,
+  ⌘⌃⇧7 seed, ⌘⌃⇧8 idle perf baseline); (3) `handleSelectionKey` capture-phase (block ops
+  while a node selection is
   live; its Escape yields to an open ⋯ row-menu — one layer per press). Plus native menu accelerators (⌘N/⌘Z/⇧⌘Z + clipboard roles —
   the predefined cut/copy/paste/select_all items are REQUIRED; a macOS webview gets no
   ⌘C/⌘V without them). The Window submenu is registered via
@@ -260,10 +264,12 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   `fontSize` on `.node-row` (cluster/menu/prompt internals are em), the TopBar sets
   `16·clamp(scale,1,1.8)` (CAPPED: icons must never outgrow the fixed 44px strip or
   they'd break traffic-light alignment), SettingsPanel sets `13·clamp(scale,.9,2.2)`.
-  New chrome CSS should be em, not px. The ⋯ menu has NO backdrop div (position:fixed
-  degrades inside the transformed virtual rows) — a window-level capture
-  mousedown/Escape pair closes it and SWALLOWS the dismissing press+click (macOS menu
-  convention; without the swallow the click lands underneath and mutates data). The
+  New chrome CSS should be em, not px. The ⋯ menu is a NATIVE macOS NSMenu built in Rust
+  (`popup_row_menu`) and popped at the button's bottom-left; the chosen item comes back to
+  the OPENING window as a `row-menu-action` event and is replayed through the existing
+  gestures by `performRowMenuAction` (controller.ts). AppKit owns dismissal, so there is
+  no backdrop div and no in-app capture mousedown/Escape closer — the `.row-menu*` rules
+  in styles.css and the `.row-menu` guard in `handleSelectionKey` are both dead. The
   `.grow-wrap::after` mirror appends `\200B` (never a real space — that widened the
   editor and made the cluster jump on click-to-edit).
 - **Column math**: `OutlineLayout` (`lib/layout.ts`) matches the Swift constants exactly
@@ -274,7 +280,9 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   comes from `bulletCenterInset` (sibling) / `contentLeadingInset` (first child).
 - **Row interaction map** (matches the original): click bullet/prompt-line = drill;
   click checkbox = toggle complete; drag any glyph = reorder; chevron = per-window
-  collapse; trailing ⋯ = Zoom In / Copy / Delete (delete confirms at ≥10 descendants);
+  collapse; trailing ⋯ = Zoom In / Copy / Delete, built per kind in Rust — no Zoom In on
+  a divider, and a prompt's copy item is Copy Markdown + Copy Raw (+ Copy Subtree when it
+  has children) while a divider gets none (delete confirms at ≥10 descendants);
   completing the LAST sibling via ⌘Enter spawns a fresh sibling (never for the drill
   root); an abandoned empty node is pruned on defocus (`exemptPruneOnce` protects
   Enter-at-line-start splits); dividers (`line`) never drill, never parent, never
@@ -287,7 +295,7 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   Enter split keeps styling on both halves. Export writes `italicRanges`/
   `underlineRanges` ONLY when non-empty — style-free documents stay byte-identical to
   the SwiftUI format (whose decoder ignores the extra keys on styled ones).
-- **The mutation surface is the Rust commands** (36 registered in `lib.rs`; typed
+- **The mutation surface is the Rust commands** (37 registered in `lib.rs`; typed
   wrappers in `src/lib/api.ts`). Never mutate the mirror locally — apply state only from
   deltas. New mutations follow the pattern: store method → command → `emit_delta` →
   `MutationOut` hints for the caller.

@@ -27,8 +27,9 @@
  * small subtrees (H <= DRAWER_PULL => CAP = H) and degrades continuously into a
  * head-first curtain with a one-row parallax lead-in for large ones. One code path.
  *
- * Bulk ops (⌘⇧E/⌘⇧D) have no single B/H, so they keep the older look: entering rows fade
- * in (`.node-row.entering`) and leaving rows dissolve (`.collapse-ghosts`).
+ * Bulk ops (⌘⇧E/⌘⇧D) have no single B/H, so they keep the older look: the gated reflow
+ * slide, plus a `.node-row.entering` fade on expand. They pass NO roots, so they never
+ * raise ghosts — `.collapse-ghosts` is only the single-node collapse fallback.
  *
  * `runCollapseAnim(...)` is the ONE choke point every collapse mutation routes through
  * (see controller's toggleCollapse/setCollapsed/setCollapsedAll).
@@ -213,8 +214,8 @@ function removeOverlays() {
 }
 
 /** Clone the currently-rendered rows of the collapsing subtree into a fade-out overlay,
- * pinned at their pre-collapse positions. The BULK fallback (⌘⇧E) — single-node
- * collapses use the drawer instead. */
+ * pinned at their pre-collapse positions. Reached ONLY when a single-node collapse can't
+ * build a drawer — bulk ⌘⇧E passes no roots and returns here immediately. */
 function captureGhosts(prevRows: RenderRow[], collapseRoots: string[]) {
   const inner = env.inner;
   if (!inner || collapseRoots.length === 0) return;
