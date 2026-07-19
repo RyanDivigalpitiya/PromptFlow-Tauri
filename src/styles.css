@@ -25,6 +25,14 @@
      the fading thing is a caret target rather than the moving thing — contrast
      .drawer-content, which is the opposite case and must keep the shared curve. */
   --enter-fade-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  /* A pure REORDER (⌥↑/↓) — the only animation where nothing enters or leaves and two
+     rows simply trade places. It gets its own, quicker, LINEAR clock: the shared
+     ease-in-out exists to sell a distance being opened or closed, and over a one-row
+     swap it just reads as hesitation at both ends. Linear also keeps the two rows'
+     speeds matched all the way through, which is what makes a swap read as a swap.
+     collapseAnim.ts reads this live for its teardown, exactly like the collapse var. */
+  --reorder-anim-dur: 170ms;
+  --reorder-anim-ease: linear;
   /* Parent progress wedge — DELIBERATELY NOT --collapse-anim-dur. That one is the
      drawer's clock and gets dialled past 500ms to eyeball a frame (see the note
      above), which would put every wedge in the document into slow motion. The wedge
@@ -187,6 +195,13 @@ body {
 .rows-animating .vrow:not(.entering-row) {
   transition: transform var(--collapse-anim-dur) var(--collapse-anim-ease);
   will-change: transform;
+}
+
+/* A pure reorder retimes the SAME transition — only the duration and curve, so the
+   property list above stays the one place it is declared. */
+.rows-animating.rows-reorder .vrow:not(.entering-row) {
+  transition-duration: var(--reorder-anim-dur);
+  transition-timing-function: var(--reorder-anim-ease);
 }
 
 /* 1b. Horizontal glide (Tab / ⇧Tab, and the undo of one). `paddingLeft` is NEVER

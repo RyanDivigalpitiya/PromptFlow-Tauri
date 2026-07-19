@@ -224,7 +224,14 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   into `publish()` while `removeFromParent` stays eager: the flatten taken at the seam is
   then exactly post-delta, while the leaving rows keep rendering through commit 1 (with
   the record already gone they would blank out mid-animation and re-trigger the
-  ResizeObserver). `mountBand` (was `glideBand`) anchors on a SURVIVING row here rather
+  ResizeObserver).
+  A pure REORDER (⌥↑/↓ — nothing enters, nothing leaves) is the ONE case with its own
+  clock: `.rows-reorder` retimes the same reflow transition to `--reorder-anim-dur` (170ms)
+  / `--reorder-anim-ease` (linear). The shared ease-in-out exists to sell a distance being
+  opened or closed; over a one-row swap it reads as hesitation at both ends, and linear
+  keeps the two rows' speeds matched, which is what makes a swap read as a swap.
+  `animDurationMs()` keys off the same flag so the teardown tracks it.
+  `mountBand` (was `glideBand`) anchors on a SURVIVING row here rather
   than skipping a parent's block — and WHICH survivor is load-bearing, because the band's
   reach is measured from the anchor's old y: an ENTER anchors just before the change
   (survivors move down), a LEAVE just past the removed block, so the removed height is

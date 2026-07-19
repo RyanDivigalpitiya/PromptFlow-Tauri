@@ -78,10 +78,14 @@ function cssDurationMs(name: string, fallback: number): number {
   return fallback;
 }
 
-/** The window the whole animation needs. Movement and fade share one duration and one
- * curve (see styles.css — decoupling the fade's timing reads as jarring). */
+/** The window the LIVE animation needs. Movement and fade share one duration and one
+ * curve (see styles.css — decoupling the fade's timing reads as jarring); a pure reorder
+ * is the one exception and runs on its own quicker, linear clock, so the teardown has to
+ * read that var instead or it would hold `.rows-animating` on for 130ms of dead time. */
 function animDurationMs(): number {
-  return cssDurationMs("--collapse-anim-dur", COLLAPSE_ANIM_MS);
+  return reordering
+    ? cssDurationMs("--reorder-anim-dur", COLLAPSE_ANIM_MS)
+    : cssDurationMs("--collapse-anim-dur", COLLAPSE_ANIM_MS);
 }
 
 export type AnimMode = "expand" | "collapse" | "glide";
@@ -94,6 +98,9 @@ let mode: AnimMode = "expand";
  * `rowRank`. */
 let prevOrder: ReadonlyMap<string, number> = new Map();
 let drawerShowing = false;
+/** The live animation is a pure REORDER — nothing entered, nothing left, rows just
+ * traded places (⌥↑/↓). Retimes the reflow to `--reorder-anim-dur`/`-ease`. */
+let reordering = false;
 /** The row id the mount band hangs off. For a collapse/expand toggle and the tab glide
  * it is the toggled/moved NODE and the band starts after its child block; for the
  * enter/leave/reorder paths it is a SURVIVING row and the band starts AT it. Null for
@@ -142,6 +149,11 @@ export function isAnimating(): boolean {
  * entering rows must stay invisible (but still laid out) so they don't double-draw. */
 export function isDrawerShowing(): boolean {
   return drawerShowing;
+}
+/** True while a pure reorder is live — OutlineView puts `.rows-reorder` on
+ * `.outline-inner` for it, which retimes the reflow transition. */
+export function isReordering(): boolean {
+  return animating && reordering;
 }
 /** True while an expand animation is live AND this row was NOT present before the
  * toggle — i.e. it should play the entrance. Always false during a collapse. */
@@ -507,6 +519,7 @@ export function endAnimNow(): void {
   if (animating || drawerShowing) {
     animating = false;
     drawerShowing = false;
+    reordering = false;
     prevOrder = new Map();
     animAnchorId = null;
     animAnchorSkipBlock = true;
@@ -541,6 +554,7 @@ export function runCollapseAnim(
 
   prevOrder = new Map(prevRows.map((r, i) => [r.id, i]));
   mode = m;
+  reordering = false;
   // A drawer needs one parent to hang off; bulk ops have no single B/H.
   const rootId = roots.length === 1 ? roots[0] : null;
 
@@ -656,6 +670,9 @@ export function runRowsAnim(
   // just means "fade nothing in" — which is also the pure-reorder (⌥↑/↓) case.
   mode = d.entering.size > 0 ? "expand" : "collapse";
   drawerShowing = false;
+  // Nothing entered and nothing left ⇒ rows only traded places (⌥↑/↓). Set BEFORE the
+  // teardown timer is scheduled, since animDurationMs() keys off it.
+  reordering = d.entering.size === 0 && d.leaving.size === 0;
   // On a LEAVE the anchor must sit PAST the removed block, so the band's reach scales
   // with the removed height (see anchorRowId).
   animAnchorId = anchorRowId(
@@ -860,6 +877,7 @@ function runGlide(
   // hasn't re-rendered yet. The same source runCollapseAnim's expand path reads.
   prevOrder = new Map(env.rows().map((r, i) => [r.id, i]));
   mode = "glide";
+  reordering = false;
   drawerShowing = false;
   // Reuse the drawer's band anchor. At commit 1 (old flatten) mountBand mounts ~one
   // screenful below the moved node's OLD block — exactly the rows an outdent travels
