@@ -12,11 +12,10 @@
   --row-line-height: 1.35;
   /* Expand/collapse animation timing — THE single source of truth. collapseAnim.ts
      reads this live (animDurationMs) to time its teardown, so retuning it needs no JS
-     change. NOTE: 2500ms is a slowed-down value for eyeballing the animation frame by
-     frame — restore ~190ms before shipping. */
-  --collapse-anim-dur: 2500ms;
-  --collapse-anim-ease: cubic-bezier(0.83, 0, 0.17, 1);
-  /* --collapse-anim-ease: cubic-bezier(0.22, 1, 0.36, 1); */
+     change. NOTE: anything much above ~250ms here is a SLOWED-DOWN value for eyeballing
+     the animation frame by frame — restore ~190ms before shipping. */
+  --collapse-anim-dur: 5000ms;
+  --collapse-anim-ease: cubic-bezier(0.37, 0, 0.63, 1);
 }
 
 * {
@@ -238,9 +237,18 @@ body {
   will-change: transform;
 }
 
-.drawer-clip.drawer-anim .drawer-sweep,
-.drawer-clip.drawer-anim .drawer-content {
+.drawer-clip.drawer-anim .drawer-sweep {
   transition: transform var(--collapse-anim-dur) var(--collapse-anim-ease);
+}
+
+/* The content layer moves AND fades, both on the SAME curve — giving the fade its own
+   (e.g. linear) timing was tried and reads as jarring, because the block's opacity then
+   visibly disagrees with its motion. One composited opacity for the whole block, not
+   per row. */
+.drawer-clip.drawer-anim .drawer-content {
+  transition:
+    transform var(--collapse-anim-dur) var(--collapse-anim-ease),
+    opacity var(--collapse-anim-dur) var(--collapse-anim-ease);
 }
 
 /* Clones are .vrow descendants of .rows-animating and would otherwise each inherit the

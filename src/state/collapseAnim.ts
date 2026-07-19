@@ -56,18 +56,24 @@ const DRAWER_PULL_PX = 48;
  * as a constant: a hardcoded mirror silently desyncs the moment `--collapse-anim-dur`
  * is retuned, and the teardown timer then yanks the overlay out mid-flight (shipped
  * bug, fixed). */
-function animDurationMs(): number {
+function cssDurationMs(name: string, fallback: number): number {
   try {
     const raw = getComputedStyle(document.documentElement)
-      .getPropertyValue("--collapse-anim-dur")
+      .getPropertyValue(name)
       .trim();
     // Order matters: "2500ms" also ends with "s".
-    if (raw.endsWith("ms")) return parseFloat(raw) || COLLAPSE_ANIM_MS;
-    if (raw.endsWith("s")) return parseFloat(raw) * 1000 || COLLAPSE_ANIM_MS;
+    if (raw.endsWith("ms")) return parseFloat(raw) || fallback;
+    if (raw.endsWith("s")) return parseFloat(raw) * 1000 || fallback;
   } catch {
-    // unreadable (no document / detached) — fall through to the constant
+    // unreadable (no document / detached) — fall through to the fallback
   }
-  return COLLAPSE_ANIM_MS;
+  return fallback;
+}
+
+/** The window the whole animation needs. Movement and fade share one duration and one
+ * curve (see styles.css — decoupling the fade's timing reads as jarring). */
+function animDurationMs(): number {
+  return cssDurationMs("--collapse-anim-dur", COLLAPSE_ANIM_MS);
 }
 
 export type AnimMode = "expand" | "collapse";
@@ -245,8 +251,12 @@ function buildDrawer(m: AnimMode, rootId: string, rows: RenderRow[]): boolean {
   const toSweep = m === "expand" ? 0 : -H;
   const fromContent = m === "expand" ? H - CAP : 0;
   const toContent = m === "expand" ? 0 : H - CAP;
+  // The block also fades as it travels — in on the way out, out on the way in.
+  const fromOpacity = m === "expand" ? "0" : "1";
+  const toOpacity = m === "expand" ? "1" : "0";
   sweep.style.transform = `translateY(${fromSweep}px)`;
   content.style.transform = `translateY(${fromContent}px)`;
+  content.style.opacity = fromOpacity;
 
   inner.appendChild(clip);
   drawerEl = clip;
@@ -255,6 +265,7 @@ function buildDrawer(m: AnimMode, rootId: string, rows: RenderRow[]): boolean {
     clip.classList.add("drawer-anim");
     sweep.style.transform = `translateY(${toSweep}px)`;
     content.style.transform = `translateY(${toContent}px)`;
+    content.style.opacity = toOpacity;
   };
   return true;
 }
