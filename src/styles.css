@@ -41,6 +41,16 @@
      ease-in-out reads as a snap across a 5px radius. */
   --wedge-anim-dur: 320ms;
   --wedge-anim-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  /* Glyph KIND morph (⌘1/⌘2/⌘3) — the outgoing glyph collapsing while the incoming one
+     grows out of the same point. Its own clock for the same reason the wedge has one:
+     this is a 14px glyph event in the COMPLETION family, not a layout distance being
+     opened, so it wants to be quick and to ease OUT — and --collapse-anim-dur gets
+     dialled past 500ms to eyeball the drawer. ONE curve for both layers, deliberately:
+     the two are mirror images of each other and decoupling them stops the pair reading
+     as a single object changing shape (the same lesson ⌥↑/↓ taught). Glyphs.tsx reads
+     the duration LIVE to time its teardown, so retuning this needs no JS change. */
+  --kind-anim-dur: 200ms;
+  --kind-anim-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
 * {
@@ -412,6 +422,10 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  /* Containing block for the kind morph's two absolutely-positioned layers. The slot's
+     own width/height come from inline styles (NodeRow), so it keeps its box even when
+     its only child is out of flow. */
+  position: relative;
 }
 
 .glyph-dot,
@@ -523,6 +537,97 @@ body {
   transition:
     stroke var(--wedge-anim-dur) var(--wedge-anim-ease),
     fill var(--wedge-anim-dur) var(--wedge-anim-ease);
+}
+
+/* ---------- Glyph kind morph (⌘1/⌘2) ----------
+   A kind change draws BOTH glyphs for one beat, as two layers stacked on the glyph slot
+   (Glyphs.tsx), and each plays a one-shot keyframe. KEYFRAMES, not transitions: the
+   incoming glyph has no previously-resolved value for a transition to start from — a
+   transition would either not run or need the Tab glide's extra invert commit. `both`
+   fill mode holds frame 0 before the first paint and the last frame until the classes
+   come off, so neither end can flash (measured in WebKit: the animation's clock anchors
+   to the frame its name appeared in, so frame 0 is painted even on an element that was
+   already on screen).
+
+   Pure transform+opacity, so WebKit hands both to Core Animation and they composite at
+   the display's native rate rather than the webview's 60Hz rAF cap. */
+@keyframes glyphMorphOut {
+  from {
+    transform: scale(1);
+    opacity: 1;
+  }
+
+  to {
+    transform: scale(0);
+    opacity: 0;
+  }
+}
+
+@keyframes glyphMorphIn {
+  from {
+    transform: scale(0);
+    opacity: 0;
+  }
+
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* EVERY glyph lives in a layer, morph or no morph — the resting glyph IS the entering
+   layer, still mounted, with its animation classes dropped (see Glyphs.tsx: swapping the
+   structure at rest would remount the glyph and replay drawCheck).
+   Inset to the SLOT's box rather than shrink-wrapped around the glyph, and the slot's own
+   width/height are inline — so nothing here changes the row's layout (measured identical,
+   box for box, in WebKit). */
+.glyph-layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* The slot's own mousedown (drill/drag) must keep firing — it is the layers' ancestor
+     and keeps its own box, so hit-testing falls through to it (verified with a real
+     mouse event in WebKit). */
+  pointer-events: none;
+}
+
+/* RESTING state for the outgoing layer — load-bearing, not decoration. It is invisible
+   only because `animation-fill-mode: both` holds the keyframe's last frame, and BOTH
+   clone containers (`.collapse-ghosts *`, `.drawer-content *`) put
+   `animation: none !important` on every clone, which deletes the fill along with the
+   animation. Without a declared rest, a row cloned mid-morph drew BOTH glyphs at full
+   size and opacity for the whole dissolve (measured in WebKit). A running keyframe
+   outranks a normal declaration, so this is inert while the morph is live. */
+.glyph-layer.glyph-leave {
+  opacity: 0;
+}
+
+.glyph-layer.morph-scale.glyph-leave {
+  transform: scale(0);
+}
+
+/* The outgoing layer's ink is a FRESH subtree every morph (key "leave:"+epoch), so
+   `.node-row.just-completed .glyph-check` above re-arms drawCheck on it: `both` holds the
+   from-frame (dashoffset 1) through the 0.05s delay, and the tick the user just watched
+   draw VANISHES on the morph's first frame — at full opacity and full scale (measured in
+   WebKit), then re-strokes itself at 2% opacity. A dissolve wants the finished tick.
+   Three classes so this ties that rule on specificity and wins on source order; two lose
+   silently. */
+.glyph-layer.glyph-leave .glyph-check {
+  animation: none;
+  stroke-dashoffset: 0;
+}
+
+/* Bullet <-> checkbox: concentric, so they genuinely morph — one collapses to a point at
+   its center as the other grows out of that same point. */
+.glyph-layer.morph-scale.glyph-leave {
+  animation: glyphMorphOut var(--kind-anim-dur) var(--kind-anim-ease) both;
+}
+
+.glyph-layer.morph-scale.glyph-enter {
+  animation: glyphMorphIn var(--kind-anim-dur) var(--kind-anim-ease) both;
 }
 
 /* The completed look (line-through + dim) eases in rather than snapping. */

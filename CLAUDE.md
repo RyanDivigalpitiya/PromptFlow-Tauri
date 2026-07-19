@@ -21,7 +21,7 @@ npm install                  # once
 scripts/dev.sh [store.sqlite]  # tauri dev against an ISOLATED store (default /tmp/promptflow-tauri-dev.sqlite)
 scripts/build.sh             # release bundle -> src-tauri/target/release/bundle/macos/PromptFlow.app
 scripts/verify.sh            # launch smoke test of the release build (throwaway store, polls for a window)
-npm test                     # vitest: 5 suites / 37 tests (resolveKey, wrap, bold, projectDrop, rowBands)
+npm test                     # vitest: 6 suites / 40 tests (resolveKey, wrap, bold, projectDrop, rowBands, kindMorph)
 cd src-tauri && cargo test   # 12 tests (store mutations/undo, archive round-trip + collect)
 npx tsc --noEmit             # typecheck (strict; noUnusedLocals/Parameters)
 ```
@@ -196,9 +196,10 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   ResizeObserver reports the real one, so transitioning it animated that correction and
   made a parent's FIRST expand visibly re-space its children (the size cache is empty
   only that once). **All timing lives in styles.css `:root`, never in JS**:
-  `--collapse-anim-dur`/`-ease` is the shared clock, with three deliberate exceptions —
-  `--reorder-anim-dur` (⌥↑/↓), `--wedge-anim-dur` (the progress pie) and
-  `--enter-fade-ease` (an entering row's opacity only). `animDurationMs()` reads the LIVE
+  `--collapse-anim-dur`/`-ease` is the shared clock, with four deliberate exceptions —
+  `--reorder-anim-dur` (⌥↑/↓), `--wedge-anim-dur` (the progress pie), `--kind-anim-dur`
+  (the glyph kind morph) and `--enter-fade-ease` (an entering row's opacity only).
+  `animDurationMs()` reads the LIVE
   value for whichever is running so the teardown always tracks it; `COLLAPSE_ANIM_MS` is
   only a fallback (a hardcoded mirror desynced the moment the CSS was retuned and tore the
   ghost overlay out mid-fade). Each exception documents why it isn't the shared clock —
@@ -307,6 +308,31 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   deliberately NOT `--collapse-anim-dur` — that one gets dialled past 500ms to debug the
   drawer. Unlike everything else here it is a main-thread repaint (WebKit composites only
   transform/opacity/filter), which at 14×14px is free.
+- **Glyph kind morph** (`lib/kindMorph.ts` truth table + `useKindMorph`/`Glyph` in
+  `Glyphs.tsx`; CSS `.glyph-layer`): ⌘1/⌘2 cross-animate TWO layers over the glyph slot —
+  bullet↔checkbox are concentric, so the outgoing one collapses to a point at their shared
+  centre while the incoming one grows out of it (`morph-scale`). A PROMPT or a DIVIDER
+  still snaps: those pairs have no designed transition yet, not no possible one.
+  KEYFRAMES, not transitions — an incoming glyph has no resolved from-value, and
+  `animation-fill-mode: both` needs none (measured in WebKit: the animation's clock
+  anchors to the frame its name appeared in, so frame 0 is painted whether the element is
+  fresh or already on screen). Driven off the kind VALUE via a per-row ref, like the
+  wedge, so ⌘Z, the ⌘1/⌘2 block form, the ⋯ menu and a remote window all animate with one
+  implementation, and a row scrolling into view never self-starts. Three things are
+  load-bearing: (1) **the resting glyph IS the entering layer**, permanently mounted under
+  the key `"glyph"` and merely GAINING/losing the animation classes — a shape that returned
+  a bare `<GlyphInk>` at rest and a wrapper while morphing swapped a component element for
+  a host one, which React never reconciles (the `Wedge` rule), remounting the glyph subtree
+  at BOTH edges: measured as `drawCheck` stroking itself a second time when a ⌘2 landed
+  inside `.just-completed`'s 440ms window. (2) that stability costs the keyframe RESTART a
+  remount used to give: a second kind change inside the first morph's window leaves
+  `animation-name` untouched, so the new ink adopted the old clock (or hard-cut in at full
+  size once it had finished) — hence the layout effect that replays the entering layer's
+  animations by hand. The LEAVING layer is the opposite case: recreated per morph, so its
+  `"leave:"+epoch` key restarts it for free. (3) `.glyph-layer.glyph-leave` declares
+  `opacity: 0` **as a resting style**: it is invisible only by fill-mode, and both clone
+  containers force `animation: none !important`, so without it a row cloned mid-morph
+  painted BOTH glyphs at full opacity.
 - **Drag** (`drag.ts` + `dragGesture.ts`): `projectDrop` is the pure port of the Swift
   projection (gap by `midY <= pointerY`, depth band `[minDepth, prev.depth+1]`, divider
   can't parent, drill floor 1). Frames come from `virtualizer.measurementsCache`

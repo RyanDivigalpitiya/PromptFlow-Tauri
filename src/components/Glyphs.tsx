@@ -1,6 +1,8 @@
-import { memo } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { kindMorphStyle, type KindMorphStyle } from "../lib/kindMorph";
 import { OutlineLayout, Theme } from "../lib/layout";
 import type { NodeKind } from "../lib/types";
+import { cssDurationMs } from "../state/collapseAnim";
 
 /** A full circle of radius `r` about (c,c), starting at 12 O'CLOCK and running
  * CLOCKWISE, as two 180° arcs (a single 360° arc renders as nothing). The `d` is
@@ -60,6 +62,86 @@ function Wedge(p: { c: number; radius: number; fraction: number; color: string }
   );
 }
 
+/* ---------- Kind morph (⌘1/⌘2/⌘3, the ⋯ menu, ⌘Z, another window) ----------
+ *
+ * Switching a row's kind used to swap one glyph for another between two paints. Now the
+ * two coexist for one beat as absolutely-positioned LAYERS over the same glyph slot, and
+ * each plays a one-shot keyframe (see `kindMorphStyle` for which pair gets which).
+ *
+ * KEYFRAMES, not transitions, and deliberately: the incoming glyph has no
+ * previously-resolved value for a transition to start from — the exact hazard the Tab
+ * glide had to work around with an extra commit. A keyframe with
+ * `animation-fill-mode: both` needs no from-value and no invert commit; measured in
+ * WebKit, the animation's clock anchors to the frame the animation-name appeared in, so
+ * frame 0 is painted whether the element is fresh or already on screen.
+ *
+ * Driven off the kind VALUE via a per-row ref, not off a "just changed" flag set in the
+ * gesture — same reasoning as the progress wedge: the value path fires for ⌘Z, a remote
+ * window's edit and the ⌘1/2/3 block form for free, and it cannot self-start on mount, so
+ * a row scrolling back into the virtualizer's window paints its true glyph.
+ */
+
+export interface KindMorph {
+  /** The kind this row rendered until a beat ago — the LEAVING layer draws it. */
+  from: NodeKind;
+  /** Always the row's current kind; kept explicit so callers needn't re-derive it. */
+  to: NodeKind;
+  style: KindMorphStyle;
+  /** Distinguishes back-to-back morphs. It KEYS the leaving layer, which is created per
+   * morph anyway, so that one remounts and its keyframe restarts for free. The entering
+   * layer is permanently mounted (see `Glyph`) and a second morph of the same style
+   * leaves its `animation-name` untouched, so it has to be restarted by hand — hence the
+   * layout effect in `Glyph`, which reads this. */
+  epoch: number;
+}
+
+/** Fallback only — `--kind-anim-dur` in styles.css `:root` is the truth (read live). */
+const KIND_ANIM_MS = 200;
+/** Grace before dropping the layers, so the last frame has settled. Tearing down early
+ * would snap the fill-mode's final values away mid-animation. */
+const KIND_TEARDOWN_BUFFER_MS = 60;
+
+let morphEpoch = 0;
+
+/**
+ * Watch one row's kind and report the morph it should be playing right now (null at
+ * rest). Call it ONCE per row, above any early return — it holds hooks.
+ *
+ * `undefined` means "no record" (the row is being torn down): the previous kind is held,
+ * so a record that comes back doesn't animate from nothing.
+ */
+export function useKindMorph(kind: NodeKind | undefined): KindMorph | null {
+  const prev = useRef(kind);
+  const [morph, setMorph] = useState<KindMorph | null>(null);
+
+  if (kind !== undefined && prev.current !== kind) {
+    const from = prev.current;
+    prev.current = kind;
+    // Render-phase update of THIS component's own state — React's documented "adjust
+    // state when a prop changes" pattern. It re-renders immediately, BEFORE the browser
+    // paints, so the two layers mount in the same paint as the new kind; deferring this
+    // to an effect would paint one frame of the new glyph at full size first, i.e. the
+    // snap this whole file exists to remove.
+    const style = from === undefined ? null : kindMorphStyle(from, kind);
+    setMorph(
+      style && from !== undefined
+        ? { from, to: kind, style, epoch: ++morphEpoch }
+        : null,
+    );
+  }
+
+  useEffect(() => {
+    if (!morph) return;
+    const t = setTimeout(
+      () => setMorph((m) => (m === morph ? null : m)),
+      cssDurationMs("--kind-anim-dur", KIND_ANIM_MS) + KIND_TEARDOWN_BUFFER_MS,
+    );
+    return () => clearTimeout(t);
+  }, [morph]);
+
+  return morph;
+}
+
 export interface GlyphProps {
   kind: NodeKind;
   fontSize: number;
@@ -70,14 +152,71 @@ export interface GlyphProps {
   isHighlighted: boolean;
   hasHighlightedDescendant: boolean;
   highlightColor: string;
+  /** Live kind change — adds a second, outgoing layer over the glyph slot. A STABLE
+   * object (component state), so it doesn't defeat the memo. */
+  morph: KindMorph | null;
 }
 
-/** The leading glyph slot's content for one row. The slot itself is RESERVED for
- * every kind (mixed-kind siblings share one text column); a promptDraft renders an
- * inert spacer here (its line-bullet is an overlay on the panel). */
+/**
+ * The leading glyph slot's content for one row: the glyph, plus — while a kind morph is
+ * live — the outgoing kind's glyph over it. The slot itself is RESERVED for every kind
+ * (mixed-kind siblings share one text column).
+ *
+ * The resting glyph IS the entering layer, under a STABLE key, with its animation classes
+ * dropped when the morph ends. That identity is load-bearing, not tidiness: React never
+ * reconciles a component element with a host one (the same rule the `Wedge` comment
+ * states), so a "bare glyph at rest, wrapped glyph while morphing" shape destroyed and
+ * rebuilt the whole glyph subtree at BOTH edges of every morph — measured in WebKit as
+ * `drawCheck` stroking itself a second time when a ⌘2 landed inside `.just-completed`'s
+ * 440ms window, and as a live wedge transition losing its from-value. The LEAVING layer
+ * is the opposite case: it is created and destroyed per morph anyway, so it keys on the
+ * epoch, which is exactly what restarts its keyframe on a back-to-back kind change.
+ */
 export const Glyph = memo(function Glyph(p: GlyphProps) {
+  const anim = p.morph ? " morph-" + p.morph.style : "";
+  const enterRef = useRef<HTMLSpanElement>(null);
+  // The price of never remounting the entering layer: a second kind change inside the
+  // first morph's window leaves its className — and so its `animation-name` — unchanged,
+  // so CSS keeps the RUNNING keyframe going and the new glyph adopts the old clock (a
+  // measured 0.88 on its first painted frame), or, if that keyframe had already finished,
+  // gets no animation at all and hard-cuts in at full size. ⌘2 then ⌘Z is an ordinary
+  // enough pair of keystrokes. Restart it in place instead — element-only
+  // `getAnimations()`, so the ink's own drawCheck/glyphPop are untouched, and a LAYOUT
+  // effect so the reset lands before the paint.
+  useLayoutEffect(() => {
+    for (const a of enterRef.current?.getAnimations() ?? []) {
+      a.currentTime = 0;
+      void a.play();
+    }
+  }, [p.morph?.epoch]);
+  return (
+    <>
+      {p.morph && (
+        // Draws the OLD kind.
+        <span
+          className={"glyph-layer glyph-leave" + anim}
+          key={"leave:" + p.morph.epoch}
+        >
+          <GlyphInk {...p} kind={p.morph.from} />
+        </span>
+      )}
+      <span
+        className={"glyph-layer glyph-enter" + anim}
+        key="glyph"
+        ref={enterRef}
+      >
+        <GlyphInk {...p} />
+      </span>
+    </>
+  );
+});
+
+/** One glyph, drawn. Split out of `Glyph` so a morph can render it TWICE (once per
+ * kind) without either copy knowing it's in an animation. */
+function GlyphInk(p: GlyphProps) {
   const size = OutlineLayout.bulletHitSize(p.fontSize);
   if (p.kind === "promptDraft") {
+    // Its line-bullet is an overlay on the panel, so the slot is just a spacer.
     return <span style={{ width: size, height: size, flex: "none" }} />;
   }
   if (p.kind === "line") {
@@ -220,4 +359,4 @@ export const Glyph = memo(function Glyph(p: GlyphProps) {
       </svg>
     </span>
   );
-});
+}

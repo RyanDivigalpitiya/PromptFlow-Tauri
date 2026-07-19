@@ -63,8 +63,9 @@ const DRAWER_PULL_PX = 48;
 /** The live CSS animation duration in ms. Read per toggle (cheap) rather than mirrored
  * as a constant: a hardcoded mirror silently desyncs the moment `--collapse-anim-dur`
  * is retuned, and the teardown timer then yanks the overlay out mid-flight (shipped
- * bug, fixed). */
-function cssDurationMs(name: string, fallback: number): number {
+ * bug, fixed). Exported because every JS-timed teardown in the app owes the same debt
+ * to its CSS var — the glyph kind-morph reads `--kind-anim-dur` through this. */
+export function cssDurationMs(name: string, fallback: number): number {
   try {
     const raw = getComputedStyle(document.documentElement)
       .getPropertyValue(name)

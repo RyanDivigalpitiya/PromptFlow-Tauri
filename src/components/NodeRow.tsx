@@ -10,7 +10,7 @@ import {
   subscribeCompleting,
 } from "../state/rowAnim";
 import { useWindowState } from "../state/windowState";
-import { Glyph } from "./Glyphs";
+import { Glyph, useKindMorph } from "./Glyphs";
 import { NoteEditor, RowEditor } from "./RowEditor";
 
 /** Chevron + hover-revealed "+" / zoom / ⋯ hugging the end of the text (the
@@ -205,6 +205,9 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
   useSyncExternalStore(subscribeNode(p.nodeId), () => nodeVersion(p.nodeId));
   useSyncExternalStore(subscribeCompleting, completingVersion);
   const rec = mirror.get(p.nodeId);
+  // Above the early return — it holds hooks. A live ⌘1/⌘2 kind change renders the glyph
+  // as two cross-animating layers instead of one.
+  const morph = useKindMorph(rec?.kind);
   if (!rec) return null;
   // Plays the check-draw/pop once, right after the user completes this node.
   const justCompleted = rec.isCompleted && isCompleting(p.nodeId);
@@ -235,6 +238,7 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
         isHighlighted={rec.isHighlighted}
         hasHighlightedDescendant={p.hasHighlightedDescendant}
         highlightColor={p.highlightColor}
+        morph={morph}
       />
     </span>
   );
