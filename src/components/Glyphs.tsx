@@ -177,6 +177,11 @@ export interface GlyphProps {
  */
 export const Glyph = memo(function Glyph(p: GlyphProps) {
   const anim = p.morph ? " morph-" + p.morph.style : "";
+  // Names the DIRECTION, on BOTH layers, so one direction can be styled on its own — a
+  // morph is not always the mirror of itself (checkbox→bullet keeps its ink and eases in;
+  // see styles.css). `from` alone identifies the direction: within a style there are only
+  // two kinds, so the other end is implied.
+  const dir = p.morph ? " from-" + p.morph.from : "";
   const enterRef = useRef<HTMLSpanElement>(null);
   // The price of never remounting the entering layer: a second kind change inside the
   // first morph's window leaves its className — and so its `animation-name` — unchanged,
@@ -198,14 +203,14 @@ export const Glyph = memo(function Glyph(p: GlyphProps) {
         // Draws the OLD kind, and is the one branch allowed to draw a prompt's bar
         // itself: the real bar belongs to the panel, which is already unmounted.
         <span
-          className={"glyph-layer glyph-leave" + anim}
+          className={"glyph-layer glyph-leave" + anim + dir}
           key={"leave:" + p.morph.epoch}
         >
           <GlyphInk {...p} kind={p.morph.from} ghostPromptBar />
         </span>
       )}
       <span
-        className={"glyph-layer glyph-enter" + anim}
+        className={"glyph-layer glyph-enter" + anim + dir}
         key="glyph"
         ref={enterRef}
       >

@@ -45,12 +45,25 @@
      grows out of the same point. Its own clock for the same reason the wedge has one:
      this is a 14px glyph event in the COMPLETION family, not a layout distance being
      opened, so it wants to be quick and to ease OUT — and --collapse-anim-dur gets
-     dialled past 500ms to eyeball the drawer. ONE curve for both layers, deliberately:
-     the two are mirror images of each other and decoupling them stops the pair reading
-     as a single object changing shape (the same lesson ⌥↑/↓ taught). Glyphs.tsx reads
-     the duration LIVE to time its teardown, so retuning this needs no JS change. */
+     dialled past 500ms to eyeball the drawer. ONE duration for every part and every
+     layer: they are mirror images of each other, and the teardown reads this var LIVE
+     (Glyphs.tsx), so retuning it needs no JS change. */
   --kind-anim-dur: 200ms;
-  --kind-anim-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --kind-anim-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* The morph's parts each take their curve from their own var, so any one can be dialled
+     alone; anything left as var(--kind-anim-ease) follows the default above. The DURATION
+     is never split — only curves.
+     The two fades are directional rather than mirror images, which is the one deliberate
+     asymmetry here: the outgoing glyph HOLDS its ink and then plunges (ease-in), while the
+     incoming one arrives early and settles (ease-out). So the slot is never half-empty in
+     the middle — one glyph is always carrying the column — instead of both sitting at ~50%
+     and reading as a dissolve. Every fade in the morph uses them, including the prompt
+     transition, which is nothing BUT a fade (its glyph and the panel's bar are the two
+     halves). */
+  --kind-scale-ease: var(--kind-anim-ease);
+  /* bullet <-> checkbox: the diameter */
+  --kind-fade-out-ease: cubic-bezier(0.11, 0, 0.5, 0);
+  --kind-fade-in-ease: cubic-bezier(0.33, 1, 0.68, 1);
 }
 
 * {
@@ -551,27 +564,27 @@ body {
 
    Pure transform+opacity, so WebKit hands both to Core Animation and they composite at
    the display's native rate rather than the webview's 60Hz rAF cap. */
-@keyframes glyphMorphOut {
+/* ONE property per keyframe, so the scale and the fade can be curved SEPARATELY
+   (--kind-scale-ease vs the two --kind-fade-*-ease). Two animations on one
+   element, each owning a property outright — never one keyframe declaring both and a
+   second overriding half of it, which would leave the winner to source order. */
+@keyframes glyphScaleOut {
   from {
     transform: scale(1);
-    opacity: 1;
   }
 
   to {
     transform: scale(0);
-    opacity: 0;
   }
 }
 
-@keyframes glyphMorphIn {
+@keyframes glyphScaleIn {
   from {
     transform: scale(0);
-    opacity: 0;
   }
 
   to {
     transform: scale(1);
-    opacity: 1;
   }
 }
 
@@ -643,30 +656,57 @@ body {
 }
 
 /* Bullet <-> checkbox: concentric, so they genuinely morph — one collapses to a point at
-   its center as the other grows out of that same point. */
+   its center as the other grows out of that same point. The fade rides the same clock but
+   its OWN curve, so each glyph keeps its ink while it travels. */
 .glyph-layer.morph-scale.glyph-leave {
-  animation: glyphMorphOut var(--kind-anim-dur) var(--kind-anim-ease) both;
+  animation:
+    glyphScaleOut var(--kind-anim-dur) var(--kind-scale-ease) both,
+    glyphFadeOut var(--kind-anim-dur) var(--kind-fade-out-ease) both;
 }
 
 .glyph-layer.morph-scale.glyph-enter {
-  animation: glyphMorphIn var(--kind-anim-dur) var(--kind-anim-ease) both;
+  animation:
+    glyphScaleIn var(--kind-anim-dur) var(--kind-scale-ease) both,
+    glyphFadeIn var(--kind-anim-dur) var(--kind-fade-in-ease) both;
+}
+
+/* Checkbox -> bullet ONLY, and deliberately NOT the mirror of bullet -> checkbox: the
+   circle keeps its ink all the way down to a point (so the collapse reads as the ring
+   being drawn INTO the dot rather than dissolving over it) and eases IN rather than out,
+   holding its size before committing. Both curves are literals rather than :root vars
+   because they belong to this ONE direction — the shared vars are what everything else
+   follows.
+   `step-end` is "no fade" spelled as an animation: the opacity holds its from-value for
+   the whole run and drops at the final frame — by which time the layer is at scale 0 and
+   invisible anyway. It has to stay an ANIMATION rather than just be dropped, because
+   `.glyph-layer.glyph-leave` declares `opacity: 0` at rest for the clone case, and with
+   nothing running that declaration would win and the circle would never paint at all.
+   To rejoin the shared set, swap the two literals back to `var(--kind-scale-ease)` and
+   `var(--kind-fade-out-ease)`. */
+.glyph-layer.morph-scale.glyph-leave.from-checkbox {
+  animation:
+    glyphScaleOut var(--kind-anim-dur) cubic-bezier(0.11, 0, 0.5, 0) both,
+    glyphFadeOut var(--kind-anim-dur) step-end both;
+}
+
+/* ...and its incoming bullet grows on the SAME curve as that collapse, so the two
+   diameters stay locked to one clock — the ring shrinking and the dot swelling read as
+   one object turning inside out rather than as two glyphs crossing. Only the fade still
+   follows the shared set. */
+.glyph-layer.morph-scale.glyph-enter.from-checkbox {
+  animation:
+    glyphScaleIn var(--kind-anim-dur) cubic-bezier(0.11, 0, 0.5, 0) both,
+    glyphFadeIn var(--kind-anim-dur) var(--kind-fade-in-ease) both;
 }
 
 /* To/from a prompt: a full-height bar and a dot share only the glyph COLUMN, so they
    cross-fade in place — scaling a bar into a dot reads as a stretch. */
-.glyph-layer.morph-fade.glyph-leave,
-.glyph-layer.morph-fade.glyph-enter {
-  animation-duration: var(--kind-anim-dur);
-  animation-timing-function: var(--kind-anim-ease);
-  animation-fill-mode: both;
-}
-
 .glyph-layer.morph-fade.glyph-leave {
-  animation-name: glyphFadeOut;
+  animation: glyphFadeOut var(--kind-anim-dur) var(--kind-fade-out-ease) both;
 }
 
 .glyph-layer.morph-fade.glyph-enter {
-  animation-name: glyphFadeIn;
+  animation: glyphFadeIn var(--kind-anim-dur) var(--kind-fade-in-ease) both;
 }
 
 /* The other half of the prompt cross-fade: the REAL bar (an overlay on the panel, so it
@@ -674,7 +714,7 @@ body {
    direction can't use this element at all — the panel is already unmounted — and is
    drawn by .glyph-prompt-ghost instead. */
 .prompt-line-bullet.kind-enter {
-  animation: glyphFadeIn var(--kind-anim-dur) var(--kind-anim-ease) both;
+  animation: glyphFadeIn var(--kind-anim-dur) var(--kind-fade-in-ease) both;
 }
 
 /* Stand-in for .prompt-line-bullet on the leaving layer. Width, colour and HEIGHT come
