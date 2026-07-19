@@ -21,7 +21,7 @@ npm install                  # once
 scripts/dev.sh [store.sqlite]  # tauri dev against an ISOLATED store (default /tmp/promptflow-tauri-dev.sqlite)
 scripts/build.sh             # release bundle -> src-tauri/target/release/bundle/macos/PromptFlow.app
 scripts/verify.sh            # launch smoke test of the release build (throwaway store, polls for a window)
-npm test                     # vitest: 5 suites / 36 tests (resolveKey, wrap, bold, projectDrop, rowBands)
+npm test                     # vitest: 5 suites / 37 tests (resolveKey, wrap, bold, projectDrop, rowBands)
 cd src-tauri && cargo test   # 12 tests (store mutations/undo, archive round-trip + collect)
 npx tsc --noEmit             # typecheck (strict; noUnusedLocals/Parameters)
 ```
@@ -107,8 +107,9 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   runs in Rust at launch with no frontend involvement (deferred ~4s so windows load
   first; they then receive its `auto-archive` delta).
 - **One live editor** (`RowEditor.tsx`): unfocused rows are static spans; ONLY the
-  focused row becomes a CONTROLLED contenteditable div (the textarea died with the
-  rich-text upgrade — bold/italic/underline must render while editing). Invariants:
+  focused row becomes a CONTROLLED contenteditable div (the MAIN row's textarea died with
+  the rich-text upgrade — bold/italic/underline must render while editing; the NOTE field
+  is still a plain `<textarea>`). Invariants:
   (1) the editor's children are IMPERATIVE (`buildRunDom`) and the two branches carry
   distinct React keys ("editor"/"static") — without them React appends the static
   span beside the leftover editor spans (shipped bug, fixed); (2) every input is
@@ -141,8 +142,9 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   **A SINGLE-NODE toggle plays the DRAWER**; bulk ⌘⇧E/⌘⇧D pass NO roots (there's no
   single parent to hang a drawer off), so they get only the gated reflow slide plus, on
   expand, the `.node-row.entering` fade — never ghosts (`captureGhosts` returns early on
-  empty roots). `.collapse-ghosts` is now ONLY the single-node COLLAPSE fallback, for
-  when `buildDrawer` returns false.
+  empty roots). `.collapse-ghosts` has TWO owners: the single-node COLLAPSE fallback for
+  when `buildDrawer` returns false, and the enter/leave path below, which clones every
+  leaving row into it.
   The drawer is three raw-DOM layers appended to `.outline-inner` (React never sees
   them), built by `buildDrawer`: `.drawer-clip` (static, pinned at the parent's bottom
   edge B, `overflow:hidden`) ▸ `.drawer-sweep` (`overflow:hidden`, height H,
@@ -163,20 +165,27 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   bail mid-flight; (2) entering rows (expand) are `visibility:hidden` behind the drawer
   (never `display:none` — they must keep layout boxes so the ResizeObserver still
   measures them), or fade in via a keyframe on the bulk path; `isEntering` = a fresh row
-  absent from `prevIds` captured pre-toggle. **`runCollapseAnim` MUST keep its two
-  separate `flushSync`es with a forced `offsetHeight` read between** — a CSS transition
-  only starts if the element's previously RESOLVED style already carried it, so batching
-  the `.rows-animating` class in with the new positions leaves survivors with nothing to
-  animate from and they SNAP (shipped bug, fixed). **The same rule caps the animation at
-  the VIRTUALIZER's window**, so `OutlineView`'s `rangeExtractor` unions the natural range
-  with `glideBand()` — the ~one screenful of rows immediately after the toggled block —
-  for the toggle's duration. `overscan` (14) alone reaches only ~14 rows past the
+  absent from `prevOrder` captured pre-toggle. **`runCollapseAnim` MUST keep its two
+  separate `flushSync`es with a forced `offsetHeight` read between** — a transition needs
+  its FROM value resolved as a SEPARATE style change, on an element already mounted at its
+  old position, so batching the `.rows-animating` class in with the new positions leaves
+  survivors with nothing to animate from and they SNAP (shipped bug, fixed). **NOTE the
+  rule is NOT "a transition only starts if the previously resolved style already carried
+  it"** — this file said that for a while and it is false: a transition takes its property
+  and duration from the AFTER-change style, which is exactly why `startDrawer` can add
+  `.drawer-anim` and the new transform together. Designing on the wrong version produced a
+  Tab glide with literally 0px of travel (see the tab-glide entry). **The real rule also
+  caps the animation at the VIRTUALIZER's window**, so `OutlineView`'s `rangeExtractor`
+  unions the natural range with `mountBand()` — the ~one screenful of rows immediately
+  after the toggled block — for the toggle's duration. `overscan` (14) alone reaches only ~14 rows past the
   viewport, so any taller subtree left the rows that must glide un-rendered at commit 1:
   on collapse they were created fresh in commit 2 wearing only their FINAL transform and
   snapped from a seam downward, and on expand they were UNMOUNTED instead, leaving a blank
   strip under the sweeping edge (one cause, two symptoms; shipped bug, fixed). The band is
   anchored to the block END, so it re-derives itself in whichever index space it's called
-  in and costs nothing when the block is absent; it is bounded by the viewport, NOT by H.
+  in and costs nothing when the block is absent; it is bounded by the viewport, NOT by H —
+  because the anchor's own y is already displaced by H. (The enter/leave paths anchor
+  differently and have to earn that property another way; see their entry.)
   Its `useCallback` identity must change on the anim bump — at commit 1 `count` and the
   range are unchanged, so a stable identity gets memoized away and mounts nothing. Never
   extend the band ABOVE the natural window: virtual-core issues a real `scrollTo` the
@@ -186,10 +195,15 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   an entering row has no old position and is placed with an ESTIMATED height until its
   ResizeObserver reports the real one, so transitioning it animated that correction and
   made a parent's FIRST expand visibly re-space its children (the size cache is empty
-  only that once). `--collapse-anim-dur` in styles.css is the SINGLE source of truth for
-  timing: `animDurationMs()` reads it live so the teardown always tracks it —
-  `COLLAPSE_ANIM_MS` is only a fallback (a hardcoded mirror desynced the moment the CSS
-  was retuned and tore the ghost overlay out mid-fade). **The webview's rAF is capped at 60Hz (WKWebView on
+  only that once). **All timing lives in styles.css `:root`, never in JS**:
+  `--collapse-anim-dur`/`-ease` is the shared clock, with three deliberate exceptions —
+  `--reorder-anim-dur` (⌥↑/↓), `--wedge-anim-dur` (the progress pie) and
+  `--enter-fade-ease` (an entering row's opacity only). `animDurationMs()` reads the LIVE
+  value for whichever is running so the teardown always tracks it; `COLLAPSE_ANIM_MS` is
+  only a fallback (a hardcoded mirror desynced the moment the CSS was retuned and tore the
+  ghost overlay out mid-fade). Each exception documents why it isn't the shared clock —
+  don't "unify" them: the collapse var is routinely dialled past 500ms to eyeball a frame,
+  which would drag every other animation into slow motion with it. **The webview's rAF is capped at 60Hz (WKWebView on
   macOS), but CSS `transform`/`opacity` animations are handed to Core Animation and
   composite at the display's native rate (120Hz on this ProMotion Mac) — so animate with
   CSS transitions, NEVER an rAF loop.** `perfMeter.ts` samples rAF deltas (auto-fires per
@@ -231,7 +245,7 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   opened or closed; over a one-row swap it reads as hesitation at both ends, and linear
   keeps the two rows' speeds matched, which is what makes a swap read as a swap.
   `animDurationMs()` keys off the same flag so the teardown tracks it.
-  `mountBand` (was `glideBand`) anchors on a SURVIVING row here rather
+  `mountBand` anchors on a SURVIVING row here rather
   than skipping a parent's block — and WHICH survivor is load-bearing, because the band's
   reach is measured from the anchor's old y: an ENTER anchors just before the change
   (survivors move down), a LEAVE just past the removed block, so the removed height is
@@ -257,8 +271,8 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
 - **Tab glide** (the bottom of `collapseAnim.ts`; CSS `.node-row.gliding` / `.glide-arm`):
   Tab/⇧Tab slides the moved row into its new indent instead of snapping. Driven from the
   DELTA, not the gesture — `mirror.ts`'s `setStructureCommit` seam hands the animation
-  layer any delta that changed a node's PARENT (a position-only change, ⌥↑/↓, never
-  reaches it) — so ⌘Z and another window's edit glide with ONE implementation, and a
+  layer any delta that changed a node's PARENT (a position-only change — ⌥↑/↓, a
+  same-level drag — reaches the same seam but takes the reorder path, never the glide) — so ⌘Z and another window's edit glide with ONE implementation, and a
   no-op Tab emits no delta and arms nothing. THREE flushSync commits: flags → new depths
   + inverted offset (transition OFF) → release. **`paddingLeft` is never animated** (each
   intermediate value re-wraps text, changes row height, and makes the ResizeObserver
@@ -270,11 +284,12 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   transition takes its property/duration from the AFTER-change style, so applying the
   offset and its transition together starts a `none→offset` transition — the row never
   paints at the old position and the release cancels it at ~0ms, i.e. a snap (verified in
-  WebKit). NOTE this means the rule stated below for the collapse — "a transition only
-  starts if the previously RESOLVED style already carried it" — is NOT the real CSS rule;
+  WebKit). NOTE this means the rule this file USED to state for the collapse — "a
+  transition only starts if the previously RESOLVED style already carried it" — is NOT the
+  real CSS rule (that entry now states the correct one);
   what a transition needs is its FROM value resolved as a separate style change. The
   collapse's two-flushSync split is still required, but for that reason. The vertical
-  half is free: `.rows-animating` is armed at commit 1 and `glideBand` (anchored on the
+  half is free: `.rows-animating` is armed at commit 1 and `mountBand` (anchored on the
   moved node) keeps the rows it travels past mounted.
 - **Progress wedge** (`Glyphs.tsx` `Wedge`; CSS `.glyph-wedge` / `.glyph-tint`): the
   parent pie fills radially, clockwise from 12 o'clock, as children complete. Drawn as a
@@ -315,9 +330,10 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
 - **Keyboard handling is split three ways — check all three before adding a shortcut**:
   (1) `RowEditor.onKeyDown` (focused editing: `resolveKey` routing, ⌘B/⌘1-3/⌘⇧F/⌘⇧N,
   ⌘B/⌘I/⌘U style toggles, ⌘4 → divider (single-node only, then clearFocus — a divider
-  has no editor), ⇧⌘C markdown copy, ⌥arrows, ⌘↑/⌘↓ collapse/expand the focused
+  has no editor), ⇧⌘C markdown copy, ⌥↑/⌥↓ (move node), ⌘↑/⌘↓ collapse/expand the focused
   parent — childless falls through to the native caret jump, wrap-selection, Escape);
-  (2) `App.tsx` window handler (⌘⌥F, ⌘=/−/0 + pinch/ctrl-wheel → `setFont`, ⌘[/],
+  (2) `App.tsx` window handler (⌘⌥F, ⌘=/− → `adjustFont`, ⌘0 → `resetFont`,
+  pinch/ctrl-wheel → `setFont`, ⌘[/],
   ⌘E/⌘D collapse/expand focused, ⌘⇧E/⌘⇧D collapse/expand ALL, ⌘Z/⇧⌘Z fallback,
   ⌘⌃⇧7 seed, ⌘⌃⇧8 idle perf baseline); (3) `handleSelectionKey` capture-phase (block ops
   while a node selection is
@@ -356,7 +372,7 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   eyeballing.
 - **Programmatic focus needs `e.preventDefault()` on mousedown** (static row, glyphs,
   buttons): the mousedown default action steals focus to body AFTER handlers run,
-  blurring the textarea the click just focused.
+  blurring the editor the click just focused.
 - **Chrome scales with ⌘+/⌘− via em units off an inline font-size** — rows set
   `fontSize` on `.node-row` (cluster/menu/prompt internals are em), the TopBar sets
   `16·clamp(scale,1,1.8)` (CAPPED: icons must never outgrow the fixed 44px strip or
