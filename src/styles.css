@@ -1268,6 +1268,8 @@ body {
   font-weight: 600;
   cursor: pointer;
   margin-right: 11px;
+  /* Nudge the flex-centered number 2px left (half the padding on a border-box disc). */
+  padding-right: 4px;
 }
 
 .focus-content {
