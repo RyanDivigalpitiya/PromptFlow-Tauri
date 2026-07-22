@@ -1221,6 +1221,7 @@ body {
 /* ---------- Focus pane ---------- */
 
 .focus-pane {
+  position: relative;
   flex: none;
   max-height: 40%;
   overflow-y: auto;
@@ -1239,8 +1240,8 @@ body {
 .focus-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 3px 0;
+  gap: 0;
+  padding: 5px 0;
 }
 
 .focus-handle {
@@ -1248,20 +1249,25 @@ body {
   cursor: grab;
   flex: none;
   font-size: 0.9em;
+  margin-right: 9px;
 }
 
+/* Semi-transparent accent disc, no border; the number sits in equal margins between the
+   drag handle and the title. `--focus-accent` is the row's live highlight color. */
 .focus-index {
   flex: none;
-  width: 1.5em;
-  height: 1.5em;
+  width: 1.65em;
+  height: 1.65em;
   border-radius: 50%;
-  border: 1.2px solid;
+  background: color-mix(in srgb, var(--focus-accent) 22%, transparent);
+  color: var(--focus-accent);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.72em;
+  font-size: 0.66em;
   font-weight: 600;
   cursor: pointer;
+  margin-right: 11px;
 }
 
 .focus-content {
@@ -1283,6 +1289,11 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* Just the crumb words shrink; the ▸ separators keep their size (0.78em of the row). */
+.crumb {
+  font-size: 0.9em;
+}
+
 .crumb.top {
   color: var(--text);
 }
@@ -1293,6 +1304,20 @@ body {
 
 .crumb-sep {
   color: var(--text-faint);
+}
+
+/* Horizontal drop marker painted at the target row gap during a handle drag. */
+.focus-drop-marker {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  height: 2px;
+  margin-top: -1px;
+  border-radius: 1px;
+  background: var(--focus-accent);
+  opacity: 0.9;
+  pointer-events: none;
+  z-index: 30;
 }
 
 /* ---------- Scrollbar ---------- */

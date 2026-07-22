@@ -106,6 +106,20 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   backend `settings` table holds only `autoArchive` — backend-stored because the sweep
   runs in Rust at launch with no frontend involvement (deferred ~4s so windows load
   first; they then receive its `auto-archive` delta).
+- **Focus pane** (`FocusPane.tsx` + `focusPane.ts`): the ⌘⇧F highlight SET lives on the
+  nodes (shared store, synced by delta); only the numbered `pf.focusOrder` is per-device.
+  Two subscription grains, both load-bearing: (1) each `FocusRow`/`Crumb` subscribes to
+  ITS node via `subscribeNode` (`useNodeRec`) so a title/breadcrumb tracks a live text
+  edit — a highlight flip is structural but a keystroke is NOT, so the pane's own
+  structure subscription alone left mirrored titles stale (shipped bug, fixed); (2)
+  `reconcile()` runs in a `useEffect` keyed on the structure version, NEVER during render
+  — a `set()` during render is dropped when the ONLY re-render is the idle structural
+  delta, so a node ⌘⇧F-pinned in one window never appeared in the others' panes (shipped
+  bug, fixed). Breadcrumb color is position-only: leftmost crumb `--text`, deeper crumbs
+  `--text-faint`, a lone crumb white (never accent). The handle drag paints a
+  `.focus-drop-marker` at the nearest row gap (content-space y = `edge − paneTop +
+  scrollTop`); `move()` operates on `order`, which `reconcile` keeps equal to the rendered
+  members, so the member index and the order index coincide.
 - **One live editor** (`RowEditor.tsx`): unfocused rows are static spans; ONLY the
   focused row becomes a CONTROLLED contenteditable div (the MAIN row's textarea died with
   the rich-text upgrade — bold/italic/underline must render while editing; the NOTE field
