@@ -111,7 +111,10 @@ export function FocusPane() {
     useFocusPane.getState().reconcile();
   }, [structureV]);
 
-  if (!expanded) return null;
+  // Stays MOUNTED across the collapse: `.open` drives the grid-track drawer, so the
+  // close animation can play out instead of the strip vanishing the instant `expanded`
+  // flips (an unmount would snap it shut). Rows keep rendering while collapsed — they are
+  // clipped to height 0, and the close animation needs them on screen.
   const members = order.filter((id) => mirror.get(id)?.isHighlighted);
 
   /** Handle drag: track the pointer, paint a drop marker at the nearest row gap, and
@@ -160,35 +163,39 @@ export function FocusPane() {
   }
 
   return (
-    <div className="focus-pane" style={{ fontSize }}>
-      {members.length === 0 ? (
-        <div className="focus-empty">
-          Highlight nodes with ⌘⇧F to pin them here.
-        </div>
-      ) : (
-        <>
-          {members.map((id, i) => (
-            <FocusRow
-              key={id}
-              id={id}
-              index={i}
-              accent={accent}
-              onHandleDown={onHandleDown}
-            />
-          ))}
-          {markerTop !== null && (
-            <div
-              className="focus-drop-marker"
-              style={
-                {
-                  top: markerTop,
-                  ["--focus-accent" as string]: accent,
-                } as React.CSSProperties
-              }
-            />
+    <div className={"focus-pane-shell" + (expanded ? " open" : "")}>
+      <div className="focus-pane-clip">
+        <div className="focus-pane" style={{ fontSize }}>
+          {members.length === 0 ? (
+            <div className="focus-empty">
+              Highlight nodes with ⌘⇧F to pin them here.
+            </div>
+          ) : (
+            <>
+              {members.map((id, i) => (
+                <FocusRow
+                  key={id}
+                  id={id}
+                  index={i}
+                  accent={accent}
+                  onHandleDown={onHandleDown}
+                />
+              ))}
+              {markerTop !== null && (
+                <div
+                  className="focus-drop-marker"
+                  style={
+                    {
+                      top: markerTop,
+                      ["--focus-accent" as string]: accent,
+                    } as React.CSSProperties
+                  }
+                />
+              )}
+            </>
           )}
-        </>
-      )}
+        </div>
+      </div>
     </div>
   );
 }

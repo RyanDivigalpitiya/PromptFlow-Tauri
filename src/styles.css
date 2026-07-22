@@ -39,6 +39,9 @@
      belongs to the COMPLETION family (glyphPop 0.44s / drawCheck 0.3s) and wants an
      ease-OUT — commit to the new value at once, then settle. The drawer's near-step
      ease-in-out reads as a snap across a 5px radius. */
+
+
+
   --wedge-anim-dur: 320ms;
   --wedge-anim-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
   /* Glyph KIND morph (⌘1/⌘2/⌘3) — the outgoing glyph collapsing while the incoming one
@@ -64,6 +67,14 @@
   /* bullet <-> checkbox: the diameter */
   --kind-fade-out-ease: cubic-bezier(0.11, 0, 0.5, 0);
   --kind-fade-in-ease: cubic-bezier(0.33, 1, 0.68, 1);
+  /* Focus pane drawer (⌘⌥F) — the strip sliding open/closed. Its OWN clock, NOT
+     --collapse-anim-dur: that one belongs to the outline drawer and gets dialled past
+     500ms to eyeball a frame, which would drag this strip into slow motion with it. This
+     is a grid-template-rows 0fr↔1fr auto-height animation, a whole-strip distance opening
+     rather than the outline drawer's clipped subtree, so it takes a plain, smooth
+     ease-in-out instead of that near-step curve. */
+  --focus-pane-anim-dur: 280ms;
+  --focus-pane-anim-ease: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 * {
@@ -247,17 +258,17 @@ body {
       later cancels that transition at ~0ms elapsed. The row then snaps the full indent
       and nothing animates (verified in WebKit). So the offset must land with the
       transition OFF, be resolved, and only then be released. */
-.node-row.gliding > .row-inner,
-.node-row.gliding > .add-child-btn,
-.node-row.gliding > .hidden-completed-hint {
+.node-row.gliding>.row-inner,
+.node-row.gliding>.add-child-btn,
+.node-row.gliding>.hidden-completed-hint {
   transform: translateX(var(--pf-glide-x, 0px));
   transition: transform var(--collapse-anim-dur) var(--collapse-anim-ease);
   will-change: transform;
 }
 
-.node-row.glide-arm > .row-inner,
-.node-row.glide-arm > .add-child-btn,
-.node-row.glide-arm > .hidden-completed-hint {
+.node-row.glide-arm>.row-inner,
+.node-row.glide-arm>.add-child-btn,
+.node-row.glide-arm>.hidden-completed-hint {
   transition: none;
 }
 
@@ -1220,10 +1231,34 @@ body {
 
 /* ---------- Focus pane ---------- */
 
+/* Drawer: ⌘⌥F slides the strip open/closed by animating the grid track 0fr↔1fr, the
+   CSS-only auto-height trick — no JS height measuring, and it interpolates in WebKit.
+   The clip (overflow:hidden, min-height:0) is what the 0fr collapse squeezes; the pane
+   inside keeps its own 40%-capped internal scroll. Height animation is main-thread, but
+   the pane is a handful of rows and the outline below only recomputes its virtual RANGE
+   (rows stay absolutely positioned), so it stays smooth. The shell carries the 40% cap
+   so the pane can fill it (max-height:100%) and scroll when there are many pins. */
+.focus-pane-shell {
+  flex: none;
+  display: grid;
+  grid-template-rows: 0fr;
+  max-height: 40%;
+  transition: grid-template-rows var(--focus-pane-anim-dur)
+    var(--focus-pane-anim-ease);
+}
+
+.focus-pane-shell.open {
+  grid-template-rows: 1fr;
+}
+
+.focus-pane-clip {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .focus-pane {
   position: relative;
-  flex: none;
-  max-height: 40%;
+  max-height: 100%;
   overflow-y: auto;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.025);
@@ -1253,11 +1288,13 @@ body {
 }
 
 /* Semi-transparent accent disc, no border; the number sits in equal margins between the
-   drag handle and the title. `--focus-accent` is the row's live highlight color. */
+   drag handle and the title. `--focus-accent` is the row's live highlight color. The
+   1.84em diameter resolves to an ODD 17px at the base font, so the disc has a true centre
+   pixel for the flex-centred number to land on (an even diameter centres on a seam). */
 .focus-index {
   flex: none;
-  width: 1.65em;
-  height: 1.65em;
+  width: 1.84em;
+  height: 1.84em;
   border-radius: 50%;
   background: color-mix(in srgb, var(--focus-accent) 22%, transparent);
   color: var(--focus-accent);
@@ -1268,8 +1305,6 @@ body {
   font-weight: 600;
   cursor: pointer;
   margin-right: 11px;
-  /* Nudge the flex-centered number 2px left (half the padding on a border-box disc). */
-  padding-right: 4px;
 }
 
 .focus-content {

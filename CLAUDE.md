@@ -119,7 +119,17 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   `--text-faint`, a lone crumb white (never accent). The handle drag paints a
   `.focus-drop-marker` at the nearest row gap (content-space y = `edge − paneTop +
   scrollTop`); `move()` operates on `order`, which `reconcile` keeps equal to the rendered
-  members, so the member index and the order index coincide.
+  members, so the member index and the order index coincide. ⌘⌥F opens/closes it as a
+  DRAWER: `.focus-pane-shell` animates `grid-template-rows: 0fr↔1fr` (the CSS-only
+  auto-height trick — interpolates in WebKit, no JS height measuring), with a `min-height:0;
+  overflow:hidden` clip and the pane's 40% cap + internal scroll moved onto the shell.
+  The pane stays MOUNTED while collapsed (an unmount would snap it shut, and the close
+  animation needs the rows on screen) — `.open` is the only thing that toggles. Its own
+  clock, `--focus-pane-anim-dur`/`-ease` (a plain ease-in-out), NOT the outline drawer's
+  `--collapse-anim-*` (which gets dialled past 500ms to debug). The height animation is
+  main-thread, but the pane is a few rows and the outline below only recomputes its virtual
+  RANGE (rows stay absolutely positioned), so it holds. The numbered disc is `1.84em` = an
+  ODD 17px at base font, so its centre is a pixel, not a seam.
 - **One live editor** (`RowEditor.tsx`): unfocused rows are static spans; ONLY the
   focused row becomes a CONTROLLED contenteditable div (the MAIN row's textarea died with
   the rich-text upgrade — bold/italic/underline must render while editing; the NOTE field
