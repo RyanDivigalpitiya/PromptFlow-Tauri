@@ -258,12 +258,19 @@ export default function App() {
     background: `rgba(10, 10, 14, ${bgTint})`,
   } as React.CSSProperties;
 
+  const focusLayout = useWindowState((s) => s.focusPaneLayout);
+
   if (!ready) return <div className="app-shell" style={shellStyle} />;
   return (
     <div className="app-shell" style={shellStyle}>
       <TopBar />
-      <FocusPane />
-      <OutlineView />
+      {/* The focus pane and the outline share a grid whose areas restack: "top" stacks
+          them (focus strip above outline), "sidebar" puts them side by side (focus left).
+          Both stay MOUNTED across the switch, so it never remounts the outline. */}
+      <div className={"app-body" + (focusLayout === "sidebar" ? " sidebar" : "")}>
+        <FocusPane />
+        <OutlineView />
+      </div>
       <SettingsPanel />
     </div>
   );

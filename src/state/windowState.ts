@@ -16,6 +16,15 @@ export type CaretIntent =
 
 export type FocusField = "main" | "note";
 
+/** Focus pane docking: the current top strip, or a left-anchored resizable sidebar. */
+export type FocusPaneLayout = "top" | "sidebar";
+
+export const FOCUS_SIDEBAR_MIN = 180;
+export const FOCUS_SIDEBAR_MAX = 640;
+export function clampSidebarWidth(w: number): number {
+  return Math.min(FOCUS_SIDEBAR_MAX, Math.max(FOCUS_SIDEBAR_MIN, Math.round(w)));
+}
+
 interface WindowState {
   collapsed: Set<string>;
   hideCompleted: boolean;
@@ -34,6 +43,10 @@ interface WindowState {
   keepVisible: Set<string>;
   /** The focus pane strip (⌘⌥F / the ⭐ button) — per window. */
   focusPaneExpanded: boolean;
+  /** Where the focus pane docks: top strip or left sidebar — per window. */
+  focusPaneLayout: FocusPaneLayout;
+  /** The left-sidebar width in px (resizable, persisted) — per window. */
+  focusSidebarWidth: number;
 
   toggleCollapse(id: string): void;
   setCollapsed(id: string, value: boolean): void;
@@ -60,6 +73,8 @@ interface WindowState {
   holdVisible(id: string): void;
   releaseVisible(ids: readonly string[]): void;
   toggleFocusPane(): void;
+  toggleFocusPaneLayout(): void;
+  setFocusSidebarWidth(w: number): void;
   /** Drop references to deleted nodes (fired from the mirror's delete hook). */
   purgeDeleted(ids: Set<string>): void;
 }
@@ -74,6 +89,8 @@ interface PersistedShape {
   fontSize: number;
   drill: string | null;
   focusPaneExpanded?: boolean;
+  focusPaneLayout?: FocusPaneLayout;
+  focusSidebarWidth?: number;
 }
 
 function loadInitial(): PersistedShape {
@@ -110,6 +127,8 @@ export const useWindowState = create<WindowState>((set, get) => ({
   exemptPruneOnce: null,
   keepVisible: new Set(),
   focusPaneExpanded: initial.focusPaneExpanded ?? false,
+  focusPaneLayout: initial.focusPaneLayout ?? "top",
+  focusSidebarWidth: clampSidebarWidth(initial.focusSidebarWidth ?? 280),
 
   toggleCollapse(id) {
     const next = new Set(get().collapsed);
@@ -220,6 +239,14 @@ export const useWindowState = create<WindowState>((set, get) => ({
   toggleFocusPane() {
     set({ focusPaneExpanded: !get().focusPaneExpanded });
   },
+  toggleFocusPaneLayout() {
+    set({
+      focusPaneLayout: get().focusPaneLayout === "top" ? "sidebar" : "top",
+    });
+  },
+  setFocusSidebarWidth(w) {
+    set({ focusSidebarWidth: clampSidebarWidth(w) });
+  },
 
   purgeDeleted(ids) {
     const s = get();
@@ -256,6 +283,8 @@ useWindowState.subscribe((s) => {
       fontSize: s.fontSize,
       drill: s.drill,
       focusPaneExpanded: s.focusPaneExpanded,
+      focusPaneLayout: s.focusPaneLayout,
+      focusSidebarWidth: s.focusSidebarWidth,
     };
     try {
       const json = JSON.stringify(payload);

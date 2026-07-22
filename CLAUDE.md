@@ -130,6 +130,19 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   main-thread, but the pane is a few rows and the outline below only recomputes its virtual
   RANGE (rows stay absolutely positioned), so it holds. The numbered disc is `1.84em` = an
   ODD 17px at base font, so its centre is a pixel, not a seam.
+  DOCKING (`focusPaneLayout`, the TopBar switcher next to ★): the pane + outline share the
+  `.app-body` GRID, whose `grid-template-areas` restacks — `top` stacks them (strip above
+  outline), `sidebar` puts them side by side (focus left, outline pushed right). Both stay
+  mounted across a switch, so the outline never remounts. In `sidebar` the shell animates
+  WIDTH (a known px from `--focus-sidebar-width`, so a plain `width` transition, NOT the
+  grid-rows trick — that's for auto/content sizing) between 0 and the resizable width; the
+  clipped pane holds that fixed width so it doesn't reflow as the drawer slides. A dock
+  switch changes the shell's size discontinuously, so a `useLayoutEffect` pins `.no-anim`
+  for one frame (before paint) so the reshape doesn't animate as a morph. The right-edge
+  `.focus-resize-handle` (sidebar+open only) drags the width straight onto the shell's
+  var with `.resizing` suppressing the transition for a 1:1 grab, committing to
+  `setFocusSidebarWidth` (clamped [180,640], persisted per window) on release. Layout +
+  width live in `windowState`/`PersistedShape` alongside `focusPaneExpanded`.
 - **One live editor** (`RowEditor.tsx`): unfocused rows are static spans; ONLY the
   focused row becomes a CONTROLLED contenteditable div (the MAIN row's textarea died with
   the rich-text upgrade — bold/italic/underline must render while editing; the NOTE field

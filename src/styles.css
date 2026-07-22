@@ -107,6 +107,26 @@ body {
   background: var(--bg-tint);
 }
 
+/* The focus pane and the outline share a grid that restacks by docking mode. The
+   `minmax(0, …)` tracks and `min-*: 0` let the outline area shrink so its own scroll
+   works (a grid item's default min-content min-size would otherwise refuse to shrink and
+   the outline would overflow the window). */
+.app-body {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas: "focus" "outline";
+}
+
+.app-body.sidebar {
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-areas: "focus outline";
+}
+
 /* ---------- Top bar (overlay title bar: traffic lights float at the left) ----------
    Chrome-less: no fill, no divider — visually continuous with the outline below.
    Height pairs with trafficLightPosition {x:18, y:24} (tauri.conf.json + lib.rs) so
@@ -192,7 +212,9 @@ body {
 /* ---------- Outline scroll host ---------- */
 
 .outline-scroll {
-  flex: 1;
+  grid-area: outline;
+  min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   position: relative;
@@ -1239,7 +1261,8 @@ body {
    (rows stay absolutely positioned), so it stays smooth. The shell carries the 40% cap
    so the pane can fill it (max-height:100%) and scroll when there are many pins. */
 .focus-pane-shell {
-  flex: none;
+  grid-area: focus;
+  position: relative;
   display: grid;
   grid-template-rows: 0fr;
   max-height: 40%;
@@ -1263,6 +1286,69 @@ body {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.025);
   padding: 6px 18px;
+}
+
+/* ---- Sidebar docking ----
+   The shell animates WIDTH (a known px from the resizable var, unlike the top strip's
+   auto content height) — a plain width transition rather than the grid-rows trick. The
+   pane inside keeps a FIXED width so it doesn't reflow as the shell slides open; the
+   shell's overflow:hidden reveals it left-anchored, like a drawer sliding in. */
+.app-body.sidebar .focus-pane-shell {
+  display: block;
+  grid-template-rows: none;
+  max-height: none;
+  height: 100%;
+  width: 0;
+  overflow: hidden;
+  transition: width var(--focus-pane-anim-dur) var(--focus-pane-anim-ease);
+}
+
+.app-body.sidebar .focus-pane-shell.open {
+  width: var(--focus-sidebar-width, 280px);
+}
+
+.app-body.sidebar .focus-pane-clip {
+  height: 100%;
+}
+
+.app-body.sidebar .focus-pane {
+  width: var(--focus-sidebar-width, 280px);
+  height: 100%;
+  max-height: none;
+  border-bottom: none;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Suppress the drawer transition while the pointer is dragging the width (resize must
+   track 1:1) and across a layout SWITCH (the shell's width/height changes discontinuously
+   between docks and must not animate the reshape). */
+.focus-pane-shell.resizing,
+.focus-pane-shell.no-anim {
+  transition: none;
+}
+
+/* Right-edge resize grip — only live in the sidebar layout while open. */
+.focus-resize-handle {
+  display: none;
+}
+
+.app-body.sidebar .focus-pane-shell.open .focus-resize-handle {
+  display: block;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  z-index: 6;
+}
+
+.app-body.sidebar .focus-pane-shell.open .focus-resize-handle:hover {
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in srgb, var(--accent) 45%, transparent)
+  );
 }
 
 .focus-empty {

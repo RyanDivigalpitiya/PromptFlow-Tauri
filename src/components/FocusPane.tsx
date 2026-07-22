@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { revealNode } from "../state/controller";
 import { useFocusPane } from "../state/focusPane";
 import {
@@ -8,7 +15,7 @@ import {
   subscribeStructure,
 } from "../state/mirror";
 import { useSettings } from "../state/settings";
-import { useWindowState } from "../state/windowState";
+import { clampSidebarWidth, useWindowState } from "../state/windowState";
 
 /** The collapsible strip mirroring the highlighted (⌘⇧F) nodes — read-only rows:
  * ⠿ handle · numbered accent disc · bold accent title + ancestor breadcrumb.
@@ -94,12 +101,32 @@ export function FocusPane() {
     mirror.structureVersion(),
   );
   const expanded = useWindowState((s) => s.focusPaneExpanded);
+  const layout = useWindowState((s) => s.focusPaneLayout);
   const fontSize = useWindowState((s) => s.fontSize);
+  const sidebarWidth = useWindowState((s) => s.focusSidebarWidth);
   const order = useFocusPane((s) => s.order);
   const accent = useSettings((s) => s.highlightColor);
 
   // Marker offset (content-space px) while a handle drag is live; null when idle.
   const [markerTop, setMarkerTop] = useState<number | null>(null);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const prevLayoutRef = useRef(layout);
+
+  // A dock switch changes the shell's width/height DISCONTINUOUSLY (top strip auto-height
+  // ⇄ sidebar fixed-width), and either edge would otherwise animate through the drawer
+  // transition and read as a morph. Pin `.no-anim` for one frame — applied in a LAYOUT
+  // effect (before paint), so the new dock's geometry commits with transitions off and
+  // no intermediate frame paints — then re-enable next frame for the real open/close.
+  useLayoutEffect(() => {
+    if (prevLayoutRef.current === layout) return;
+    prevLayoutRef.current = layout;
+    const shell = shellRef.current;
+    if (!shell) return;
+    shell.classList.add("no-anim");
+    void shell.offsetWidth; // force the reshape to settle with transitions suppressed
+    const id = requestAnimationFrame(() => shell.classList.remove("no-anim"));
+    return () => cancelAnimationFrame(id);
+  }, [layout]);
 
   // Membership is derived from the store; order from the device-local list. Reconciling
   // in an EFFECT (not during render) is what makes a ⌘⇧F highlight from ANOTHER window
@@ -162,8 +189,39 @@ export function FocusPane() {
     window.addEventListener("mouseup", onUp);
   }
 
+  /** Sidebar resize: drive the width var directly on the shell (bypassing React so it
+   * tracks the pointer 1:1) with the drawer transition suppressed via `.resizing`, then
+   * commit the final width to per-window state on release, where it persists. */
+  function onResizeDown(e: React.MouseEvent) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const shell = shellRef.current;
+    if (!shell) return;
+    const startX = e.clientX;
+    const startW = useWindowState.getState().focusSidebarWidth;
+    const widthAt = (ev: MouseEvent) => clampSidebarWidth(startW + (ev.clientX - startX));
+    shell.classList.add("resizing");
+    const onMove = (ev: MouseEvent) => {
+      shell.style.setProperty("--focus-sidebar-width", `${widthAt(ev)}px`);
+    };
+    const onUp = (ev: MouseEvent) => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      shell.classList.remove("resizing");
+      useWindowState.getState().setFocusSidebarWidth(widthAt(ev));
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
   return (
-    <div className={"focus-pane-shell" + (expanded ? " open" : "")}>
+    <div
+      ref={shellRef}
+      className={"focus-pane-shell" + (expanded ? " open" : "")}
+      style={
+        { ["--focus-sidebar-width" as string]: `${sidebarWidth}px` } as React.CSSProperties
+      }
+    >
       <div className="focus-pane-clip">
         <div className="focus-pane" style={{ fontSize }}>
           {members.length === 0 ? (
@@ -196,6 +254,9 @@ export function FocusPane() {
           )}
         </div>
       </div>
+      {/* Right-edge resize grip — only interactive in the sidebar layout (CSS hides it in
+          the top strip and while collapsed). */}
+      <div className="focus-resize-handle" onMouseDown={onResizeDown} />
     </div>
   );
 }

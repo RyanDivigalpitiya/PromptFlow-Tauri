@@ -28,6 +28,7 @@ export function TopBar() {
   const canForward = useWindowState((s) => s.forward.length > 0);
   const hideCompleted = useWindowState((s) => s.hideCompleted);
   const focusPane = useWindowState((s) => s.focusPaneExpanded);
+  const focusLayout = useWindowState((s) => s.focusPaneLayout);
   const fontSize = useWindowState((s) => s.fontSize);
   const ts = topbarScale(fontSize);
   const s = useWindowState.getState;
@@ -90,6 +91,58 @@ export function TopBar() {
           title="Focus pane (⌘⌥F)"
         >
           ★
+        </button>
+        <button
+          className="bar-btn"
+          onClick={() => s().toggleFocusPaneLayout()}
+          title={
+            focusLayout === "sidebar"
+              ? "Dock focus pane to top"
+              : "Dock focus pane to left"
+          }
+          aria-label="Switch focus pane layout"
+        >
+          {/* Panel glyph whose filled region shows where the focus pane currently docks —
+              left column (sidebar) or top strip (top). Clicking flips it. */}
+          <svg
+            width={14 * ts}
+            height={14 * ts}
+            viewBox="0 0 14 14"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.1"
+          >
+            <rect x="1.6" y="1.6" width="10.8" height="10.8" rx="2.2" />
+            {focusLayout === "sidebar" ? (
+              <>
+                <rect
+                  x="1.6"
+                  y="1.6"
+                  width="4.1"
+                  height="10.8"
+                  rx="2.2"
+                  fill="currentColor"
+                  fillOpacity="0.4"
+                  stroke="none"
+                />
+                <line x1="5.7" y1="1.6" x2="5.7" y2="12.4" />
+              </>
+            ) : (
+              <>
+                <rect
+                  x="1.6"
+                  y="1.6"
+                  width="10.8"
+                  height="4.1"
+                  rx="2.2"
+                  fill="currentColor"
+                  fillOpacity="0.4"
+                  stroke="none"
+                />
+                <line x1="1.6" y1="5.7" x2="12.4" y2="5.7" />
+              </>
+            )}
+          </svg>
         </button>
         <button
           className={"bar-btn" + (hideCompleted ? " active" : "")}
