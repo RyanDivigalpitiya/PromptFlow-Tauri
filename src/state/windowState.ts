@@ -25,6 +25,17 @@ export function clampSidebarWidth(w: number): number {
   return Math.min(FOCUS_SIDEBAR_MAX, Math.max(FOCUS_SIDEBAR_MIN, Math.round(w)));
 }
 
+/** Top-strip height: "auto" fits content (bottom edge tracks the last pinned row, grows
+ * with new pins), or a dragged fixed px. The upper bound is a FRACTION of the body, kept
+ * in CSS (`max-height`) so a window resize can't strand a persisted px too tall; only the
+ * lower bound is enforced here. */
+export type FocusTopHeight = number | "auto";
+export const FOCUS_TOP_MIN = 60;
+export const FOCUS_TOP_MAX_FRACTION = 0.6;
+export function clampTopHeight(h: FocusTopHeight): FocusTopHeight {
+  return h === "auto" ? "auto" : Math.max(FOCUS_TOP_MIN, Math.round(h));
+}
+
 interface WindowState {
   collapsed: Set<string>;
   hideCompleted: boolean;
@@ -47,6 +58,8 @@ interface WindowState {
   focusPaneLayout: FocusPaneLayout;
   /** The left-sidebar width in px (resizable, persisted) — per window. */
   focusSidebarWidth: number;
+  /** The top-strip height: "auto" (content-fit) or a dragged px — per window. */
+  focusTopHeight: FocusTopHeight;
 
   toggleCollapse(id: string): void;
   setCollapsed(id: string, value: boolean): void;
@@ -75,6 +88,7 @@ interface WindowState {
   toggleFocusPane(): void;
   toggleFocusPaneLayout(): void;
   setFocusSidebarWidth(w: number): void;
+  setFocusTopHeight(h: FocusTopHeight): void;
   /** Drop references to deleted nodes (fired from the mirror's delete hook). */
   purgeDeleted(ids: Set<string>): void;
 }
@@ -91,6 +105,7 @@ interface PersistedShape {
   focusPaneExpanded?: boolean;
   focusPaneLayout?: FocusPaneLayout;
   focusSidebarWidth?: number;
+  focusTopHeight?: FocusTopHeight;
 }
 
 function loadInitial(): PersistedShape {
@@ -129,6 +144,7 @@ export const useWindowState = create<WindowState>((set, get) => ({
   focusPaneExpanded: initial.focusPaneExpanded ?? false,
   focusPaneLayout: initial.focusPaneLayout ?? "top",
   focusSidebarWidth: clampSidebarWidth(initial.focusSidebarWidth ?? 280),
+  focusTopHeight: clampTopHeight(initial.focusTopHeight ?? "auto"),
 
   toggleCollapse(id) {
     const next = new Set(get().collapsed);
@@ -247,6 +263,9 @@ export const useWindowState = create<WindowState>((set, get) => ({
   setFocusSidebarWidth(w) {
     set({ focusSidebarWidth: clampSidebarWidth(w) });
   },
+  setFocusTopHeight(h) {
+    set({ focusTopHeight: clampTopHeight(h) });
+  },
 
   purgeDeleted(ids) {
     const s = get();
@@ -285,6 +304,7 @@ useWindowState.subscribe((s) => {
       focusPaneExpanded: s.focusPaneExpanded,
       focusPaneLayout: s.focusPaneLayout,
       focusSidebarWidth: s.focusSidebarWidth,
+      focusTopHeight: s.focusTopHeight,
     };
     try {
       const json = JSON.stringify(payload);

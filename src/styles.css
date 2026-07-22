@@ -1256,16 +1256,21 @@ body {
 /* Drawer: ⌘⌥F slides the strip open/closed by animating the grid track 0fr↔1fr, the
    CSS-only auto-height trick — no JS height measuring, and it interpolates in WebKit.
    The clip (overflow:hidden, min-height:0) is what the 0fr collapse squeezes; the pane
-   inside keeps its own 40%-capped internal scroll. Height animation is main-thread, but
+   inside keeps its own 60%-capped internal scroll. Height animation is main-thread, but
    the pane is a handful of rows and the outline below only recomputes its virtual RANGE
-   (rows stay absolutely positioned), so it stays smooth. The shell carries the 40% cap
-   so the pane can fill it (max-height:100%) and scroll when there are many pins. */
+   (rows stay absolutely positioned), so it stays smooth. The shell carries the cap so the
+   pane can fill it (max-height:100%) and scroll when there are many pins. This is the
+   "auto" (content-fit) height; drag the bottom edge for a fixed height (.fixed-top).
+   The cap is `60vh`, NOT `60%`: a percentage max-height resolves against the shell's grid
+   AREA, which is the app-body `auto` focus track = the shell's own content height — so
+   `60%` computed 0.6×content and capped the pane BELOW its content (the "very small" bug).
+   `vh` resolves against the definite viewport instead. */
 .focus-pane-shell {
   grid-area: focus;
   position: relative;
   display: grid;
   grid-template-rows: 0fr;
-  max-height: 40%;
+  max-height: 60vh;
   transition: grid-template-rows var(--focus-pane-anim-dur)
     var(--focus-pane-anim-ease);
 }
@@ -1286,6 +1291,33 @@ body {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.025);
   padding: 6px 18px;
+}
+
+/* ---- Fixed top height ----
+   When the bottom edge has been dragged to a fixed height, the top strip drops the
+   content-fit grid trick and animates HEIGHT instead (a known px, like the sidebar's
+   width). The pane fills the shell and scrolls internally; content shorter than the
+   dragged height simply leaves space below the last row. The base 60vh cap still applies
+   (inherited), so a persisted height can't strand the pane too tall after a window resize. */
+.focus-pane-shell.fixed-top {
+  display: block;
+  grid-template-rows: none;
+  height: 0;
+  overflow: hidden;
+  transition: height var(--focus-pane-anim-dur) var(--focus-pane-anim-ease);
+}
+
+.focus-pane-shell.fixed-top.open {
+  height: var(--focus-top-height, 200px);
+}
+
+.focus-pane-shell.fixed-top .focus-pane-clip {
+  height: 100%;
+}
+
+.focus-pane-shell.fixed-top .focus-pane {
+  height: 100%;
+  max-height: none;
 }
 
 /* ---- Sidebar docking ----
@@ -1319,28 +1351,31 @@ body {
   border-right: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-/* Suppress the drawer transition while the pointer is dragging the width (resize must
-   track 1:1) and across a layout SWITCH (the shell's width/height changes discontinuously
-   between docks and must not animate the reshape). */
+/* Suppress the drawer transition while the pointer is dragging (resize must track 1:1)
+   and across a layout SWITCH (the shell's width/height changes discontinuously between
+   docks and must not animate the reshape). `!important` because the sidebar layout rule
+   (`.app-body.sidebar .focus-pane-shell`) outweighs a bare 2-class selector, so a plain
+   `transition:none` here would lose to it and the width would lag the pointer. */
 .focus-pane-shell.resizing,
 .focus-pane-shell.no-anim {
-  transition: none;
+  transition: none !important;
 }
 
-/* Right-edge resize grip — only live in the sidebar layout while open. */
+/* Resize grip — a thin strip on whichever edge the current dock exposes, live only while
+   the pane is open. Sidebar: right edge (width). Top: bottom edge (height). */
 .focus-resize-handle {
   display: none;
+  position: absolute;
+  z-index: 6;
 }
 
 .app-body.sidebar .focus-pane-shell.open .focus-resize-handle {
   display: block;
-  position: absolute;
   top: 0;
   right: 0;
   bottom: 0;
   width: 7px;
   cursor: col-resize;
-  z-index: 6;
 }
 
 .app-body.sidebar .focus-pane-shell.open .focus-resize-handle:hover {
@@ -1349,6 +1384,28 @@ body {
     transparent,
     color-mix(in srgb, var(--accent) 45%, transparent)
   );
+}
+
+.app-body:not(.sidebar) .focus-pane-shell.open .focus-resize-handle {
+  display: block;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 7px;
+  cursor: row-resize;
+}
+
+.app-body:not(.sidebar) .focus-pane-shell.open .focus-resize-handle:hover {
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--accent) 45%, transparent)
+  );
+}
+
+/* While the drag is snapping to the last row, light the whole grip so the snap reads. */
+.focus-pane-shell.snapping .focus-resize-handle {
+  background: color-mix(in srgb, var(--accent) 55%, transparent) !important;
 }
 
 .focus-empty {

@@ -141,8 +141,20 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   for one frame (before paint) so the reshape doesn't animate as a morph. The right-edge
   `.focus-resize-handle` (sidebar+open only) drags the width straight onto the shell's
   var with `.resizing` suppressing the transition for a 1:1 grab, committing to
-  `setFocusSidebarWidth` (clamped [180,640], persisted per window) on release. Layout +
-  width live in `windowState`/`PersistedShape` alongside `focusPaneExpanded`.
+  `setFocusSidebarWidth` (clamped [180,640], persisted per window) on release. The `.resizing`
+  transition-off uses `!important` — the sidebar layout rule outweighs a bare 2-class
+  selector, so a plain `transition:none` lost to it and the width lagged the pointer.
+  In `top`, the SAME grip sits on the BOTTOM edge and drags the strip HEIGHT
+  (`focusTopHeight`): "auto" is content-fit via the grid trick (bottom edge tracks the last
+  pinned row, grows with pins); dragging within ~12px of that last-row bottom SNAPS back to
+  "auto" (`.snapping` lights the grip), otherwise it commits a fixed px (`.fixed-top`, a
+  height drawer like the sidebar's width). Layout, width, and height live in
+  `windowState`/`PersistedShape` alongside `focusPaneExpanded`.
+  The top cap is `max-height: 60vh`, NOT `60%` (shipped bug, fixed): a `%` max-height
+  resolves against the shell's grid AREA — the `.app-body` `auto` focus track, i.e. the
+  shell's own content — so `60%` computed 0.6×content and capped the pane BELOW its content
+  (auto looked "very small", fixed rendered at 0.6×its px). `vh` resolves against the
+  definite viewport. The JS drag clamps to `FOCUS_TOP_MAX_FRACTION`×app-body height.
 - **One live editor** (`RowEditor.tsx`): unfocused rows are static spans; ONLY the
   focused row becomes a CONTROLLED contenteditable div (the MAIN row's textarea died with
   the rich-text upgrade — bold/italic/underline must render while editing; the NOTE field

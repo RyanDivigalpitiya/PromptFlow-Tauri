@@ -15,7 +15,12 @@ import {
   subscribeStructure,
 } from "../state/mirror";
 import { useSettings } from "../state/settings";
-import { clampSidebarWidth, useWindowState } from "../state/windowState";
+import {
+  clampSidebarWidth,
+  FOCUS_TOP_MAX_FRACTION,
+  FOCUS_TOP_MIN,
+  useWindowState,
+} from "../state/windowState";
 
 /** The collapsible strip mirroring the highlighted (⌘⇧F) nodes — read-only rows:
  * ⠿ handle · numbered accent disc · bold accent title + ancestor breadcrumb.
@@ -104,6 +109,7 @@ export function FocusPane() {
   const layout = useWindowState((s) => s.focusPaneLayout);
   const fontSize = useWindowState((s) => s.fontSize);
   const sidebarWidth = useWindowState((s) => s.focusSidebarWidth);
+  const topHeight = useWindowState((s) => s.focusTopHeight);
   const order = useFocusPane((s) => s.order);
   const accent = useSettings((s) => s.highlightColor);
 
@@ -189,10 +195,14 @@ export function FocusPane() {
     window.addEventListener("mouseup", onUp);
   }
 
+  // The grip resizes whichever edge the current dock exposes.
+  const onResizeDown =
+    layout === "sidebar" ? onSidebarResize : onTopResize;
+
   /** Sidebar resize: drive the width var directly on the shell (bypassing React so it
    * tracks the pointer 1:1) with the drawer transition suppressed via `.resizing`, then
    * commit the final width to per-window state on release, where it persists. */
-  function onResizeDown(e: React.MouseEvent) {
+  function onSidebarResize(e: React.MouseEvent) {
     if (e.button !== 0) return;
     e.preventDefault();
     const shell = shellRef.current;
@@ -214,13 +224,88 @@ export function FocusPane() {
     window.addEventListener("mouseup", onUp);
   }
 
+  /** Top-strip resize: drag the bottom edge to a fixed height, driven directly on the
+   * shell (which is put into `.fixed-top` rendering for the drag). Dragging the edge
+   * within SNAP_PX of the last row's bottom snaps to "auto" — content-fit that keeps the
+   * bottom edge on the last pinned row as pins are added. Commits per-window on release. */
+  function onTopResize(e: React.MouseEvent) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const shell = shellRef.current;
+    if (!shell) return;
+    const pane = shell.querySelector<HTMLElement>(".focus-pane");
+    const body = shell.closest<HTMLElement>(".app-body");
+    const startY = e.clientY;
+    const startH = shell.getBoundingClientRect().height;
+    const maxH = Math.round(
+      (body?.getBoundingClientRect().height ?? window.innerHeight) *
+        FOCUS_TOP_MAX_FRACTION,
+    );
+    const SNAP_PX = 12;
+    const PANE_PAD_BOTTOM = 6; // .focus-pane bottom padding
+    // Natural content height (independent of the pane's current height, which fill:100%
+    // would otherwise inflate scrollHeight to): last row's bottom + the pane's bottom pad.
+    const contentHeight = (): number => {
+      if (!pane) return startH;
+      const rows = pane.querySelectorAll(".focus-row, .focus-empty");
+      if (rows.length === 0) return FOCUS_TOP_MIN;
+      const last = rows[rows.length - 1] as HTMLElement;
+      const paneTop = pane.getBoundingClientRect().top;
+      return (
+        last.getBoundingClientRect().bottom - paneTop + pane.scrollTop + PANE_PAD_BOTTOM
+      );
+    };
+    let snapped = false;
+    const heightAt = (ev: MouseEvent): number => {
+      let h = Math.max(FOCUS_TOP_MIN, Math.min(maxH, startH + (ev.clientY - startY)));
+      const c = contentHeight();
+      snapped = Math.abs(h - c) <= SNAP_PX;
+      if (snapped) h = c;
+      return h;
+    };
+    // Enter fixed rendering at the current height so nothing jumps as the drag begins.
+    shell.classList.add("fixed-top", "resizing");
+    shell.style.setProperty("--focus-top-height", `${startH}px`);
+    const onMove = (ev: MouseEvent) => {
+      shell.style.setProperty("--focus-top-height", `${heightAt(ev)}px`);
+      shell.classList.toggle("snapping", snapped);
+    };
+    const onUp = (ev: MouseEvent) => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      const h = heightAt(ev);
+      shell.classList.remove("resizing", "snapping");
+      if (snapped) {
+        shell.classList.remove("fixed-top");
+        shell.style.removeProperty("--focus-top-height");
+        useWindowState.getState().setFocusTopHeight("auto");
+      } else {
+        useWindowState.getState().setFocusTopHeight(h);
+      }
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  // "fixed-top" switches the top strip from content-fit (grid drawer) to a fixed dragged
+  // height (a plain height drawer); "auto" keeps the content-fit grid trick.
+  const fixedTop = layout === "top" && typeof topHeight === "number";
+  const shellStyle: React.CSSProperties = {
+    ["--focus-sidebar-width" as string]: `${sidebarWidth}px`,
+    ...(fixedTop
+      ? { ["--focus-top-height" as string]: `${topHeight as number}px` }
+      : {}),
+  };
+
   return (
     <div
       ref={shellRef}
-      className={"focus-pane-shell" + (expanded ? " open" : "")}
-      style={
-        { ["--focus-sidebar-width" as string]: `${sidebarWidth}px` } as React.CSSProperties
+      className={
+        "focus-pane-shell" +
+        (expanded ? " open" : "") +
+        (fixedTop ? " fixed-top" : "")
       }
+      style={shellStyle}
     >
       <div className="focus-pane-clip">
         <div className="focus-pane" style={{ fontSize }}>
