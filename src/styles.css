@@ -1021,12 +1021,15 @@ body {
    line: zoom + ⋯ flush with the panel's top edge, the "+" flush with its bottom. It
    stretches to the panel because the panel is the tallest item on the flex line — the
    wrap's `align-items: flex-start` is overridden for this one item. Nothing else in the
-   row can grow the line, so the stretch always resolves to the panel's own height. */
+   row can grow the line, so the stretch always resolves to the panel's own height.
+   `align-items: flex-start` is the LEADING edge of a column, i.e. the side against the
+   panel: the top group is the widest and sets the column's width either way, so this
+   only moves the lone "+", which hugs the panel instead of hanging off under the ⋯. */
 .prompt-wrap>.trailing-cluster {
   margin-top: 0;
   align-self: stretch;
   flex-direction: column;
-  align-items: flex-end;
+  align-items: flex-start;
   justify-content: space-between;
 }
 

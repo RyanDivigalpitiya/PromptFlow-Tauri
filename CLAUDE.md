@@ -537,8 +537,11 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   cluster runs DOWN the panel's trailing edge, chevron + zoom + ⋯ flush with its top edge
   and the "+" flush with its bottom (`align-self: stretch` + `justify-content:
   space-between`; the stretch resolves to the panel's height because nothing else on that
-  flex line can grow it). `.cluster-line` is 1.2em, NOT the 1.35em row line box — two of
-  those overhang the panel's 2.5em min-height.
+  flex line can grow it). `align-items: flex-start` — the LEADING edge of a column, i.e.
+  the side against the panel: the top group is the widest and sets the column width
+  either way, so it only moves the lone "+", which hugs the panel rather than hanging off
+  under the ⋯. `.cluster-line` is 1.2em, NOT the 1.35em row line box — two of those
+  overhang the panel's 2.5em min-height.
   (3) a DIVIDER's actions sit BETWEEN the handle and the rule, inside a clip that is
   0-wide at rest, so an unhovered divider is only its line, still reaching the row's
   leading edge. `.line-actions` animates `grid-template-columns: 0fr ↔ 1fr` — the

@@ -231,6 +231,7 @@ const prompt = await promptRow.evaluate((el) => {
     return {
       top: +r.top.toFixed(1),
       bottom: +r.bottom.toFixed(1),
+      left: +r.left.toFixed(1),
       buttons: [...g.querySelectorAll("button")].map((b) => b.getAttribute("aria-label")),
     };
   });
@@ -316,6 +317,7 @@ const checks = [
   ["prompt: top group is zoom + ⋯", JSON.stringify(prompt.groups[0].buttons) === '["Zoom in","Node menu"]'],
   ["prompt: bottom group is the +", JSON.stringify(prompt.groups[1].buttons) === '["Add node"]'],
   ["prompt: + is flush with the panel's bottom edge", eq(prompt.groups[1].bottom, prompt.panel.bottom, 1)],
+  ["prompt: + is LEFT-justified against the panel, not under the ⋯", eq(prompt.groups[1].left, prompt.groups[0].left)],
   ["bullet: one horizontal run, + then zoom then ⋯", JSON.stringify(bullet.btns.map((b) => b.label)) === '["Add node","Zoom in","Node menu"]'],
   ["bullet: the run is one line (all buttons share a top)", new Set(bullet.btns.map((b) => b.top)).size === 1],
   ["bullet: the run hugs the end of the text", bullet.btns[0].top >= 0 && bullet.groups === 0],
