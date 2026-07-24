@@ -52,22 +52,18 @@ npm run dev & node scripts/qa.mjs [outDir]   # headless visual QA in WebKit (see
   can't be driven with these scripts. **GOTCHA: synthetic modifier events can LATCH the HID shift
   state** (every later click acts shift-modified, keystrokes misroute) — if interactions
   go weird, run `scripts/clearmods.swift` and re-check `CGEventSource.flagsState`.
-  A CGEvent hover/click also only lands if the dev window is FRONTMOST (AppKit routes
-  mouse-moved to the key window), so it steals the user's focus — prefer the harness
-  below for anything CSS-shaped.
-- **Headless visual QA** (`scripts/qa.mjs`, Playwright WebKit — the same engine as the
-  app's WKWebView): loads the Vite dev server and boots `src/main.tsx` with a STUBBED
-  `window.__TAURI_INTERNALS__` (invoke answers `snapshot` from a fixture tree; mutations
-  return an empty `MutationOut` and are recorded, never applied), so every component,
-  stylesheet and layout constant under test is the shipping one. It asserts GEOMETRY
-  (element rects, computed styles, an rAF sweep of a transition's real per-frame values)
-  and writes PNGs, and it reaches `:hover`/`:focus` and real key events without touching
-  the user's session. Playwright is resolved from the npx cache, NOT a project dependency
-  (`npx playwright install webkit` once). It does NOT cover: anything Rust-side (native
-  menus, the store, deltas), WebKit-in-Cocoa behaviour (macOS text substitution — see the
-  RowEditor entry; `isControlledByAutomation()` disables it), or the compositor's true
-  rate. Everything else it settles in seconds — extend the fixture and the checks rather
-  than driving the real window.
+  A CGEvent hover/click also only lands while the dev window is FRONTMOST (AppKit routes
+  mouse-moved to the key window) — so it steals the user's focus, and a hover that
+  silently no-ops reads as a broken feature. Prefer the harness below.
+- **Headless visual QA** (`scripts/qa.mjs`, Playwright WebKit = the WKWebView's engine):
+  boots the Vite dev server with a STUBBED `window.__TAURI_INTERNALS__` (invoke answers
+  `snapshot` from a fixture tree; mutations are recorded, never applied), so the
+  components, stylesheet and layout constants under test are the shipping ones. Asserts
+  geometry + per-frame transition values, writes PNGs, reaches `:hover`/`:focus` and real
+  keys, touches no window. Playwright resolves from the npx cache, NOT a project
+  dependency (`npx playwright install webkit` once). Does NOT cover anything Rust-side
+  (menus, store, deltas) or WebKit-in-Cocoa (macOS text substitution — see the RowEditor
+  entry; `isControlledByAutomation()` disables it).
 
 ## Architecture (store → delta → mirror; keep this shape)
 
@@ -292,8 +288,6 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   `--collapse-anim-dur`/`-ease` is the shared clock, with four deliberate exceptions —
   `--reorder-anim-dur` (⌥↑/↓), `--wedge-anim-dur` (the progress pie), `--kind-anim-dur`
   (the glyph kind morph) and `--enter-fade-ease` (an entering row's opacity only).
-  (`--divider-actions-dur` is in `:root` too but outside this system entirely: a
-  pointer-driven hover reveal, pure CSS, no JS teardown to time.)
   `animDurationMs()` reads the LIVE
   value for whichever is running so the teardown always tracks it; `COLLAPSE_ANIM_MS` is
   only a fallback (a hardcoded mirror desynced the moment the CSS was retuned and tore the
@@ -524,38 +518,27 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   completing the LAST sibling via ⌘Enter spawns a fresh sibling (never for the drill
   root); an abandoned empty node is pruned on defocus (`exemptPruneOnce` protects
   Enter-at-line-start splits); dividers (`line`) never drill, never parent, never
-  propagate their kind, ⌘1/2/3 never convert them, and the caret STEPS OVER one:
-  `neighborNode` (controller.ts) skips `line` rows, so ↑/↓ — and every other caller that
-  hands focus to a neighbour (backspace-on-empty, ⌘Enter's move-to-next) — lands on the
-  next node with an editor. A divider has none, so focusing one dropped the caret out of
-  the outline entirely and the next arrow press had nothing to move from (shipped bug,
-  fixed; `scripts/qa.mjs` pins it).
+  propagate their kind, ⌘1/2/3 never convert them, and the caret STEPS OVER one —
+  `neighborNode` (controller.ts) skips `line` rows, since a divider renders no editor and
+  focusing one dropped the caret out of the outline entirely (shipped bug, fixed; it
+  covers ↑/↓, backspace-on-empty and ⌘Enter's move-to-next alike).
 - **Trailing cluster placement is per KIND** (`TrailingCluster`'s `layout` prop picks the
-  arrangement; WHICH buttons exist stays per-kind):
-  (1) `inline` — one run after the text (bullets, checkboxes).
-  (2) `prompt` — the panel is many lines tall, so one centred run had nothing to hug: the
-  cluster runs DOWN the panel's trailing edge, chevron + zoom + ⋯ flush with its top edge
-  and the "+" flush with its bottom (`align-self: stretch` + `justify-content:
-  space-between`; the stretch resolves to the panel's height because nothing else on that
-  flex line can grow it). `align-items: flex-start` — the LEADING edge of a column, i.e.
-  the side against the panel: the top group is the widest and sets the column width
-  either way, so it only moves the lone "+", which hugs the panel rather than hanging off
-  under the ⋯. `.cluster-line` is 1.2em, NOT the 1.35em row line box — two of those
-  overhang the panel's 2.5em min-height.
-  (3) a DIVIDER's actions sit BETWEEN the handle and the rule, inside a clip that is
-  0-wide at rest, so an unhovered divider is only its line, still reaching the row's
-  leading edge. `.line-actions` animates `grid-template-columns: 0fr ↔ 1fr` — the
-  horizontal twin of the focus pane's auto-height trick, verified to interpolate in
-  WebKit — so the natural width is never measured in JS, and because the rule is `flex: 1`
-  it gives up exactly the width the clip takes: the line shrinks from its LEFT end as the
-  buttons fade in. `overflow: hidden` + `min-width: 0` on the clipped child is
-  load-bearing twice (it zeroes the grid item's automatic minimum size, without which the
-  track can never reach 0, and it clips HIT-TESTING so a collapsed button can't be
-  clicked). The gap to the rule hangs on the INNER `.row-actions`, never on the clip:
-  everything is `box-sizing: border-box`, so padding on the clip is a floor its width can
-  never go below — measured as a 7px stub of inset holding the rule off the leading edge
-  at rest. Its own clock (`--divider-actions-dur`), shared by the opacity fade so both
-  halves of one reveal move together.
+  arrangement; WHICH buttons exist stays per-kind). `inline` = one run after the text.
+  `prompt` = a column down the panel's trailing edge (`align-self: stretch` +
+  `justify-content: space-between`), chevron + zoom + ⋯ at its top edge, "+" at its
+  bottom, `align-items: flex-start` so the lone "+" hugs the panel instead of hanging
+  under the ⋯; `.cluster-line` is 1.2em, NOT the 1.35em row line box — two of those
+  overhang the panel's 2.5em min-height. A DIVIDER's actions sit BETWEEN the handle and
+  the rule in a clip that is 0-wide at rest, so an unhovered divider is only its line,
+  still reaching the row's leading edge; `.line-actions` animates `grid-template-columns:
+  0fr ↔ 1fr` (the horizontal twin of the focus pane's auto-height trick — WebKit
+  interpolates it), and the `flex: 1` rule gives up exactly that width, so the line
+  shrinks from its LEFT end. Two traps: `overflow: hidden` + `min-width: 0` on the clipped
+  child is load-bearing TWICE (it zeroes the grid item's automatic minimum size, without
+  which the track never reaches 0, and it clips HIT-TESTING so a collapsed button can't be
+  clicked); and the gap to the rule must hang on the INNER `.row-actions`, never on the
+  clip — everything is `box-sizing: border-box`, so padding there is a floor the width
+  can't go below, measured as a 7px stub of inset at rest.
 - **Style runs (bold/italic/underline)**: three flat `[location, length, …]` arrays
   (UTF-16 code units) on every node; the editor adjusts each through every text change
   via `adjustRangesForEdit` (SINGLE-splice diff — a wrap/unwrap is TWO splices, so it
