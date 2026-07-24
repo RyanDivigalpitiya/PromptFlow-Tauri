@@ -75,6 +75,15 @@
      ease-in-out instead of that near-step curve. */
   --focus-pane-anim-dur: 280ms;
   --focus-pane-anim-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  /* A divider's actions opening between the handle and the rule. Its own clock, and
+     deliberately NOT --collapse-anim-dur: this is a pointer-driven reveal that has to
+     feel instant under the cursor, and that var gets dialled past 500ms to eyeball the
+     outline drawer. It belongs to the .row-actions hover fade (0.12s) — just long
+     enough that a WIDTH, which that fade never had, reads as sliding open instead of
+     jumping, and shared BY that fade on a divider so the two halves of one reveal
+     move together. */
+  --divider-actions-dur: 170ms;
+  --divider-actions-ease: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 * {
@@ -946,6 +955,54 @@ body {
   opacity: 1;
 }
 
+/* The divider's actions sit BETWEEN the handle and the rule, in a clip that is
+   WIDTHLESS at rest — so an unhovered divider is only its line, still reaching the
+   row's leading edge. `grid-template-columns: 0fr ↔ 1fr` is the horizontal twin of the
+   focus pane's auto-height trick (WebKit interpolates the fr), so the cluster's natural
+   width is never measured in JS; and because the rule is `flex: 1` it gives up exactly
+   the width the clip takes, i.e. the line shrinks from its LEFT end while the buttons
+   fade in over the same clock. `overflow: hidden` + `min-width: 0` on the clipped child
+   is load-bearing twice: it zeroes the grid item's automatic minimum size (without it
+   the track can never reach 0), and it clips HIT-TESTING, so a collapsed button can't
+   be clicked. */
+.line-actions {
+  flex: none;
+  display: grid;
+  grid-template-columns: 0fr;
+  transition: grid-template-columns var(--divider-actions-dur)
+    var(--divider-actions-ease);
+}
+
+.line-content:hover .line-actions {
+  grid-template-columns: 1fr;
+}
+
+.line-actions>.trailing-cluster {
+  min-width: 0;
+  overflow: hidden;
+  /* The leading gap is `.content`'s own margin, so the cluster starts exactly where the
+     rule used to. */
+  margin-left: 0;
+}
+
+/* Nothing inside the clip may shrink — it is meant to be cut off, not squeezed. */
+.line-actions .row-actions,
+.line-actions .row-action {
+  flex: none;
+}
+
+/* The gap to the rule hangs on the INNER element, never on the clip itself: everything
+   here is `box-sizing: border-box`, so padding on the clip is a floor its width can
+   never go below — measured in WebKit as a 7px stub of inset holding the rule off the
+   row's leading edge at rest. Inside, it is just more content to clip away. */
+.line-actions .row-actions {
+  padding-right: 0.45em;
+}
+
+.line-content .row-actions {
+  transition: opacity var(--divider-actions-dur) var(--divider-actions-ease);
+}
+
 .node-divider {
   flex: 1;
   border: none;
@@ -960,10 +1017,25 @@ body {
   align-items: flex-start;
 }
 
+/* A prompt's cluster runs DOWN the panel's trailing edge instead of hugging one text
+   line: zoom + ⋯ flush with the panel's top edge, the "+" flush with its bottom. It
+   stretches to the panel because the panel is the tallest item on the flex line — the
+   wrap's `align-items: flex-start` is overridden for this one item. Nothing else in the
+   row can grow the line, so the stretch always resolves to the panel's own height. */
 .prompt-wrap>.trailing-cluster {
-  /* Drop by the panel's top border + padding so the cluster's line box coincides
-     with the first text line's — its buttons center on that first line. */
-  margin-top: calc(0.5em + 1px);
+  margin-top: 0;
+  align-self: stretch;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: space-between;
+}
+
+.prompt-cluster .cluster-line {
+  display: inline-flex;
+  align-items: center;
+  /* Both groups have to fit inside the panel's 2.5em min-height without overhanging its
+     bottom edge, which two 1.35em row line boxes would not. */
+  height: 1.2em;
 }
 
 .prompt-panel {

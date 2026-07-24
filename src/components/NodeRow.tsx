@@ -19,7 +19,13 @@ import { NoteEditor, RowEditor } from "./RowEditor";
  * solved at the platform level). Everything scales with the row font (⌘+/⌘−):
  * slots via disclosureWidth, glyphs via a scaled SVG size / em font sizes.
  * A LEAF renders no chevron slot at all (SwiftUI parity) so the hover actions
- * hug the last character without a phantom gap. */
+ * hug the last character without a phantom gap.
+ *
+ * `layout` picks the arrangement, never WHICH buttons exist (that stays per-kind):
+ *   • "inline" — one horizontal run after the text (bullets, checkboxes, dividers).
+ *   • "prompt" — split down the panel's trailing edge, chevron + zoom + ⋯ flush with
+ *     its TOP edge and the "+" flush with its BOTTOM (the panel is many lines tall,
+ *     so one centred run had nothing to hug). */
 function TrailingCluster(p: {
   nodeId: string;
   hasChildren: boolean;
@@ -27,6 +33,7 @@ function TrailingCluster(p: {
   isLine: boolean;
   isDrillRoot: boolean;
   fontSize: number;
+  layout?: "inline" | "prompt";
 }) {
   const slot = OutlineLayout.disclosureWidth(p.fontSize);
   const icon = Math.round(10 * OutlineLayout.scale(p.fontSize));
@@ -36,84 +43,116 @@ function TrailingCluster(p: {
 
   // No preventDefault on these buttons' mousedown: pressing ANY row control is
   // meant to defocus a node being edited (the natural focus steal does it).
+  const chevron = p.hasChildren ? (
+    <button
+      className={
+        "chevron" +
+        (collapsedDisplay ? " collapsed" : "") +
+        (p.isDrillRoot ? " locked" : "")
+      }
+      style={{ width: slot }}
+      tabIndex={-1}
+      onClick={p.isDrillRoot ? undefined : () => toggleCollapse(p.nodeId)}
+      aria-label={
+        p.isDrillRoot
+          ? "Expanded (zoomed in)"
+          : collapsedDisplay
+            ? "Expand"
+            : "Collapse"
+      }
+    >
+      <svg width={icon} height={icon} viewBox="0 0 10 10">
+        <path d="M2 3.5 L5 6.5 L8 3.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </button>
+  ) : null;
+
+  const addBtn = (
+    <button
+      className="row-action"
+      style={{ width: slot }}
+      tabIndex={-1}
+      onClick={() => void addRelative(p.nodeId)}
+      aria-label="Add node"
+    >
+      +
+    </button>
+  );
+
+  const zoomBtn = p.isLine ? null : (
+    <button
+      className="row-action"
+      style={{ width: slot }}
+      tabIndex={-1}
+      onClick={() => drillInto(p.nodeId)}
+      aria-label="Zoom in"
+    >
+      {/* Reproduction of the SF Symbol `text.line.2.summary` (SF Symbols can't
+          be referenced by name in a WebKit view — all icons here are inline
+          SVG): two text lines feeding an L-shaped flow arrow. */}
+      <svg
+        width={Math.round(12 * OutlineLayout.scale(p.fontSize))}
+        height={Math.round(11 * OutlineLayout.scale(p.fontSize))}
+        viewBox="0 0 22 20"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <line x1="10" y1="5" x2="20" y2="5" />
+        <line x1="10" y1="9.5" x2="16" y2="9.5" />
+        <path d="M5 4 V11 a4 4 0 0 0 4 4 H15" />
+        <path d="M15 11.8 L20.5 15 L15 18.2 Z" fill="currentColor" strokeWidth={1} />
+      </svg>
+    </button>
+  );
+
+  const menuBtn = (
+    <button
+      className="row-action"
+      style={{ width: slot }}
+      tabIndex={-1}
+      onClick={(e) => {
+        // Open the NATIVE macOS row menu at the button, dropping down from its
+        // bottom-left. Rust builds the items per node kind and routes the
+        // selection back as a `row-menu-action` event (see controller).
+        const r = e.currentTarget.getBoundingClientRect();
+        void api.popupRowMenu(p.nodeId, r.left, r.bottom);
+      }}
+      aria-label="Node menu"
+    >
+      ⋯
+    </button>
+  );
+
+  // No inline height on the prompt form: the column STRETCHES to the panel (CSS
+  // align-self), which is the whole point — each group's own height is the fixed
+  // one CSS gives `.cluster-line`.
+  if (p.layout === "prompt") {
+    return (
+      <span className="trailing-cluster prompt-cluster">
+        <span className="cluster-line">
+          {chevron}
+          <span className="row-actions">
+            {zoomBtn}
+            {menuBtn}
+          </span>
+        </span>
+        <span className="cluster-line">
+          <span className="row-actions">{addBtn}</span>
+        </span>
+      </span>
+    );
+  }
+
   return (
     <span className="trailing-cluster" style={{ height: OutlineLayout.lineHeight(p.fontSize) }}>
-      {p.hasChildren && (
-        <button
-          className={
-            "chevron" +
-            (collapsedDisplay ? " collapsed" : "") +
-            (p.isDrillRoot ? " locked" : "")
-          }
-          style={{ width: slot }}
-          tabIndex={-1}
-          onClick={p.isDrillRoot ? undefined : () => toggleCollapse(p.nodeId)}
-          aria-label={
-            p.isDrillRoot
-              ? "Expanded (zoomed in)"
-              : collapsedDisplay
-                ? "Expand"
-                : "Collapse"
-          }
-        >
-          <svg width={icon} height={icon} viewBox="0 0 10 10">
-            <path d="M2 3.5 L5 6.5 L8 3.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </button>
-      )}
+      {chevron}
       <span className="row-actions">
-        <button
-          className="row-action"
-          style={{ width: slot }}
-          tabIndex={-1}
-          onClick={() => void addRelative(p.nodeId)}
-          aria-label="Add node"
-        >
-          +
-        </button>
-        {!p.isLine && (
-          <button
-            className="row-action"
-            style={{ width: slot }}
-            tabIndex={-1}
-            onClick={() => drillInto(p.nodeId)}
-            aria-label="Zoom in"
-          >
-            {/* Reproduction of the SF Symbol `text.line.2.summary` (SF Symbols can't
-                be referenced by name in a WebKit view — all icons here are inline
-                SVG): two text lines feeding an L-shaped flow arrow. */}
-            <svg
-              width={Math.round(12 * OutlineLayout.scale(p.fontSize))}
-              height={Math.round(11 * OutlineLayout.scale(p.fontSize))}
-              viewBox="0 0 22 20"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={2}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <line x1="10" y1="5" x2="20" y2="5" />
-              <line x1="10" y1="9.5" x2="16" y2="9.5" />
-              <path d="M5 4 V11 a4 4 0 0 0 4 4 H15" />
-              <path d="M15 11.8 L20.5 15 L15 18.2 Z" fill="currentColor" strokeWidth={1} />
-            </svg>
-          </button>
-        )}
-        <button
-          className="row-action"
-          style={{ width: slot }}
-          tabIndex={-1}
-          onClick={(e) => {
-            // Open the NATIVE macOS row menu at the button, dropping down from its
-            // bottom-left. Rust builds the items per node kind and routes the
-            // selection back as a `row-menu-action` event (see controller).
-            const r = e.currentTarget.getBoundingClientRect();
-            void api.popupRowMenu(p.nodeId, r.left, r.bottom);
-          }}
-          aria-label="Node menu"
-        >
-          ⋯
-        </button>
+        {addBtn}
+        {zoomBtn}
+        {menuBtn}
       </span>
     </span>
   );
@@ -268,6 +307,7 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
       isLine={isLine}
       isDrillRoot={p.isDrillRoot}
       fontSize={p.fontSize}
+      layout={isPrompt ? "prompt" : "inline"}
     />
   );
 
@@ -350,9 +390,12 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
       <div className="row-inner">
         {glyph}
         {isLine ? (
+          // The actions come BEFORE the rule: they open between the handle and the
+          // line, and the clip they sit in is 0-wide at rest, so an unhovered divider
+          // is nothing but a rule reaching the row's leading edge (see .line-actions).
           <div className="content line-content">
+            <span className="line-actions">{cluster}</span>
             <hr className="node-divider" />
-            {cluster}
           </div>
         ) : isPrompt ? (
           <div className="content">

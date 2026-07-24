@@ -38,12 +38,19 @@ function rowIndex(id: string): number {
   return currentRows.findIndex((r) => r.kind === "node" && r.nodeId === id);
 }
 
-/** The nearest NODE row before/after `id` in visible order. */
+/** The nearest FOCUSABLE node row before/after `id` in visible order. A divider has no
+ * editor at all (NodeRow's `line` branch renders a rule, not a RowEditor), so focusing
+ * one drops the caret out of the outline entirely and the next arrow press has nothing
+ * to move from — the caret STEPS OVER a divider instead, and so do the other callers
+ * that hand focus to a neighbour (backspace-on-empty, ⌘Enter's move-to-next). */
 function neighborNode(id: string, dir: -1 | 1): RenderRow | null {
   const idx = rowIndex(id);
   if (idx < 0) return null;
   for (let i = idx + dir; i >= 0 && i < currentRows.length; i += dir) {
-    if (currentRows[i].kind === "node") return currentRows[i];
+    const row = currentRows[i];
+    if (row.kind !== "node") continue;
+    if (mirror.get(row.nodeId)?.kind === "line") continue;
+    return row;
   }
   return null;
 }
