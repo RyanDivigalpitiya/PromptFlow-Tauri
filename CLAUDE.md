@@ -567,6 +567,20 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   clicked); and the gap to the rule must hang on the INNER `.row-actions`, never on the
   clip — everything is `box-sizing: border-box`, so padding there is a floor the width
   can't go below, measured as a 7px stub of inset at rest.
+  **The "+" is INK-centred, not line-box centred** (`.row-action-add`): `align-items:
+  center` centres a text glyph's LINE BOX, and SF centres `+` on the MATH AXIS, which sits
+  below the font's ascent/descent midpoint — so the bar rendered LOW, by a constant
+  0.094em of the button's font (measured 1.33px at fontSize 16, 2.38px at 30). It shows on
+  a DIVIDER, whose rule and handle are the row centre to within 0.05px. The correction is
+  `padding-bottom` = TWICE the offset: on a border-box button that shrinks the content box
+  from the bottom and the centred line box rises by half of it, leaving the outer box —
+  and so the HIT AREA — untouched, which a transform or `position: relative` would not.
+  The other two are left alone as sub-half-pixel: ⋯ is 0.024em low (same cause, a third of
+  the offset) and the zoom SVG 0.033em (a different one — its artwork isn't centred in its
+  own viewBox). Pinned by a qa.mjs check that derives the ink centre in-page (exact
+  ascent/descent from a baseline strut in a `line-height: normal` block, glyph ink from a
+  10× canvas rasterization, `lineBoxCentre = baseline − (A−D)/2`); it reads +1.14px with
+  the rule removed, so it can actually fail.
 - **Style runs (bold/italic/underline)**: three flat `[location, length, …]` arrays
   (UTF-16 code units) on every node; the editor adjusts each through every text change
   via `adjustRangesForEdit` (SINGLE-splice diff — a wrap/unwrap is TWO splices, so it

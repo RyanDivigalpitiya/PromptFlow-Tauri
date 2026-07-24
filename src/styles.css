@@ -908,6 +908,21 @@ body {
   border-radius: 0.3em;
 }
 
+/* The "+" is a TEXT glyph, and `align-items: center` centres its LINE BOX, not its ink.
+   SF centres `+` on the MATH AXIS, which sits below the font's ascent/descent midpoint,
+   so the bar lands LOW — measured against a divider row (whose rule and handle ARE the
+   row centre, to within 0.05px) at 1.33px low at fontSize 16 and 2.38px at 30, i.e. a
+   constant 0.094em of the button's own font. Corrected with padding-bottom = TWICE that:
+   on a border-box button the padding shrinks the content box from the bottom and the
+   centred line box rises by half of it, so the button's outer box — and therefore its
+   hit area — is untouched (a transform or `position: relative` would move both). In em,
+   so it tracks ⌘+/⌘−. The other cluster glyphs are within half a pixel and are left
+   alone: ⋯ sits 0.024em low (same cause, a third of the offset) and the zoom SVG 0.033em
+   (a different cause — its artwork isn't centred in its own viewBox). */
+.row-action-add {
+  padding-bottom: 0.188em;
+}
+
 .chevron svg {
   transition: transform 0.15s ease;
 }

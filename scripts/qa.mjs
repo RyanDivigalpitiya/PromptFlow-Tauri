@@ -220,6 +220,66 @@ const sampling = topDivider.evaluate(
 await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
 const sweep = await sampling;
 
+// ---- 1b. Divider: the cluster glyphs are INK-centred on the row --------------
+// `align-items: center` centres a text glyph's LINE BOX, not its ink, and SF centres
+// "+" on the math axis — below the font's ascent/descent midpoint — so the bar rendered
+// low (1.33px at fontSize 16, measured off a 4x screenshot). The divider row is where it
+// shows: its rule and handle ARE the row centre. Derived here rather than screenshotted,
+// so the harness needs no image library: the exact baseline comes from the font's real
+// ascent/descent (a zero-height inline-block sits ON the baseline, and with
+// line-height:normal the line box IS the content area), and the glyph's ink offset from
+// a 10x canvas rasterization. Cross-checked against pixel analysis of a 4x shot: this
+// reports the ⋯ at +0.338px where the pixels say +0.33.
+const inkOffsets = await topDivider.evaluate((el) => {
+  const metrics = (cs) => {
+    const d = document.createElement("div");
+    d.style.cssText = `position:absolute;visibility:hidden;line-height:normal;white-space:nowrap;font:${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+    d.textContent = "Hxg";
+    const s = document.createElement("span");
+    s.style.cssText = "display:inline-block;width:0;height:0";
+    d.appendChild(s);
+    document.body.appendChild(d);
+    const db = d.getBoundingClientRect(), base = s.getBoundingClientRect().top;
+    d.remove();
+    return { A: base - db.top, D: db.bottom - base };
+  };
+  const inkAboveBaseline = (cs, ch) => {
+    const K = 10, px = parseFloat(cs.fontSize) * K, S = Math.ceil(px * 3);
+    const cv = document.createElement("canvas");
+    cv.width = cv.height = S;
+    const c = cv.getContext("2d");
+    c.font = `${cs.fontStyle} ${cs.fontWeight} ${px}px ${cs.fontFamily}`;
+    c.textBaseline = "alphabetic";
+    c.fillStyle = "#fff";
+    const bl = Math.round(S * 0.7);
+    c.fillText(ch, Math.round(px * 0.5), bl);
+    const d = c.getImageData(0, 0, S, S).data;
+    let top = -1, bot = -1;
+    for (let y = 0; y < S; y++)
+      for (let x = 0; x < S; x++)
+        if (d[(y * S + x) * 4 + 3] > 8) { if (top < 0) top = y; bot = y; break; }
+    return ((bl - top) + (bl - bot)) / 2 / K;
+  };
+  const inkCentreY = (node) => {
+    const cs = getComputedStyle(node), b = node.getBoundingClientRect();
+    const contentMid =
+      (b.top + parseFloat(cs.paddingTop) + b.bottom - parseFloat(cs.paddingBottom)) / 2;
+    const { A, D } = metrics(cs);
+    // lineBoxCentre = baseline − (A−D)/2, independent of line-height.
+    return contentMid + (A - D) / 2 - inkAboveBaseline(cs, node.textContent);
+  };
+  const btn = (l) =>
+    [...el.querySelectorAll(".row-action")].find((b) => b.getAttribute("aria-label") === l);
+  const inner = el.querySelector(".row-inner").getBoundingClientRect();
+  const rowMid = (inner.top + inner.bottom) / 2;
+  const rule = el.querySelector(".node-divider").getBoundingClientRect();
+  return {
+    plus: +(inkCentreY(btn("Add node")) - rowMid).toFixed(3),
+    menu: +(inkCentreY(btn("Node menu")) - rowMid).toFixed(3),
+    rule: +(rule.top + 0.5 - rowMid).toFixed(3),
+  };
+});
+
 // ---- 2. Prompt: cluster split down the panel edge ---------------------------
 const promptRow = rowOf("helpful coding agent");
 await promptRow.hover();
@@ -403,6 +463,8 @@ const checks = [
   ["divider hovered: actions are + then ⋯, no zoom", JSON.stringify(hovered.btns.map((b) => b.label)) === '["Add node","Node menu"]'],
   ["divider hovered: actions faded in", hovered.btns.every((b) => b.opacity === "1")],
   ["divider: clip width interpolates (>4 distinct frames)", new Set(sweep).size > 4],
+  ["divider: the rule IS the row centre (the reference the glyphs align to)", Math.abs(inkOffsets.rule) <= 0.1],
+  ["divider: the + is INK-centred on the row, not line-box centred", Math.abs(inkOffsets.plus) <= 0.35],
   ["prompt: two cluster groups", prompt.groups.length === 2],
   ["prompt: top group is flush with the panel's top edge", eq(prompt.groups[0].top, prompt.panel.top, 1)],
   ["prompt: top group is zoom + ⋯", JSON.stringify(prompt.groups[0].buttons) === '["Zoom in","Node menu"]'],
@@ -435,6 +497,7 @@ console.log("hover   :", JSON.stringify(hovered));
 console.log("sweep   :", sweep.join(" "));
 console.log("prompt  :", JSON.stringify(prompt));
 console.log("bullet  :", JSON.stringify(bullet));
+console.log("ink     :", JSON.stringify(inkOffsets), "(px from the row centre; + was +1.33 before the padding fix)");
 console.log("arrows  :", JSON.stringify(arrows));
 console.log("sweep   :", JSON.stringify({ sweepSiblings, sweepClamp, sweepUp, sweepFromEditor, sweepFromBackground, glyphDrag }));
 if (errors.length) console.log("errors  :", errors.slice(0, 5));

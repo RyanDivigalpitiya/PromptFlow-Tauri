@@ -69,7 +69,7 @@ function TrailingCluster(p: {
 
   const addBtn = (
     <button
-      className="row-action"
+      className="row-action row-action-add"
       style={{ width: slot }}
       tabIndex={-1}
       onClick={() => void addRelative(p.nodeId)}
