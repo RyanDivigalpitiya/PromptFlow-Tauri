@@ -52,7 +52,7 @@ interface WindowState {
   exemptPruneOnce: string | null;
   /** Just-completed nodes briefly held on screen under hide-completed. */
   keepVisible: Set<string>;
-  /** The focus pane strip (⌘⌥F / the ⭐ button) — per window. */
+  /** The focus pane strip (⌥⇧F / the ⭐ button) — per window. */
   focusPaneExpanded: boolean;
   /** Where the focus pane docks: top strip or left sidebar — per window. */
   focusPaneLayout: FocusPaneLayout;

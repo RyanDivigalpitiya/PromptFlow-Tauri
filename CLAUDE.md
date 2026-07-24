@@ -119,7 +119,7 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   `--text-faint`, a lone crumb white (never accent). The handle drag paints a
   `.focus-drop-marker` at the nearest row gap (content-space y = `edge − paneTop +
   scrollTop`); `move()` operates on `order`, which `reconcile` keeps equal to the rendered
-  members, so the member index and the order index coincide. ⌘⌥F opens/closes it as a
+  members, so the member index and the order index coincide. ⌥⇧F opens/closes it as a
   DRAWER: `.focus-pane-shell` animates `grid-template-rows: 0fr↔1fr` (the CSS-only
   auto-height trick — interpolates in WebKit, no JS height measuring), with a `min-height:0;
   overflow:hidden` clip and the pane's 40% cap + internal scroll moved onto the shell.
@@ -410,7 +410,7 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   ⌘B/⌘I/⌘U style toggles, ⌘4 → divider (single-node only, then clearFocus — a divider
   has no editor), ⇧⌘C markdown copy, ⌥↑/⌥↓ (move node), ⌘↑/⌘↓ collapse/expand the focused
   parent — childless falls through to the native caret jump, wrap-selection, Escape);
-  (2) `App.tsx` window handler (⌘⌥F, ⌘=/− → `adjustFont`, ⌘0 → `resetFont`,
+  (2) `App.tsx` window handler (⌥⇧F, ⌘=/− → `adjustFont`, ⌘0 → `resetFont`,
   pinch/ctrl-wheel → `setFont`, ⌘[/],
   ⌘E/⌘D collapse/expand focused, ⌘⇧E/⌘⇧D collapse/expand ALL, ⌘Z/⇧⌘Z fallback,
   ⌘⌃⇧7 seed, ⌘⌃⇧8 idle perf baseline); (3) `handleSelectionKey` capture-phase (block ops

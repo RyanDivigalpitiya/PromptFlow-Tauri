@@ -187,12 +187,18 @@ export default function App() {
     window.addEventListener("keydown", onSelKey, true);
     const onKey = (e: KeyboardEvent) => {
       const s = useWindowState.getState();
+      // ⌥⇧F toggles the focus pane. It carries no ⌘, so it must resolve BEFORE the
+      // ⌘ gate below. Matched on e.code, NEVER e.key: macOS rewrites the character
+      // under Option (⌥⇧F yields "Ï"), so e.key has no usable identity here — and
+      // the preventDefault is what stops that "Ï" being typed into a focused editor.
+      if (e.altKey && e.shiftKey && !e.metaKey && !e.ctrlKey && e.code === "KeyF") {
+        e.preventDefault();
+        s.toggleFocusPane();
+        return;
+      }
       const meta = e.metaKey;
       if (!meta) return;
-      if (e.altKey && (e.key === "f" || e.key === "F" || e.code === "KeyF")) {
-        e.preventDefault();
-        s.toggleFocusPane(); // ⌘⌥F — the one ⌘⌥ shortcut, like the SwiftUI app
-      } else if (e.ctrlKey && e.shiftKey && e.code === "Digit7") {
+      if (e.ctrlKey && e.shiftKey && e.code === "Digit7") {
         // Dev: ⌘⌃⇧7 seeds a large synthetic tree for performance testing.
         e.preventDefault();
         void api.seedDemo(40, 25, 10).then((n) => console.log(`seeded ${n}`));

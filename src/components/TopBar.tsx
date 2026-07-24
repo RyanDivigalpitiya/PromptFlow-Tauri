@@ -88,7 +88,7 @@ export function TopBar() {
         <button
           className={"bar-btn" + (focusPane ? " active" : "")}
           onClick={() => s().toggleFocusPane()}
-          title="Focus pane (⌘⌥F)"
+          title="Focus pane (⌥⇧F)"
         >
           ★
         </button>

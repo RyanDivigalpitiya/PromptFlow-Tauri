@@ -78,7 +78,7 @@ cd src-tauri && cargo test  # store tests (mutations, undo, archive round-trip)
 | ⌘B | Bold the selected text (stored as bold runs) |
 | ⌘⇧F | Highlight (accent + focus-pane membership) |
 | ⌘⇧N | Edit the node's note |
-| ⌘⌥F | Toggle the focus pane |
+| ⌥⇧F | Toggle the focus pane |
 | ⇧↑ / ⇧↓ at a boundary line | Grow a node selection; shift-click extends it |
 | ⌘⇧D / ⌘⇧E | Expand all / collapse all (per window) |
 | ⌘= / ⌘− / ⌘0 | Text size (per window) |
