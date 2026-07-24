@@ -27,3 +27,15 @@ uuid = { version = "1.24.0", features = ["v4", "serde"] }
 tauri-plugin-dialog = "2.7.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 
+# macOS only: register WebKit's text-substitution defaults before any webview
+# exists (see src/macos_defaults.rs). Both crates are already in the tree via
+# tauri at these versions, so this pulls in nothing new.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+  "NSUserDefaults",
+  "NSString",
+  "NSDictionary",
+  "NSValue",
+] }
+

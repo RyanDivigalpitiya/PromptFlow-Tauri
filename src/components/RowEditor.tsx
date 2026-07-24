@@ -223,14 +223,21 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
     if (!p.isFocused) return;
     const el = edRef.current;
     if (!el || composing.current) return;
-    buildRunDom(el, value, {
+    const rebuilt = buildRunDom(el, value, {
       bold: localBold.current,
       italic: localItalic.current,
       underline: localUnderline.current,
     });
     const req = caretReq.current;
     if (req && document.activeElement === el) {
-      setSelectionOffsets(el, req.start, req.end);
+      // Only touch the selection when it isn't already where we want it. On the
+      // no-rebuild path (ordinary typing) a redundant removeAllRanges/addRange
+      // still fires selectionchange, which is enough to unseat WebKit's pending
+      // text-substitution pass — the thing the no-rebuild path exists to protect.
+      const cur = rebuilt ? null : selectionOffsets(el);
+      if (!cur || cur.start !== req.start || cur.end !== req.end) {
+        setSelectionOffsets(el, req.start, req.end);
+      }
       caretReq.current = null;
     }
   }, [p.isFocused, value, styleEpoch]);
@@ -548,7 +555,16 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
           e.clipboardData.setData("text/plain", value.slice(sel.start, sel.end));
           commitText(value.slice(0, sel.start) + value.slice(sel.end), sel.start);
         }}
-        spellCheck={false}
+        // NEVER set spellCheck={false} here. In WebKit that attribute is a HARD
+        // GATE on the whole text-checking pipeline: Editor::markAllMisspellings-
+        // AndBadGrammarInRanges early-returns on !isSpellCheckingEnabledFor()
+        // BEFORE resolving which check types to run, so "false" also kills macOS
+        // TEXT SUBSTITUTION — System Settings ▸ Keyboard ▸ Text Replacements
+        // ("->" ⇒ "→") silently never fired (shipped bug, fixed). It costs no red
+        // squiggles: continuous spell checking is a SEPARATE bit that WebKit reads
+        // from the app's WebContinuousSpellCheckingEnabled default with a bare
+        // boolForKey:, and we never set it, so absent ⇒ NO. Smart quotes/dashes DO
+        // ride along on this gate — they are turned off in macos_defaults.rs.
       />
     );
   }
@@ -658,7 +674,11 @@ export const NoteEditor = memo(function NoteEditor(p: {
             const s = useWindowState.getState();
             if (s.focusId === p.nodeId && s.focusField === "note") s.clearFocus();
           }}
-          spellCheck={false}
+          // Same gate as the main editor above — spellCheck={false} would disable
+          // macOS Text Replacement in notes too. This <textarea> is React-
+          // controlled, and React skips writing .value when it already matches, so
+          // unlike the contenteditable its DOM survives the input dispatch on its
+          // own and needs no domMatchesRuns equivalent.
         />
       </div>
     );

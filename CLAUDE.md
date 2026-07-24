@@ -170,7 +170,34 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   paste/copy/cut are intercepted (plain text in, RAW text out; ⇧⌘C = markdown);
   (4) style refs seed in a LAYOUT effect declared before the run-DOM builder (a
   passive effect painted one frame unstyled); (5) IME: onKeyDown bails while
-  composing (Enter commits the candidate, never splits). **Echo guard**
+  composing (Enter commits the candidate, never splits); (6) macOS TEXT
+  SUBSTITUTION (System Settings ▸ Keyboard ▸ Text Replacements, "->" ⇒ "→") needs
+  TWO things, neither obvious. FIRST, `spellcheck` must NOT be false on either
+  editing surface: in WebKit that attribute is a HARD GATE —
+  `Editor::markAllMisspellingsAndBadGrammarInRanges` early-returns on
+  `!isSpellCheckingEnabledFor()` BEFORE resolving which check types to run, so
+  "false" kills substitution along with the squiggles (shipped bug, fixed). It costs
+  no red underlines: continuous spell checking is a SEPARATE bit, read from the app's
+  `WebContinuousSpellCheckingEnabled` default with a bare `boolForKey:` (absent ⇒ NO),
+  and nothing sets it. SECOND, the run-DOM rebuild must be SKIPPED when it would
+  change nothing (`domMatchesRuns` in `runs.ts`): on Cocoa `TypingCommand` dispatches
+  `input` SYNCHRONOUSLY and runs `markMisspellingsAfterTyping` AFTER it, so a
+  `replaceChildren` in our handler hands the substitution pass a DETACHED subtree and
+  it silently does nothing — fixing only the attribute changes nothing observable.
+  Same reason the caret restore is skipped when the selection is already correct: a
+  redundant `removeAllRanges`/`addRange` fires `selectionchange` and unseats the
+  pass. `domMatchesRuns` is deliberately STRICT (spans only, text nodes only, no
+  extra attributes) — a false positive strands the editor on stray browser DOM,
+  the exact failure the controlled-editor invariant exists to prevent. Smart
+  quotes/dashes ride the SAME gate and default ON, which would corrupt prompt text,
+  so they are pinned off in `macos_defaults.rs` (`registerDefaults:`, so it never
+  writes the user's prefs to disk) — registered BEFORE `tauri::Builder`, because
+  WebKit latches its TextChecker state once in the WebProcessPool constructor and
+  tauri builds the windows before `.setup()` runs. `WebAutomaticTextReplacement-
+  Enabled` is deliberately left UNSET so it inherits the user's System Settings
+  choice. NOT verifiable headlessly: `WebEditorClient::isAutomaticTextReplacement-
+  Enabled` returns false under `isControlledByAutomation()`, so Playwright can never
+  reproduce this — it is a manual check. **Echo guard**
   (`pendingSent`): every `set_text` pushes the sent text; the adoption effect keys on
   the REC OBJECT (not `rec.text`) so style-only deltas (remote ⌘B, store ⌘Z of a
   style toggle) drain their echo and adopt — keying on text alone made the next

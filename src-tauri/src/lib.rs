@@ -1,5 +1,7 @@
 mod archive;
 mod commands;
+#[cfg(target_os = "macos")]
+mod macos_defaults;
 mod model;
 mod persist;
 mod seed;
@@ -131,6 +133,12 @@ fn build_menu(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // BEFORE tauri::Builder: it creates the config windows (and their WKWebViews)
+    // before the .setup() closure runs, and WebKit latches its TextChecker state
+    // once, in the WebProcessPool constructor. Registering later is a no-op.
+    #[cfg(target_os = "macos")]
+    macos_defaults::register_text_substitution_defaults();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
