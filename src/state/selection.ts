@@ -53,6 +53,69 @@ function resolve(anchor: string, head: string): SelectionResolved | null {
   return { parent, ids: [...ids], tint };
 }
 
+/** The row fields the drag projection needs — a `RenderRow` subset, so the function
+ * stays pure (no mirror, no flatten) and testable on plain literals. */
+export interface SelRow {
+  id: string;
+  nodeId: string;
+  kind: "node" | "addChild";
+}
+
+/** Pure port of the Swift `projectSelectionRange`: map a pointer position to the
+ * selection's HEAD — the anchor-LEVEL sibling the pointer is over. (The Swift returns
+ * the id range; here the head goes back through `start`/`extendTo`, which resolves the
+ * same range, so both entry points share one definition of a selection.)
+ *
+ * Hit row = the first MEASURED row whose bottom edge is below the pointer, so above the
+ * first row and below the last both resolve deterministically to the ends. A hit deeper
+ * than the anchor's level walks up its parent chain to the sibling containing it; a hit
+ * outside the anchor's parent entirely clamps to whichever end of the sibling list the
+ * pointer is past — the range can never collapse to nothing mid-drag. */
+export function projectSelectionHead(
+  anchorId: string,
+  pointerY: number,
+  rows: readonly SelRow[],
+  frames: ReadonlyMap<string, { minY: number; maxY: number }>,
+  parentOf: (id: string) => string | null,
+): string | null {
+  const nodeRows = rows.filter((r) => r.kind === "node");
+  const anchorIdx = nodeRows.findIndex((r) => r.nodeId === anchorId);
+  if (anchorIdx < 0) return null;
+  const anchorParent = parentOf(anchorId);
+  // The anchor's visible sibling rows, in visible order (visible order IS sibling
+  // order, and a hidden completed sibling is simply absent).
+  const sibRows = nodeRows.filter((r) => parentOf(r.nodeId) === anchorParent);
+  const anchorSibIdx = sibRows.findIndex((r) => r.nodeId === anchorId);
+  if (anchorSibIdx < 0) return null;
+  const framed = nodeRows.filter((r) => frames.has(r.id));
+  if (framed.length === 0) return anchorId;
+  const hit =
+    framed.find((r) => frames.get(r.id)!.maxY > pointerY) ??
+    framed[framed.length - 1];
+
+  // Walk the hit row up to the anchor-level sibling that contains it (visited-set
+  // guard — a corrupt tree could form a parent cycle).
+  let target: string | null = null;
+  let cur: string | null = hit.nodeId;
+  const seen = new Set<string>();
+  while (cur !== null) {
+    if (seen.has(cur)) break;
+    seen.add(cur);
+    if (parentOf(cur) === anchorParent) {
+      target = cur;
+      break;
+    }
+    cur = parentOf(cur);
+  }
+  if (target !== null && sibRows.some((r) => r.nodeId === target)) return target;
+
+  // Outside the anchor's parent subtree: clamp by which side of the anchor it's on.
+  const hitIdx = nodeRows.findIndex((r) => r.id === hit.id);
+  return hitIdx < anchorIdx
+    ? sibRows[0].nodeId
+    : sibRows[sibRows.length - 1].nodeId;
+}
+
 interface SelectionState {
   anchor: string | null;
   head: string | null;

@@ -29,11 +29,40 @@ export function publishDragEnv(e: DragEnv) {
   env = e;
 }
 
-function contentY(clientY: number): number {
+/** The outline geometry both pointer gestures project against (reorder drag and
+ * multi-select drag) — always the LIVE publication, never a captured copy. */
+export function dragEnv(): DragEnv {
+  return env;
+}
+
+export function contentY(clientY: number): number {
   const el = env.scrollEl;
   if (!el) return clientY;
   const rect = el.getBoundingClientRect();
   return clientY - rect.top + el.scrollTop;
+}
+
+/** Edge auto-scroll for a live pointer gesture: while the pointer sits in the outline's
+ * top/bottom band, scroll it and re-run the caller's projection (the pointer hasn't
+ * moved, but the content under it has). Returns the stopper. */
+export function startEdgeAutoScroll(
+  getClientY: () => number,
+  onScroll: () => void,
+): () => void {
+  const id = window.setInterval(() => {
+    const el = env.scrollEl;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const y = getClientY();
+    let delta = 0;
+    if (y < rect.top + EDGE_BAND) delta = -EDGE_SPEED;
+    else if (y > rect.bottom - EDGE_BAND) delta = EDGE_SPEED;
+    if (delta !== 0) {
+      el.scrollTop += delta;
+      onScroll();
+    }
+  }, 16);
+  return () => window.clearInterval(id);
 }
 
 function buildCandidates(subtree: Set<string>): DropCandidate[] {
@@ -74,7 +103,7 @@ export function glyphMouseDown(
   let dragging = false;
   let lastClientX = startClientX;
   let lastClientY = startClientY;
-  let autoScroll: number | null = null;
+  let stopAutoScroll: (() => void) | null = null;
 
   const s = () => useWindowState.getState();
 
@@ -100,18 +129,7 @@ export function glyphMouseDown(
         block,
         ghost,
       );
-    autoScroll = window.setInterval(() => {
-      const el = env.scrollEl;
-      if (!el) return;
-      const rect = el.getBoundingClientRect();
-      let delta = 0;
-      if (lastClientY < rect.top + EDGE_BAND) delta = -EDGE_SPEED;
-      else if (lastClientY > rect.bottom - EDGE_BAND) delta = EDGE_SPEED;
-      if (delta !== 0) {
-        el.scrollTop += delta;
-        reproject();
-      }
-    }, 16);
+    stopAutoScroll = startEdgeAutoScroll(() => lastClientY, reproject);
   };
 
   const reproject = () => {
@@ -147,7 +165,7 @@ export function glyphMouseDown(
     window.removeEventListener("mousemove", onMove);
     window.removeEventListener("mouseup", onUp);
     window.removeEventListener("keydown", onKey, true);
-    if (autoScroll !== null) window.clearInterval(autoScroll);
+    stopAutoScroll?.();
   };
 
   const onKey = (ev: KeyboardEvent) => {

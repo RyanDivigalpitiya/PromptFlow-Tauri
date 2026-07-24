@@ -21,7 +21,7 @@ npm install                  # once
 scripts/dev.sh [store.sqlite]  # tauri dev against an ISOLATED store (default /tmp/promptflow-tauri-dev.sqlite)
 scripts/build.sh             # release bundle -> src-tauri/target/release/bundle/macos/PromptFlow.app
 scripts/verify.sh            # launch smoke test of the release build (throwaway store, polls for a window)
-npm test                     # vitest: 7 suites / 53 tests (resolveKey, wrap, bold, runs, projectDrop, rowBands, kindMorph)
+npm test                     # vitest: 8 suites / 61 tests (resolveKey, wrap, bold, runs, projectDrop, projectSelectionHead, rowBands, kindMorph)
 cd src-tauri && cargo test   # 12 tests (store mutations/undo, archive round-trip + collect)
 npx tsc --noEmit             # typecheck (strict; noUnusedLocals/Parameters)
 npm run dev & node scripts/qa.mjs [outDir]   # headless visual QA in WebKit (see below)
@@ -59,8 +59,9 @@ npm run dev & node scripts/qa.mjs [outDir]   # headless visual QA in WebKit (see
   boots the Vite dev server with a STUBBED `window.__TAURI_INTERNALS__` (invoke answers
   `snapshot` from a fixture tree; mutations are recorded, never applied), so the
   components, stylesheet and layout constants under test are the shipping ones. Asserts
-  geometry + per-frame transition values, writes PNGs, reaches `:hover`/`:focus` and real
-  keys, touches no window. Playwright resolves from the npx cache, NOT a project
+  geometry + per-frame transition values, writes PNGs, reaches `:hover`/`:focus`, real
+  keys and real mouse drags (it is how the multi-select sweep is covered), touches no
+  window. Playwright resolves from the npx cache, NOT a project
   dependency (`npx playwright install webkit` once). Does NOT cover anything Rust-side
   (menus, store, deltas) or WebKit-in-Cocoa (macOS text substitution — see the RowEditor
   entry; `isControlledByAutomation()` disables it).
@@ -434,7 +435,32 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
 - **Selection** (`selection.ts`): contiguous sibling range (anchor→head resolved to one
   level), tint = members + descendants. Keys while active run in `handleSelectionKey`
   (CAPTURE-phase window listener) since nothing is focused then. `refresh()` re-resolves
-  on every structural change (wired in `App.tsx`).
+  on every structural change (wired in `App.tsx`). THREE entry points, one range
+  definition: boundary ⇧↑/⇧↓ (`resolveKey`), shift-click (`RowEditor`'s static branch),
+  and the mouse sweep below — all of them land on `start(anchor, head)`.
+- **Mouse multi-select** (`selectionDrag.ts`, the `MultiSelectMouseSession` port): armed
+  from `.outline-scroll`'s `onMouseDownCapture` and deliberately PASSIVE at mousedown (no
+  preventDefault, no stopPropagation), so every row handler underneath still runs and a
+  press that never becomes a drag behaves exactly as before — capture is only how it sees
+  presses the prompt row's `.tap-trailing` stops from bubbling. Entry matches the original:
+  the press starts as ordinary TEXT selection inside the pressed row and converts to a NODE
+  selection only when the pointer leaves that row's content-space band (the Swift edge-watch
+  timer), so click-to-edit, caret placement and dragging out a text range in one node are
+  untouched. A press with no node row under it (the "+" placeholder, the background below
+  the list) has no band and converts on the 4px threshold, adopting the row `nodeRowAt`
+  picks. `.glyph-slot`/`.prompt-line-bullet`/`button` are EXCLUDED — the glyph runs the
+  reorder/drill machine. The head comes from `projectSelectionHead` in `selection.ts` (the
+  pure `projectSelectionRange` port, pinned by `selection.test.ts`): a deeper hit row walks
+  up to the anchor-level sibling containing it, and a hit outside the anchor's parent CLAMPS
+  to the sibling list's near end, so the range can never collapse to nothing mid-sweep.
+  Killing the native text selection takes TWO mechanisms and both are load-bearing:
+  `.selecting-nodes` (`user-select: none`) stops a NEW one forming as the pointer crosses
+  rows, and a `selectionchange` listener kills the one already IN FLIGHT when the press
+  landed in a live editor or on the background — WebKit extends that one in the mousemove's
+  DEFAULT action, i.e. AFTER our handler, so clearing it from the move handler always loses
+  the race and strands a highlighted character (measured; `dropTextSelection`'s guard is
+  what keeps the listener from recursing). Edge auto-scroll is shared with the reorder drag
+  (`startEdgeAutoScroll`).
 - **Export/import/archive** (`archive.rs`): the JSON is the SwiftUI app's EXACT
   `promptflow.outline` format (nested children, ISO-8601 UTC seconds, camelCase field
   names, kind raw strings) — outlines migrate in both directions; keep it byte-compatible.
@@ -511,7 +537,9 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   element at `documentHInset + guideX(level)` (inside the indent gutter); drop-marker x
   comes from `bulletCenterInset` (sibling) / `contentLeadingInset` (first child).
 - **Row interaction map** (matches the original): click bullet/prompt-line = drill;
-  click checkbox = toggle complete; drag any glyph = reorder; chevron = per-window
+  click checkbox = toggle complete; drag any glyph = reorder; drag anywhere ELSE in a row
+  (text, its blank trailing area, the background) past the row's edge = multi-select
+  sweep; chevron = per-window
   collapse; trailing ⋯ = Zoom In / Copy / Delete, built per kind in Rust — no Zoom In on
   a divider, and a prompt's copy item is Copy Markdown + Copy Raw (+ Copy Subtree when it
   has children) while a divider gets none (delete confirms at ≥10 descendants);

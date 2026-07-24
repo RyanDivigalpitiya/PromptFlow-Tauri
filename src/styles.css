@@ -811,6 +811,16 @@ body {
   min-height: 1.35em;
 }
 
+/* While a mouse multi-select sweep is live the outline's text is NOT selectable: the
+   pointer is drawing a NODE range, and WebKit would otherwise keep extending the native
+   text selection the press started under it (the gesture also clears that selection —
+   this stops a new one forming as the pointer crosses the next row). */
+.outline-scroll.selecting-nodes .node-text-wrap,
+.outline-scroll.selecting-nodes .node-text-static,
+.outline-scroll.selecting-nodes .node-note-static {
+  user-select: none;
+}
+
 /* The focused row's live editor — same element/spans as the static render, so
    focusing shifts nothing. */
 .node-editor {

@@ -302,6 +302,97 @@ await page.waitForTimeout(150);
 const upOverRoot = await focusedRowText();
 const arrows = { startedIn, downOverNested, upOverNested, downOverRoot, upOverRoot };
 
+// ---- 4. Mouse multi-select sweep --------------------------------------------
+// The pointer half of node multi-select: a press starts as TEXT selection inside the
+// pressed row and only becomes a NODE selection once it crosses that row's edge.
+const marked = (cls) =>
+  page.evaluate(
+    (sel) =>
+      [...document.querySelectorAll(sel)].map((r) =>
+        r.classList.contains("kind-line")
+          ? "(divider)"
+          : (r
+              .querySelector(".node-text-wrap, .node-text-static")
+              ?.textContent.trim() ?? ""),
+      ),
+    `.node-row.${cls}`,
+  );
+const nativeSelection = () => page.evaluate(() => String(document.getSelection()));
+const textBox = async (text) =>
+  await rowOf(text).locator(".node-text-wrap").first().boundingBox();
+
+/** Press on `fromText`'s text, drag sideways INSIDE the row (sampled), then out to
+ * `toText`'s row (sampled), then release. */
+async function sweepSelect(fromText, toText, shotName) {
+  const a = await textBox(fromText);
+  const bb = await rowOf(toText).boundingBox();
+  await page.mouse.move(a.x + 8, a.y + a.height / 2);
+  await page.mouse.down();
+  // 24px sideways — well past the 4px threshold, but never out of the row's band.
+  await page.mouse.move(a.x + 32, a.y + a.height / 2, { steps: 4 });
+  await page.waitForTimeout(60);
+  const insideRow = await marked("selected");
+  await page.mouse.move(bb.x + 120, bb.y + bb.height / 2, { steps: 8 });
+  await page.waitForTimeout(60);
+  const members = await marked("selected");
+  const tinted = await marked("sel-tint");
+  const native = await nativeSelection();
+  if (shotName) await shot(shotName, page.locator(".app-body"));
+  await page.mouse.up();
+  await page.keyboard.press("Escape"); // the key handler clears a live selection
+  await page.waitForTimeout(80);
+  const afterEscape = await marked("selected");
+  return { insideRow, members, tinted, native, afterEscape };
+}
+
+// Down, between two siblings.
+const sweepSiblings = await sweepSelect("Press the + at the bottom", "A checkbox child");
+// Down, off the end of the anchor's parent: clamps to the last sibling (the range can
+// never collapse to nothing mid-drag), and steps over the nested divider on the way.
+const sweepClamp = await sweepSelect("A checkbox child", "Prompt drafts");
+// Up, onto a row two levels deeper: maps to the anchor-level sibling containing it.
+const sweepUp = await sweepSelect("Tail node", "child of the prompt", "multiselect-drag");
+
+// The takeover from a LIVE editor — the case the Swift version needs a synthetic
+// mouseUp for: put the caret in a row, then press INSIDE its contenteditable and drag
+// out of it. The in-row samples must still be a plain text selection.
+await caretInto("A checkbox child");
+const sweepFromEditor = await sweepSelect(
+  "A checkbox child",
+  "Press the + at the bottom",
+);
+
+// A press on the BACKGROUND under the list has no row to anchor to — it adopts the row
+// the projection would pick for it (the last one) and sweeps up from there.
+const scrollBox = await page.locator(".outline-scroll").boundingBox();
+await page.mouse.move(scrollBox.x + 400, scrollBox.y + scrollBox.height - 30);
+await page.mouse.down();
+const upTo = await rowOf("Prompt drafts").boundingBox();
+await page.mouse.move(upTo.x + 400, upTo.y + upTo.height / 2, { steps: 8 });
+await page.waitForTimeout(60);
+const sweepFromBackground = {
+  members: await marked("selected"),
+  native: await nativeSelection(),
+};
+await page.mouse.up();
+await page.keyboard.press("Escape");
+await page.waitForTimeout(80);
+
+// A press on the GLYPH still belongs to the reorder drag, never to the sweep.
+const glyphBox = await rowOf("Tail node").locator(".glyph-slot").first().boundingBox();
+await page.mouse.move(glyphBox.x + glyphBox.width / 2, glyphBox.y + glyphBox.height / 2);
+await page.mouse.down();
+const upRow = await rowOf("Prompt drafts").boundingBox();
+await page.mouse.move(upRow.x + 120, upRow.y + upRow.height / 2, { steps: 8 });
+await page.waitForTimeout(60);
+const glyphDrag = {
+  selected: (await marked("selected")).length,
+  ghost: await page.locator(".drag-ghost").count(),
+};
+await page.keyboard.press("Escape");
+await page.mouse.up();
+await page.waitForTimeout(80);
+
 // ---- Report ------------------------------------------------------------------
 const eq = (a, b, tol = 0.6) => Math.abs(a - b) <= tol;
 const checks = [
@@ -326,6 +417,17 @@ const checks = [
   ["arrows: ↑ steps back over it", arrows.upOverNested === "A checkbox child"],
   ["arrows: ↓ steps over a root divider", arrows.downOverRoot === "Prompt drafts"],
   ["arrows: ↑ steps back over it", arrows.upOverRoot === "After the nested divider"],
+  ["sweep: a drag INSIDE the pressed row selects no node", sweepSiblings.insideRow.length === 0],
+  ["sweep: crossing to the next sibling selects both", JSON.stringify(sweepSiblings.members) === '["Press the + at the bottom to add a node","A checkbox child"]'],
+  ["sweep: no native text selection survives it", sweepSiblings.native === ""],
+  ["sweep: Escape clears the selection", sweepSiblings.afterEscape.length === 0],
+  ["sweep: past the parent's last child clamps there (over the divider)", JSON.stringify(sweepClamp.members) === '["A checkbox child","(divider)","After the nested divider"]'],
+  ["sweep: upward, a deeper row maps to the anchor-level sibling", JSON.stringify(sweepUp.members) === '["Prompt drafts","Tail node"]'],
+  ["sweep: the members' descendants are tinted", sweepUp.tinted.includes("child of the prompt")],
+  ["sweep: dragging out of the LIVE editor takes the selection over", JSON.stringify(sweepFromEditor.members) === '["Press the + at the bottom to add a node","A checkbox child"]'],
+  ["sweep: the editor's own text selection is gone with it", sweepFromEditor.native === ""],
+  ["sweep: a background press anchors on the last row", JSON.stringify(sweepFromBackground.members) === '["Prompt drafts","Tail node"]' && sweepFromBackground.native === ""],
+  ["sweep: a glyph press is still the reorder drag", glyphDrag.selected === 0 && glyphDrag.ghost === 1],
   ["no page errors", errors.length === 0],
 ];
 console.log("\nrest    :", JSON.stringify(rest));
@@ -334,6 +436,7 @@ console.log("sweep   :", sweep.join(" "));
 console.log("prompt  :", JSON.stringify(prompt));
 console.log("bullet  :", JSON.stringify(bullet));
 console.log("arrows  :", JSON.stringify(arrows));
+console.log("sweep   :", JSON.stringify({ sweepSiblings, sweepClamp, sweepUp, sweepFromEditor, sweepFromBackground, glyphDrag }));
 if (errors.length) console.log("errors  :", errors.slice(0, 5));
 console.log();
 let failed = 0;

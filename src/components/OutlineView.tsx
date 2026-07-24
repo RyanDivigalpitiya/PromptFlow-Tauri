@@ -33,6 +33,7 @@ import { useDrag } from "../state/drag";
 import { publishDragEnv } from "../state/dragGesture";
 import { mirror, subscribeStructure } from "../state/mirror";
 import { useSelection } from "../state/selection";
+import { selectionMouseDown } from "../state/selectionDrag";
 import { useSettings } from "../state/settings";
 import { useWindowState } from "../state/windowState";
 import { AddChildRow, NodeRow } from "./NodeRow";
@@ -261,6 +262,10 @@ export function OutlineView() {
         // scroll, so a layout-induced scrollTop clamp on collapse can't self-cancel.)
         if (isAnimating()) endAnimNow();
       }}
+      // Arms the mouse multi-select sweep. CAPTURE phase, and passive at mousedown, so
+      // it can see presses the row handlers below stop from bubbling (the prompt row's
+      // trailing tap area) without changing what any of them do.
+      onMouseDownCapture={selectionMouseDown}
       onMouseDown={(e) => {
         // Blank-background click → defocus + clear selection (the clear-tap port).
         if (e.target === e.currentTarget) {
