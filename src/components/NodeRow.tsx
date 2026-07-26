@@ -1,4 +1,10 @@
-import { memo, useRef, useSyncExternalStore, type CSSProperties } from "react";
+import {
+  memo,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+  type CSSProperties,
+} from "react";
 import { api } from "../lib/api";
 import { OutlineLayout } from "../lib/layout";
 import { addRelative, drillInto, toggleCollapse } from "../state/controller";
@@ -241,7 +247,12 @@ export interface NodeRowProps {
 }
 
 export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
-  useSyncExternalStore(subscribeNode(p.nodeId), () => nodeVersion(p.nodeId));
+  // Memoized so React doesn't tear down and re-register the listener on every commit —
+  // a fresh subscribeNode(id) closure per render forces that (matches FocusPane's
+  // useNodeRec). Load-bearing here: fontSize is a prop on every row, so ⌘+/⌘− re-renders
+  // the whole list, and the animation flags flip across flushSync commits.
+  const subscribe = useMemo(() => subscribeNode(p.nodeId), [p.nodeId]);
+  useSyncExternalStore(subscribe, () => nodeVersion(p.nodeId));
   useSyncExternalStore(subscribeCompleting, completingVersion);
   const rec = mirror.get(p.nodeId);
   // Above the early return — these hold hooks. A live ⌘1/⌘2/⌘3 kind change: the glyph

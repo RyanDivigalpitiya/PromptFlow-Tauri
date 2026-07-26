@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 import { OutlineLayout } from "../lib/layout";
 import { setHideCompleted } from "../state/controller";
 import { mirror, nodeVersion, subscribeNode } from "../state/mirror";
@@ -13,7 +13,8 @@ export function topbarScale(fontSize: number): number {
 }
 
 function DrillTitle({ id }: { id: string }) {
-  useSyncExternalStore(subscribeNode(id), () => nodeVersion(id));
+  const subscribe = useMemo(() => subscribeNode(id), [id]);
+  useSyncExternalStore(subscribe, () => nodeVersion(id));
   const rec = mirror.get(id);
   return <span className="topbar-title">{rec?.text || "Untitled"}</span>;
 }

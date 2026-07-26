@@ -2,6 +2,7 @@ import {
   memo,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -133,7 +134,9 @@ export interface RowEditorProps {
  * controlled: every input re-renders from the local model and restores the caret;
  * the browser's own rich-text editing (⌘B, styled paste) is suppressed. */
 export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
-  useSyncExternalStore(subscribeNode(p.nodeId), () => nodeVersion(p.nodeId));
+  // Memoized: a fresh subscribeNode(id) per render makes React re-subscribe every commit.
+  const subscribe = useMemo(() => subscribeNode(p.nodeId), [p.nodeId]);
+  useSyncExternalStore(subscribe, () => nodeVersion(p.nodeId));
   const rec = mirror.get(p.nodeId);
   const edRef = useRef<HTMLDivElement | null>(null);
   const [local, setLocal] = useState<string | null>(null);
@@ -264,13 +267,23 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
 
   const send = (text: string) => {
     pendingSent.current.push(text);
-    void api.setText(
-      p.nodeId,
-      text,
-      localBold.current,
-      localItalic.current,
-      localUnderline.current,
-    );
+    void api
+      .setText(
+        p.nodeId,
+        text,
+        localBold.current,
+        localItalic.current,
+        localUnderline.current,
+      )
+      .catch(() => {
+        // The mutation failed (e.g. SQLITE_BUSY from a second writer): no delta echo
+        // will ever arrive to drain this entry, and a non-empty pendingSent makes the
+        // adoption effect ignore every remote edit and ⌘Z for this row. Drop the
+        // un-echoed text so adoption resumes. (indexOf: a later echo may already have
+        // spliced it out.)
+        const i = pendingSent.current.indexOf(text);
+        if (i >= 0) pendingSent.current.splice(i, 1);
+      });
   };
 
   /** Adopt an edited text: adjust every style run across the splice, then render,
@@ -625,7 +638,8 @@ export const NoteEditor = memo(function NoteEditor(p: {
   nodeId: string;
   isNoteFocused: boolean;
 }) {
-  useSyncExternalStore(subscribeNode(p.nodeId), () => nodeVersion(p.nodeId));
+  const subscribe = useMemo(() => subscribeNode(p.nodeId), [p.nodeId]);
+  useSyncExternalStore(subscribe, () => nodeVersion(p.nodeId));
   const rec = mirror.get(p.nodeId);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const [local, setLocal] = useState<string | null>(null);
