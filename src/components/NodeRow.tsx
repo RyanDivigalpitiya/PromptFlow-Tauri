@@ -260,6 +260,18 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
   const morph = useKindMorph(rec?.kind);
   const promptBarRef = useRef<HTMLSpanElement>(null);
   const lastPromptBarH = useRef(0);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const promptPanelRef = useRef<HTMLDivElement>(null);
+  /** The panel's box relative to the ROW's border box, captured at the instant a morph
+   * OUT of a prompt starts — the stand-in below is all that is left of the panel by the
+   * time anything can animate. Same timing trick (and same reason) as the bar height
+   * above. */
+  const lastPanelBox = useRef<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
   // How long the real prompt bar is, for the stand-in the leaving layer draws once the
   // panel has unmounted. Read HERE, in the render that starts the morph, because React
   // has not committed yet: the OLD tree is still in the document, so this is the bar's
@@ -273,6 +285,22 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
   // pixel off on a 2× display.
   if (morph?.from === "promptDraft" && promptBarRef.current) {
     lastPromptBarH.current = promptBarRef.current.getBoundingClientRect().height;
+  }
+  // Same instant, same reason, for the PANEL: a prompt's box is the thing the user sees
+  // leave, and the row has already been re-rendered as a bullet/checkbox by the time any
+  // animation could reference it. Measured against the row's BORDER box because that is
+  // what an absolutely-positioned child of `.node-row` positions against — the row's
+  // paddingLeft (the indent) is deliberately not subtracted out, exactly as
+  // `.indent-guide` does it.
+  if (morph?.from === "promptDraft" && promptPanelRef.current && rowRef.current) {
+    const pr = promptPanelRef.current.getBoundingClientRect();
+    const rr = rowRef.current.getBoundingClientRect();
+    lastPanelBox.current = {
+      left: pr.left - rr.left,
+      top: pr.top - rr.top,
+      width: pr.width,
+      height: pr.height,
+    };
   }
   if (!rec) return null;
   // Plays the check-draw/pop once, right after the user completes this node.
@@ -362,6 +390,7 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
 
   return (
     <div
+      ref={rowRef}
       className={
         "node-row kind-" +
         rec.kind +
@@ -398,6 +427,19 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
           color={p.guideColor}
         />
       )}
+      {/* The leaving half of the prompt morph: the panel is gone from the tree by now,
+          so its box is redrawn here at its last measured geometry and shrinks away. The
+          twin of `.glyph-prompt-ghost`, which does the same for the leading bar. It is
+          painted OVER the row's content rather than under it (`.row-inner` is static, so
+          DOM order can't put a positioned box behind it) — the panel's fill is
+          rgba(255,255,255,0.045), i.e. a 4.5% wash over text that is already there. */}
+      {morph?.from === "promptDraft" && lastPanelBox.current && (
+        <span
+          className="prompt-panel-ghost"
+          aria-hidden="true"
+          style={lastPanelBox.current}
+        />
+      )}
       <div className="row-inner">
         {glyph}
         {isLine ? (
@@ -412,7 +454,15 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
           <div className="content">
             <div className="prompt-wrap">
             <div
-              className={"prompt-panel" + (rec.isHighlighted ? " highlighted" : "")}
+              ref={promptPanelRef}
+              // Any live morph on a row that IS a prompt is one INTO a prompt (`morph.to`
+              // is always the current kind), so `kind-enter` here is unambiguous — the
+              // same test `.prompt-line-bullet` below already uses.
+              className={
+                "prompt-panel" +
+                (rec.isHighlighted ? " highlighted" : "") +
+                (morph ? " kind-enter" : "")
+              }
               style={{
                 borderColor: rec.isHighlighted ? p.highlightColor : undefined,
               }}

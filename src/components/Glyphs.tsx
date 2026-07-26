@@ -1,4 +1,11 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { kindMorphStyle, type KindMorphStyle } from "../lib/kindMorph";
 import { OutlineLayout, Theme } from "../lib/layout";
 import type { NodeKind } from "../lib/types";
@@ -280,11 +287,24 @@ function GlyphInk(
   const accented = p.isHighlighted || p.hasHighlightedDescendant;
 
   if (p.kind === "checkbox") {
-    const d = p.isParent
-      ? OutlineLayout.parentGlyphSize(p.fontSize)
-      : Math.round(11.5 * OutlineLayout.scale(p.fontSize));
-    const c = d / 2;
-    const r = c - 1;
+    // A checkbox's circle is BIGGER once the node has children (it becomes the progress
+    // glyph). The svg BOX is held at the parent diameter for both states — the larger of
+    // the two — so the whole size change rides on ONE number, the circle's `r`, which is
+    // an SVG geometry property and therefore CSS-animatable (`.glyph-circle`). Sizing the
+    // box per state instead would have forced the animation onto the svg's width/height
+    // (attributes, which a transition can't reach — the same wall `d` hit in `Wedge`) or
+    // onto a wrapper `transform: scale`, which scales the 1.5px stroke with it and would
+    // thin every LEAF checkbox's ring by 19% at rest. The box is centred in the fixed
+    // glyph slot, so growing it changes no layout; both states paint exactly what they
+    // painted before.
+    const box = OutlineLayout.parentGlyphSize(p.fontSize);
+    const leaf = Math.round(11.5 * OutlineLayout.scale(p.fontSize));
+    const d = p.isParent ? box : leaf;
+    const c = box / 2;
+    const r = d / 2 - 1;
+    // The check mark is a LEAF-only glyph, so it keeps the leaf geometry and is merely
+    // re-centred in the (larger) box.
+    const co = (box - leaf) / 2;
     const border = accented
       ? p.highlightColor
       : allDone
@@ -292,18 +312,25 @@ function GlyphInk(
         : "rgba(255,255,255,0.45)";
     return (
       <span className="glyph-box" style={{ width: size, height: size }}>
-        <svg width={d} height={d}>
+        <svg width={box} height={box}>
           <circle
-            // Parents only: the border goes green in the same instant the pie
-            // completes, so it must cross-fade on the same clock or it snaps against a
-            // still-filling wedge. A LEAF checkbox keeps its instant flip — that green
+            // `glyph-circle` carries the leaf<->parent radius transition and is on BOTH
+            // states, because a transition takes its property from the AFTER-change
+            // style and needs the before-change value resolved — a class that appeared
+            // only on one side would animate one direction and snap the other.
+            // `glyph-tint` is parents ONLY: the border goes green in the same instant the
+            // pie completes, so it must cross-fade on the same clock or it snaps against
+            // a still-filling wedge. A LEAF checkbox keeps its instant flip — that green
             // arrives with glyphPop + drawCheck, and that feel isn't being retuned.
-            className={p.isParent ? "glyph-tint" : undefined}
+            className={"glyph-circle" + (p.isParent ? " glyph-tint" : "")}
             cx={c}
             cy={c}
-            r={r}
             fill="none"
-            style={{ stroke: border }}
+            // `r` as a CSS declaration, not the attribute: only the declaration is
+            // reachable by a transition (the `Wedge` note states the same rule for
+            // stroke-dashoffset). Written with an explicit unit — a bare number is not a
+            // valid CSS <length>, whatever React would or wouldn't append.
+            style={{ stroke: border, r: `${r}px` } as CSSProperties}
             strokeWidth={1.5}
           />
           {p.isParent ? (
@@ -322,7 +349,7 @@ function GlyphInk(
                 key="check"
                 className="glyph-check"
                 pathLength={1}
-                d={`M ${d * 0.28} ${d * 0.52} L ${d * 0.45} ${d * 0.68} L ${d * 0.74} ${d * 0.32}`}
+                d={`M ${co + leaf * 0.28} ${co + leaf * 0.52} L ${co + leaf * 0.45} ${co + leaf * 0.68} L ${co + leaf * 0.74} ${co + leaf * 0.32}`}
                 fill="none"
                 stroke={Theme.completeColor}
                 strokeWidth={1.6}

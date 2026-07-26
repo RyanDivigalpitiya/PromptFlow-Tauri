@@ -80,13 +80,15 @@ export function cssDurationMs(name: string, fallback: number): number {
 }
 
 /** The window the LIVE animation needs. Movement and fade share one duration and one
- * curve (see styles.css — decoupling the fade's timing reads as jarring); a pure reorder
- * is the one exception and runs on its own quicker, linear clock, so the teardown has to
- * read that var instead or it would hold `.rows-animating` on for 130ms of dead time. */
+ * curve (see styles.css — decoupling the fade's timing reads as jarring); the two
+ * exceptions are the animations that MOVE rows rather than open a distance — a pure
+ * reorder and a tab glide — each of which runs on its own quicker, evener clock. The
+ * teardown has to read whichever var is live or it would hold `.rows-animating` on for
+ * the difference in dead time. */
 function animDurationMs(): number {
-  return reordering
-    ? cssDurationMs("--reorder-anim-dur", COLLAPSE_ANIM_MS)
-    : cssDurationMs("--collapse-anim-dur", COLLAPSE_ANIM_MS);
+  if (reordering) return cssDurationMs("--reorder-anim-dur", COLLAPSE_ANIM_MS);
+  if (glideRoots !== null) return cssDurationMs("--glide-anim-dur", COLLAPSE_ANIM_MS);
+  return cssDurationMs("--collapse-anim-dur", COLLAPSE_ANIM_MS);
 }
 
 export type AnimMode = "expand" | "collapse" | "glide";
@@ -155,6 +157,13 @@ export function isDrawerShowing(): boolean {
  * `.outline-inner` for it, which retimes the reflow transition. */
 export function isReordering(): boolean {
   return animating && reordering;
+}
+/** True while a tab glide is live — OutlineView puts `.rows-glide` on `.outline-inner`
+ * for it, retiming the row reflow onto the SAME clock the horizontal offset already
+ * uses (`.node-row.gliding`). The two axes start from one commit, so they have to end
+ * on one too, or the row travels along a curve instead of a straight line. */
+export function isGliding(): boolean {
+  return animating && glideRoots !== null;
 }
 /** True while an expand animation is live AND this row was NOT present before the
  * toggle — i.e. it should play the entrance. Always false during a collapse. */

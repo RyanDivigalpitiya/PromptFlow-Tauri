@@ -33,6 +33,25 @@
      collapseAnim.ts reads this live for its teardown, exactly like the collapse var. */
   --reorder-anim-dur: 170ms;
   --reorder-anim-ease: linear;
+  /* The Tab/⇧Tab GLIDE (both axes — see the note above rule 1b). Its own clock, and the
+     curve is the whole point: --collapse-anim-ease is a near-step ease-in-out whose PEAK
+     speed is 5.9x its average, which is what sells a distance being opened. A glide is
+     not a distance opening, it is a row TRAVELLING, and its travel is unbounded — an
+     outdent past siblings that have children moves the row hundreds of px while the
+     indent itself is only 22px. On that curve a 588px outdent peaks at 193px/FRAME: the
+     row holds still, teleports, and settles, while the 22px horizontal (7px/frame on the
+     same curve) still reads as a glide. That is the reported "snaps downwards, then
+     glides" — one gesture, one clock, two readings, because the same curve was asked to
+     carry two travel distances two orders of magnitude apart (all measured in WebKit).
+     This curve is linear with softened ends: peak 1.16x, so the same outdent peaks at
+     38px/frame and the motion is trackable at any distance. Same family as
+     --reorder-anim-ease (linear) and for the same reason — a MOVE wants an even speed;
+     the ends are eased only so a 22px indent doesn't start and stop dead. The duration is
+     shorter than the collapse's because an even curve spends all of it moving.
+     BOTH AXES MUST SHARE THIS: x and y run from the same commit, so different curves or
+     durations would bend the row's path into a curve instead of a straight line. */
+  --glide-anim-dur: 240ms;
+  --glide-anim-ease: cubic-bezier(0.2, 0.1, 0.8, 0.95);
   /* Parent progress wedge — DELIBERATELY NOT --collapse-anim-dur. That one is the
      drawer's clock and gets dialled past 500ms to eyeball a frame (see the note
      above), which would put every wedge in the document into slow motion. The wedge
@@ -269,13 +288,25 @@ body {
   transition-timing-function: var(--reorder-anim-ease);
 }
 
+/* …and so does a Tab glide, which is the OTHER animation here that moves rows rather
+   than opening a distance. This is the vertical half of the glide: it must be retimed
+   in lockstep with the horizontal half (rule 1b), or the row's two axes finish at
+   different moments and it travels along a curve. Mutually exclusive with
+   .rows-reorder — a glide reparents, a reorder does not. */
+.rows-animating.rows-glide .vrow:not(.entering-row) {
+  transition-duration: var(--glide-anim-dur);
+  transition-timing-function: var(--glide-anim-ease);
+}
+
 /* 1b. Horizontal glide (Tab / ⇧Tab, and the undo of one). `paddingLeft` is NEVER
       animated: every intermediate value re-wraps the text, changes the row's height,
       and drives the virtualizer's ResizeObserver to reposition the whole list on the
       main thread each frame. The row is laid out at its FINAL indent from the first
       structural commit and TRANSLATED back to its old x, then released — so the motion
       is pure compositor work like everything else in this file, and the vertical glide
-      (rule 1 above) rides the same clock.
+      (rule 1 above, retimed by `.rows-glide`) rides the same clock. Both halves take
+      --glide-anim-*, never --collapse-anim-*: see the :root note for why the collapse's
+      near-step curve turns a long outdent's vertical travel into a teleport.
 
       The transform sits on the row's CONTENT, never on `.node-row` itself: that
       element's absolutely-positioned `.indent-guide` children form a column shared
@@ -293,7 +324,7 @@ body {
 .node-row.gliding>.add-child-btn,
 .node-row.gliding>.hidden-completed-hint {
   transform: translateX(var(--pf-glide-x, 0px));
-  transition: transform var(--collapse-anim-dur) var(--collapse-anim-ease);
+  transition: transform var(--glide-anim-dur) var(--glide-anim-ease);
   will-change: transform;
 }
 
@@ -582,6 +613,44 @@ body {
     stroke var(--wedge-anim-dur) var(--wedge-anim-ease);
 }
 
+/* A checkbox's circle GROWS when the node gains its first child (leaf 11.5·s → parent
+   14·s) and shrinks when it loses its last, because that circle is the container the
+   progress pie fills. `r` is an SVG geometry property, so it is an ordinary animatable
+   CSS length here — Glyphs.tsx writes it as a style declaration rather than the
+   attribute for exactly that reason, and holds the svg's own box at the parent diameter
+   in both states so the change is this one number and never a relayout.
+
+   The --wedge-anim-* clock, not --kind-anim-* and not --collapse-anim-*: this is the
+   PARENT-GLYPH family, not the kind morph. The three things that happen at this instant
+   — the circle growing, `.glyph-tint`'s border cross-fade, and the wedge itself
+   appearing — are one event, and a circle that grew on a different clock from the border
+   it is drawn with would visibly disagree with it. (The bullet's leaf dot → parent ring
+   is NOT covered: those are two different elements, an HTML span and an svg, so there is
+   no single geometry to interpolate. It still snaps.)
+
+   Repaint, not compositor work — WebKit hands Core Animation only transform/opacity/
+   filter — but so is the wedge it belongs to, and at 14x14px that is a trivial layer
+   repaint. And like the wedge it cannot self-start: a transition needs a resolved
+   previous value, so a row scrolling back into the virtualizer's window paints its
+   circle at the true size instead of growing into it. */
+.glyph-circle {
+  transition: r var(--wedge-anim-dur) var(--wedge-anim-ease);
+}
+
+/* A checkbox PARENT's circle wears both classes, and `transition` is a SHORTHAND: the
+   later `.glyph-tint` rule below reset the whole property, so the grow direction lost its
+   `r` transition and snapped while the shrink direction — whose after-change style is a
+   plain `.glyph-circle` — animated correctly (measured in WebKit: computed
+   transition-property came back "stroke, fill"). Two classes outrank one, so this
+   restates the union and wins regardless of source order. They share a clock by design,
+   so there is one duration to keep in step, not three. */
+.glyph-circle.glyph-tint {
+  transition:
+    r var(--wedge-anim-dur) var(--wedge-anim-ease),
+    stroke var(--wedge-anim-dur) var(--wedge-anim-ease),
+    fill var(--wedge-anim-dur) var(--wedge-anim-ease);
+}
+
 /* A parent's ring/dot/border goes green the instant its pie completes — cross-fade it
    on the same clock, or it snaps against a still-filling wedge. Scoped to PARENTS in
    Glyphs.tsx. Side effect: those same colors carry the ⌘⇧F highlight, so a highlight
@@ -757,6 +826,111 @@ body {
    drawn by .glyph-prompt-ghost instead. */
 .prompt-line-bullet.kind-enter {
   animation: glyphFadeIn var(--kind-anim-dur) var(--kind-fade-in-ease) both;
+}
+
+/* ---------- The prompt PANEL half of the kind morph ----------
+   A prompt is the one kind whose glyph is not the whole story: converting to it also
+   raises a panel, which used to appear between two paints. It now materialises —
+   fading up while growing into its box, and shrinking away on the reverse.
+
+   ONE property per keyframe, like the glyph pair above, so the travel and the fade keep
+   their separate curves; the opacity halves ARE glyphFadeIn/glyphFadeOut, reused rather
+   than duplicated, which is also what keeps the panel on the same directional fade
+   asymmetry (--kind-fade-in-ease / --kind-fade-out-ease) as the glyph it is crossing
+   with. Both are transform/opacity, so Core Animation composites them at the display's
+   native rate.
+
+   What animates is the panel's CHROME, never the node's text — which is why the entering
+   half runs on a `::before` fill layer instead of on the panel itself. The text inside
+   the panel is the SAME text the row was already showing; fading the panel as a whole
+   blinks it out and back, and ⌘3 lands on the row the user is editing. That is the exact
+   failure `--enter-fade-ease` was introduced for one section up ("on the one thing the
+   user is TYPING INTO that is a character or two they cannot read"). It also makes the
+   two directions mirror images: the leaving ghost below is chrome-only by construction,
+   because by then the text belongs to a bullet row.
+
+   `transform-origin: 0 50%` — the LEADING edge, which is where the panel's identity is
+   (the bar sits on the glyph column just outside it, and it is the one part of a prompt
+   that shares a column with every other kind). Growing about the centre would slide that
+   edge off the column for the length of the animation, i.e. animate the one thing that
+   must not move. 0.96 rather than something more dramatic because a panel is ~25x wider
+   than it is tall: the same factor that is 1px of vertical growth is ~36px of horizontal
+   sweep at a typical window width, and past ~0.92 the row reads as stretching in from
+   the left rather than as a panel arriving.
+
+   NOT covered here (unchanged, and documented in CLAUDE.md): converting to or from a
+   prompt also changes the ROW's height, and the rows below it still snap — a kind change
+   emits no structural delta, so nothing arms `.rows-animating` for it. */
+@keyframes promptPanelGrow {
+  from {
+    transform: scale(0.96);
+  }
+
+  to {
+    transform: scale(1);
+  }
+}
+
+@keyframes promptPanelShrink {
+  from {
+    transform: scale(1);
+  }
+
+  to {
+    transform: scale(0.96);
+  }
+}
+
+/* The panel hands its fill to the pseudo-element for the length of the morph, so the
+   thing that grows and fades is a box BEHIND the text rather than the text's own box.
+   Both declarations are on the same one-shot class, so the fill is never split in two:
+   at the animation's last frame ::before is opaque and the panel is transparent, which
+   composites to exactly the resting colour the class removal then restores. */
+.prompt-panel.kind-enter {
+  background: transparent;
+}
+
+.prompt-panel.kind-enter::before {
+  content: "";
+  position: absolute;
+  /* -1px: `inset` resolves against the PADDING box, and the panel carries a 1px border
+     (transparent at rest, visible while editing) that the fill must reach across. */
+  inset: -1px;
+  border-radius: inherit;
+  background: rgba(255, 255, 255, 0.045);
+  pointer-events: none;
+  transform-origin: 0 50%;
+  animation:
+    promptPanelGrow var(--kind-anim-dur) var(--kind-scale-ease) both,
+    glyphFadeIn var(--kind-anim-dur) var(--kind-fade-in-ease) both;
+}
+
+/* Stand-in for `.prompt-panel` on the way OUT — the panel itself is unmounted the moment
+   the kind changes, exactly like the leading bar's ghost above. Geometry comes inline
+   from NodeRow (the panel's last measured box, relative to the row).
+   `opacity: 0` is the RESTING state and is load-bearing for the same reason
+   `.glyph-layer.glyph-leave` declares one: this box is invisible only by fill-mode, and
+   both clone containers (`.collapse-ghosts *`, `.drawer-content *`) force
+   `animation: none !important` on everything they hold — without a declared rest, a row
+   cloned mid-morph would paint a full-strength panel over a row that no longer has one.
+
+   KNOWN and deliberate, the same trade the bar's ghost above makes: a panel is taller
+   than the one-line row it leaves behind (~12px at fontSize 16), so for the length of the
+   fade this box overhangs the NEXT row. It is a 4.5%-white wash and the next row is a
+   later `.vrow` sibling, so that row's text still paints over it — but capping the ghost
+   to the row's new height would instead truncate the panel on frame 0, which is the one
+   thing a fade exists to avoid. The overhang is the lesser artifact; it is the knob to
+   turn if this reads wrong. */
+.prompt-panel-ghost {
+  position: absolute;
+  pointer-events: none;
+  border-radius: 0.5em;
+  background: rgba(255, 255, 255, 0.045);
+  transform-origin: 0 50%;
+  opacity: 0;
+  animation:
+    promptPanelShrink var(--kind-anim-dur) var(--kind-scale-ease) both,
+    glyphFadeOut var(--kind-anim-dur) var(--kind-fade-out-ease) both;
 }
 
 /* Stand-in for .prompt-line-bullet on the leaving layer. Width, colour and HEIGHT come

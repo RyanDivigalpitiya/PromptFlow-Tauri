@@ -22,6 +22,7 @@ import {
   isDrawerShowing,
   isEntering,
   isGlideArming,
+  isGliding,
   isNewRow,
   isReordering,
   publishAnimEnv,
@@ -281,6 +282,7 @@ export function OutlineView() {
           "outline-inner" +
           (isAnimating() ? " rows-animating" : "") +
           (isReordering() ? " rows-reorder" : "") +
+          (isGliding() ? " rows-glide" : "") +
           (isDrawerShowing() ? " drawer-showing" : "")
         }
         style={{ height: virtualizer.getTotalSize() }}

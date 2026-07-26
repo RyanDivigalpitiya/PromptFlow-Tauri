@@ -286,8 +286,9 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   ResizeObserver reports the real one, so transitioning it animated that correction and
   made a parent's FIRST expand visibly re-space its children (the size cache is empty
   only that once). **All timing lives in styles.css `:root`, never in JS**:
-  `--collapse-anim-dur`/`-ease` is the shared clock, with four deliberate exceptions —
-  `--reorder-anim-dur` (⌥↑/↓), `--wedge-anim-dur` (the progress pie), `--kind-anim-dur`
+  `--collapse-anim-dur`/`-ease` is the shared clock, with five deliberate exceptions —
+  `--reorder-anim-dur` (⌥↑/↓), `--glide-anim-dur` (Tab/⇧Tab, BOTH axes),
+  `--wedge-anim-dur` (the progress pie), `--kind-anim-dur`
   (the glyph kind morph) and `--enter-fade-ease` (an entering row's opacity only).
   `animDurationMs()` reads the LIVE
   value for whichever is running so the teardown always tracks it; `COLLAPSE_ANIM_MS` is
@@ -382,6 +383,21 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   collapse's two-flushSync split is still required, but for that reason. The vertical
   half is free: `.rows-animating` is armed at commit 1 and `mountBand` (anchored on the
   moved node) keeps the rows it travels past mounted.
+  **Both axes run on `--glide-anim-*`, never the collapse's clock** — `.rows-glide`
+  (`isGliding()`, the twin of `.rows-reorder`) retimes the vertical half, and
+  `animDurationMs()` reads the same var so the teardown tracks it. A glide is a row
+  TRAVELLING, not a distance opening, and its travel is unbounded: ⇧Tab out of a list
+  whose later siblings have children moves the row hundreds of px while the indent itself
+  is 22px. `--collapse-anim-ease` peaks at 5.9x its average speed, so that outdent covered
+  588px at 193px/FRAME — a teleport — while the 22px horizontal on the SAME curve still
+  read as a glide: the reported "snaps downwards, then glides" was one gesture whose two
+  axes disagreed because one curve was carrying two travel distances two orders of
+  magnitude apart (shipped bug, fixed). The glide curve is linear with softened ends
+  (peak 1.16x ⇒ 38px/frame), same family and same reasoning as `--reorder-anim-ease`.
+  Keep the two axes on ONE duration and ONE curve or the row's path bends. NOT covered:
+  when the destination lands wholly outside the viewport, `OutlineView`'s focus
+  scroll-into-view effect still calls `endAnimNow()` and jump-scrolls, so both axes snap —
+  following a >1-viewport travel needs an animated scroll, i.e. a design project.
 - **Progress wedge** (`Glyphs.tsx` `Wedge`; CSS `.glyph-wedge` / `.glyph-tint`): the
   parent pie fills radially, clockwise from 12 o'clock, as children complete. Drawn as a
   STROKED circle — path radius R/2, `stroke-width` R, so the band covers radii [0,R]
@@ -398,8 +414,23 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   deliberately NOT `--collapse-anim-dur` — that one gets dialled past 500ms to debug the
   drawer. Unlike everything else here it is a main-thread repaint (WebKit composites only
   transform/opacity/filter), which at 14×14px is free.
+  The CHECKBOX's circle also GROWS on the same clock when the node gains its first child
+  (leaf 11.5·s → parent 14·s) and shrinks when it loses its last — same family, so the
+  circle, `.glyph-tint`'s border cross-fade and the wedge appearing all move together.
+  It rides `r`, an SVG geometry property and so an ordinary animatable CSS length, written
+  as a style DECLARATION (the attribute is unreachable, exactly as for the wedge's `d`);
+  the svg's own box is held at the PARENT diameter in both states so the change is that
+  one number and never a relayout, and the leaf-only check mark is merely re-centred in
+  it. A wrapper `transform: scale` was the alternative and is wrong: it scales the 1.5px
+  stroke, thinning every resting leaf checkbox by 19%. `.glyph-circle` carries the
+  transition in BOTH states, and `.glyph-circle.glyph-tint` restates the union because
+  `transition` is a SHORTHAND — `.glyph-tint`'s own `stroke, fill` reset it, so the GROW
+  direction silently lost its `r` transition while the shrink kept it (shipped in this
+  change, caught by measuring computed style, fixed). Bullets are NOT covered: a leaf dot
+  is an HTML span and a parent ring an svg, so there is no single geometry to interpolate.
 - **Glyph kind morph** (`lib/kindMorph.ts` truth table + `useKindMorph`/`Glyph` in
-  `Glyphs.tsx`; CSS `.glyph-layer` / `.glyph-prompt-ghost`): ⌘1/⌘2/⌘3 cross-animate TWO
+  `Glyphs.tsx`; CSS `.glyph-layer` / `.glyph-prompt-ghost` / `.prompt-panel-ghost`):
+  ⌘1/⌘2/⌘3 cross-animate TWO
   layers over the glyph slot — bullet↔checkbox collapse/grow to a point at their shared
   centre (`morph-scale`), to/from a prompt cross-fade in place (`morph-fade`, because a
   full-height bar can't scale into a dot). Anything involving a DIVIDER still snaps: no
@@ -422,10 +453,28 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   bar to fade — the leaving layer draws `.glyph-prompt-ghost` in its place, at the real
   bar's LAST MEASURED height (a fixed height truncated a 4-line prompt's bar by ~55px on
   frame 0) and offset `+1px` for the panel's border, the vertical twin of the `−1` NodeRow
-  already applies to `promptBarLeft`. NOT covered: converting to/from a prompt also changes
-  the ROW HEIGHT (~18px at fontSize 16), and that still snaps — arming `.rows-animating`
-  for it was measured to look worse, since the growing row's own height is a single-paint
-  change; a real fix is a clip boundary for a growing row, i.e. a design project.
+  already applies to `promptBarLeft`.
+  (4) a prompt is the one kind whose glyph is not the whole story — converting also raises
+  a PANEL — so the panel materialises on the same `--kind-anim-*` clock: in, a `::before`
+  fill layer grows from `scale(0.96)` and fades up (`.prompt-panel.kind-enter`); out, a
+  `.prompt-panel-ghost` at the panel's LAST MEASURED box shrinks and fades, since the panel
+  itself is unmounted the instant the kind changes (measured in the render that starts the
+  morph, exactly like the bar's height, and relative to the row's BORDER box because that
+  is what an absolutely-positioned child of `.node-row` positions against). What animates
+  is the panel's CHROME, never the node's TEXT — the text is the same text the row already
+  showed, and fading the panel whole blinks it out on the row ⌘3 was just pressed in, the
+  exact failure `--enter-fade-ease` exists for; chrome-only also makes the two directions
+  mirror images, since the leaving ghost has no text by construction. `transform-origin:
+  0 50%` (the leading edge is the glyph column the bar sits on — the one thing that must
+  not move) and 0.96 rather than anything bolder because a panel is ~25x wider than tall,
+  so the factor that is 1px of vertical growth is ~36px of horizontal sweep.
+  Two accepted artifacts, both the same trade the bar's ghost makes: the leaving box is
+  taller than the row it leaves (~12px), so it overhangs the next row for the fade (a
+  4.5%-white wash, and the next `.vrow` still paints over it), and the ROW HEIGHT itself
+  still snaps (~18px at fontSize 16) — arming `.rows-animating` for it was measured to look
+  worse, since the growing row's own height is a single-paint change, and a kind change
+  emits no structural delta to arm it from; a real fix is a clip boundary for a growing
+  row, i.e. a design project.
 - **Drag** (`drag.ts` + `dragGesture.ts`): `projectDrop` is the pure port of the Swift
   projection (gap by `midY <= pointerY`, depth band `[minDepth, prev.depth+1]`, divider
   can't parent, drill floor 1). Frames come from `virtualizer.measurementsCache`
