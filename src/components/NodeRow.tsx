@@ -396,6 +396,12 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
         rec.kind +
         (p.isSelected ? " selected" : p.isSelTinted ? " sel-tint" : "") +
         (justCompleted ? " just-completed" : "") +
+        // The text half of the prompt morph — a FLIP over the panel's inset (see
+        // styles.css). `morph.to` is always the current kind and `from !== to`, so at
+        // most one of these can be set, and a bullet<->checkbox morph sets neither
+        // (nothing moves).
+        (morph && isPrompt ? " prompt-text-in" : "") +
+        (morph?.from === "promptDraft" ? " prompt-text-out" : "") +
         (p.isEntering ? " entering" : "") +
         (p.glideX !== null ? " gliding" : "") +
         (p.glideX !== null && p.glideArming ? " glide-arm" : "")

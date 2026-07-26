@@ -10,6 +10,15 @@
   --accent: #3b82f6;
   --complete: #06ff9a;
   --row-line-height: 1.35;
+  /* The prompt panel's inner insets. Custom properties because TWO places must agree to
+     the pixel: `.prompt-panel`'s own padding, and the kind morph's text glide, which is a
+     FLIP over exactly this distance plus the panel's 1px border (measured in WebKit:
+     converting a row to a prompt moves its text by 0.7em+1px right and 0.5em+1px down, at
+     every font size). A literal in the keyframes would silently desync the moment the
+     padding is retuned. `em` is substituted as a TOKEN and resolved at the USING element,
+     i.e. against the row's inline font-size, so both sides stay correct through ⌘+/⌘−. */
+  --prompt-panel-pad-x: 0.7em;
+  --prompt-panel-pad-y: 0.5em;
   /* Expand/collapse animation timing — THE single source of truth. collapseAnim.ts
      reads this live (animDurationMs) to time its teardown, so retuning it needs no JS
      change. 300ms on a symmetric ease-in-out is the SHIPPING value (tuned by eye against
@@ -905,6 +914,89 @@ body {
     glyphFadeIn var(--kind-anim-dur) var(--kind-fade-in-ease) both;
 }
 
+/* The row's TEXT glides between the two positions instead of jumping the panel's inset.
+   A prompt's text sits one border + one padding inside the panel, so converting moves it
+   by exactly (--prompt-panel-pad-x + 1px, --prompt-panel-pad-y + 1px) — 12.2 x 9px at
+   fontSize 16 — and that used to snap while everything around it animated.
+
+   A FLIP: the row is laid out at its FINAL position from the first commit and the text is
+   TRANSLATED back to where it was painted, then released. Never `padding`/`margin`, for
+   the reason the tab glide states — every intermediate value re-wraps the text, changes
+   the row's height, and drives the virtualizer's ResizeObserver to reposition the whole
+   list on the main thread each frame. This stays one composited transform.
+
+   KEYFRAMES, so this needs no invert commit: the tab glide has to spend a whole extra
+   flushSync resolving its FROM value (`.glide-arm`), but an animation with
+   `animation-fill-mode: both` paints frame 0 without one — the same reason the glyph
+   layers next to it are keyframes. That is what lets the whole text glide be declarative,
+   driven off the one class NodeRow already knows how to set.
+
+   `.firstline` and the note are named as DESCENDANTS because their parent differs by kind
+   — the panel's flow children when it is a prompt, `.content`'s when it is not — while
+   each appears exactly once per row either way. On a non-prompt `.firstline` also carries
+   the trailing cluster, which therefore rides along; that is right, since an inline
+   cluster hugs the end of the text it is moving with.
+
+   The offsets are REGISTERED custom properties, and that is load-bearing rather than
+   decoration. An
+   unregistered `--x: 0.7em` is substituted as a TOKEN, so the `em` resolves against
+   whatever element ends up using it — and the note renders at 0.82em of the row, so it
+   slid a visibly shorter distance than the text it is supposed to travel with (measured:
+   9.06px against the line's 12.2px at fontSize 16). Declaring these with
+   `syntax: "<length>"` makes the computed value an ABSOLUTE length resolved once, at
+   `.node-row`, whose font-size is the row's; every descendant then inherits that same
+   px value however it is scaled itself. Declared only on the two morph classes, so a
+   resting row computes nothing extra. */
+@property --pf-prompt-dx {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 0px;
+}
+
+@property --pf-prompt-dy {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 0px;
+}
+
+.node-row.prompt-text-in,
+.node-row.prompt-text-out {
+  --pf-prompt-dx: calc(var(--prompt-panel-pad-x) + 1px);
+  --pf-prompt-dy: calc(var(--prompt-panel-pad-y) + 1px);
+}
+
+@keyframes promptTextIn {
+  from {
+    transform: translate(calc(-1 * var(--pf-prompt-dx)), calc(-1 * var(--pf-prompt-dy)));
+  }
+
+  to {
+    transform: translate(0, 0);
+  }
+}
+
+@keyframes promptTextOut {
+  from {
+    transform: translate(var(--pf-prompt-dx), var(--pf-prompt-dy));
+  }
+
+  to {
+    transform: translate(0, 0);
+  }
+}
+
+.node-row.prompt-text-in .firstline,
+.node-row.prompt-text-in .note-wrap,
+.node-row.prompt-text-in .node-note-static {
+  animation: promptTextIn var(--kind-anim-dur) var(--kind-scale-ease) both;
+}
+
+.node-row.prompt-text-out .firstline,
+.node-row.prompt-text-out .note-wrap,
+.node-row.prompt-text-out .node-note-static {
+  animation: promptTextOut var(--kind-anim-dur) var(--kind-scale-ease) both;
+}
+
 /* Stand-in for `.prompt-panel` on the way OUT — the panel itself is unmounted the moment
    the kind changes, exactly like the leading bar's ghost above. Geometry comes inline
    from NodeRow (the panel's last measured box, relative to the row).
@@ -1249,7 +1341,8 @@ body {
   border: 1px solid transparent;
   border-radius: 0.5em;
   background: rgba(255, 255, 255, 0.045);
-  padding: 0.5em 0.7em;
+  /* Shared with the morph's text glide — see the :root note. */
+  padding: var(--prompt-panel-pad-y) var(--prompt-panel-pad-x);
   /* An empty prompt is one text line tall (1.35em) + vertical padding + borders. */
   min-height: 2.5em;
 }

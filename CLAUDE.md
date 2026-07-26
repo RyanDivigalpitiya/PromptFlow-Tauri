@@ -468,6 +468,19 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   0 50%` (the leading edge is the glyph column the bar sits on — the one thing that must
   not move) and 0.96 rather than anything bolder because a panel is ~25x wider than tall,
   so the factor that is 1px of vertical growth is ~36px of horizontal sweep.
+  (5) the row's TEXT (and its note) GLIDES between the two positions rather than jumping
+  the panel's inset — a prompt's text sits one border + one padding inside the panel, i.e.
+  exactly (0.7em+1px, 0.5em+1px), 12.2×9px at fontSize 16. A FLIP, like the tab glide, and
+  never `padding`/`margin` for the same reason (every intermediate value re-wraps the text
+  and drives the ResizeObserver) — but as KEYFRAMES, so unlike the tab glide it needs no
+  invert commit: `fill-mode: both` paints frame 0 without a resolved from-value. Two
+  things are load-bearing. The distance lives in `--prompt-panel-pad-x/y`, which
+  `.prompt-panel`'s padding ALSO uses, so the FLIP cannot drift from the layout it is
+  undoing. And the offsets are `@property`-REGISTERED as `<length>`: an unregistered
+  custom property is substituted as a token, so its `em` resolves at whatever element uses
+  it, and the note — which renders at 0.82em of the row — slid 9.06px while its own text
+  slid 12.2px (caught by measuring both transforms in the same frame). Registering makes
+  the value compute once, at `.node-row`, and inherit as an absolute px.
   Two accepted artifacts, both the same trade the bar's ghost makes: the leaving box is
   taller than the row it leaves (~12px), so it overhangs the next row for the fade (a
   4.5%-white wash, and the next `.vrow` still paints over it), and the ROW HEIGHT itself
