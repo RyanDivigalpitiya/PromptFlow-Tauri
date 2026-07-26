@@ -307,7 +307,9 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
   const justCompleted = rec.isCompleted && isCompleting(p.nodeId);
 
   const scale = OutlineLayout.scale(p.fontSize);
-  const indent = p.depth * OutlineLayout.indentPerLevel * scale;
+  // Whole-pixel indent — see OutlineLayout.indentAt. A fractional column made the glyph
+  // rasterize differently once a kind morph composited its layer.
+  const indent = OutlineLayout.indentAt(p.depth, p.fontSize);
   const isPrompt = rec.kind === "promptDraft";
   const isLine = rec.kind === "line";
   const completedFraction = p.hasChildren
@@ -548,8 +550,7 @@ export const AddChildRow = memo(function AddChildRow(p: {
   glideArming: boolean;
   onAdd: (parentId: string) => void;
 }) {
-  const scale = OutlineLayout.scale(p.fontSize);
-  const indent = p.depth * OutlineLayout.indentPerLevel * scale;
+  const indent = OutlineLayout.indentAt(p.depth, p.fontSize);
   return (
     <div
       className={

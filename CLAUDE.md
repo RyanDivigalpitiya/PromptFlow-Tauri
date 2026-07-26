@@ -594,8 +594,23 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   editor and made the cluster jump on click-to-edit).
 - **Column math**: `OutlineLayout` (`lib/layout.ts`) matches the Swift constants exactly
   (indent 22, hInset 18, glyph slot 18·s, gap 6; `guideX(level) = glyphCenterX(level−1)`).
-  The ONE deliberate divergence: `lineHeight = fontSize × 1.35`, locked to CSS
-  `--row-line-height: 1.35` — change both or neither. Indent guides anchor on the ROW
+  TWO deliberate divergences. (1) `lineHeight = fontSize × 1.35`, locked to CSS
+  `--row-line-height: 1.35` — change both or neither. (2) **`indentAt(depth)` ROUNDS
+  `depth · 22 · scale` to a whole CSS pixel**, and EVERY depth→x conversion must go
+  through it — the row's paddingLeft, `glyphCenterX` (hence `guideX`),
+  `contentLeadingInset`, and the tab glide's FLIP offset in OutlineView, which for the
+  same reason is a DIFFERENCE of two `indentAt` columns rather than levels × step (a
+  level is no longer a constant width to the pixel). The raw product is fractional at
+  every font size that isn't a multiple of 14, which put the whole glyph column on a
+  fractional DEVICE pixel at depth ≥ 1 (measured at fontSize 16, 2x: 91.29/141.57/191.86
+  for depths 1/2/3, against a clean 41.0 at depth 0). That is invisible at rest, but the
+  instant a kind morph composites the glyph layer (its keyframes touch transform/opacity)
+  the layer's backing store snaps to whole device pixels and the glyph re-rasterizes at a
+  new offset — so it jumped sideways when the animation armed and jumped back when it
+  ended, only below the top level, and worst on the CHECKBOX because it and the parent
+  ring are SVG (snapped as a unit) while a bullet leaf's dot is an HTML box (shipped bug,
+  fixed). `dragGesture`'s `step` is deliberately NOT rounded: it is pointer-travel
+  sensitivity per level, not a position. Indent guides anchor on the ROW
   element at `documentHInset + guideX(level)` (inside the indent gutter); drop-marker x
   comes from `bulletCenterInset` (sibling) / `contentLeadingInset` (first child).
 - **Row interaction map** (matches the original): click bullet/prompt-line = drill;

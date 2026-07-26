@@ -39,6 +39,35 @@ export const OutlineLayout = {
     return Math.round(18 * OutlineLayout.scale(fontSize));
   },
 
+  /**
+   * A row's leading indent, ROUNDED to a whole CSS pixel. Every depth→x conversion in the
+   * app goes through this — the row's paddingLeft, the glyph column, the indent guides and
+   * the drag drop-marker — so they cannot drift apart by a rounding step.
+   *
+   * The rounding is a DELIBERATE divergence from the Swift original (which lets the raw
+   * 22·scale accumulate), and it is not cosmetic. `22 · fontSize/14` is fractional at every
+   * font size that is not a multiple of 14, so at depth ≥ 1 the whole glyph column landed
+   * on a fractional device pixel (measured at fontSize 16, 2x: 91.29 / 141.57 / 191.86 for
+   * depths 1/2/3, against a clean 41.0 at depth 0). At rest WebKit paints the glyph inline
+   * with sub-pixel positioning; the moment a kind morph starts, the glyph layer is
+   * composited (its keyframes touch transform/opacity) and the layer's backing store snaps
+   * to whole device pixels, so the SAME glyph rasterizes at a slightly different offset
+   * while animating and snaps back when the layer is dropped. That is the reported
+   * "checkbox jumps right before the animation and left after it" — and exactly why only
+   * depth 0 was clean, and why the CHECKBOX shows it worst: it and the parent ring are SVG,
+   * snapped as a unit, while a bullet leaf's dot is an HTML box that both paint paths
+   * position the same way.
+   *
+   * Rounding per DEPTH rather than per level keeps the columns evenly spaced (a per-level
+   * round would accumulate error), and a whole CSS px is a whole device px at both 1x and
+   * the 2x this app ships on.
+   */
+  indentAt(depth: number, fontSize: number): number {
+    return Math.round(
+      depth * OutlineLayout.indentPerLevel * OutlineLayout.scale(fontSize),
+    );
+  },
+
   /** Side/diameter of a PARENT node's progress glyph (bullet ring / checkbox circle). */
   parentGlyphSize(fontSize: number): number {
     return 14 * OutlineLayout.scale(fontSize);
@@ -52,7 +81,7 @@ export const OutlineLayout = {
   /** X (from a row's leading edge) of the glyph column's center at `depth`. */
   glyphCenterX(depth: number, fontSize: number): number {
     return (
-      depth * OutlineLayout.indentPerLevel * OutlineLayout.scale(fontSize) +
+      OutlineLayout.indentAt(depth, fontSize) +
       OutlineLayout.bulletHitSize(fontSize) / 2
     );
   },
@@ -98,7 +127,7 @@ export const OutlineLayout = {
    * marker's ball for a CHILD drop. */
   contentLeadingInset(depth: number, fontSize: number): number {
     return (
-      depth * OutlineLayout.indentPerLevel * OutlineLayout.scale(fontSize) +
+      OutlineLayout.indentAt(depth, fontSize) +
       OutlineLayout.documentHInset +
       OutlineLayout.glyphSlotToContent(fontSize)
     );

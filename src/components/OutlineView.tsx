@@ -245,7 +245,6 @@ export function OutlineView() {
   });
 
   // Hoisted out of the row map: one read each per render, not one per row.
-  const glideScale = OutlineLayout.scale(fontSize);
   const glideArming = isGlideArming();
   const selResolved = useSelection((s) => s.resolved);
   const dragSubtree = useDrag((s) => s.subtree);
@@ -302,9 +301,18 @@ export function OutlineView() {
           // glide's transform.
           const isNew = isNewRow(row.id);
           // Levels → px here, so NodeRow never has to know the anim module exists.
+          // As a DIFFERENCE of two indentAt() columns, not levels × step: the columns are
+          // rounded per depth (see OutlineLayout.indentAt), so a level's width is not
+          // constant to the pixel, and multiplying would invert the row to a position up
+          // to 1px off the one it actually painted at — a visible hitch on frame 1 of
+          // every glide. `lv` is the row's OLD depth relative to its new one, so this is
+          // exactly (where it was) − (where it now is).
           const lv = glideLevels(row.nodeId);
           const glideX =
-            lv === null ? null : lv * OutlineLayout.indentPerLevel * glideScale;
+            lv === null
+              ? null
+              : OutlineLayout.indentAt(row.depth + lv, fontSize) -
+                OutlineLayout.indentAt(row.depth, fontSize);
           return (
             <div
               key={vi.key}
