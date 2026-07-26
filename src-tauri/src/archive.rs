@@ -200,11 +200,19 @@ pub fn collect(store: &Store, older_than_ms: Option<i64>) -> Vec<Uuid> {
         let mut seen = HashSet::new();
         if qualifies(store, id, older_than_ms, &mut seen) {
             units.push(id); // a whole unit — don't descend further
-        } else {
-            // Descend THROUGH this (incomplete or too-recent) node.
-            for c in store.ordered_children(id).into_iter().rev() {
-                stack.push(c);
-            }
+            continue;
+        }
+        // A node whose whole subtree is completed IS a unit; it just isn't old enough
+        // yet. Descending into it would archive (and DELETE) the children that have
+        // aged out while the parent stays on screen — slicing the very unit this
+        // function promises to take whole. Leave it for a later sweep, when the newest
+        // stamp in it has aged out too and it qualifies as one piece.
+        if older_than_ms.is_some() && qualifies(store, id, None, &mut HashSet::new()) {
+            continue;
+        }
+        // Descend THROUGH this node to reach completed units below it.
+        for c in store.ordered_children(id).into_iter().rev() {
+            stack.push(c);
         }
     }
     units
@@ -221,12 +229,39 @@ pub fn archive_dir(store_path: &Path) -> PathBuf {
 
 /// Write an archive document to a timestamped file; returns the path. Backup-first:
 /// callers only delete after this succeeds.
+///
+/// The stamp resolves only to the SECOND, and two archives can share one wall-clock
+/// second (the launch+4s sweep landing with a manual Clear Completed) — or the same
+/// repeated hour on a DST fall-back. A plain truncating `fs::write` would silently
+/// destroy the earlier backup, whose nodes are deleted from the store right after — the
+/// one case the backup-first guarantee must never allow. So open with `create_new` and
+/// disambiguate with a counter: a collision makes a NEW file instead of overwriting one.
 pub fn write_archive(dir: &Path, doc: &OutlineDocument) -> Result<PathBuf, String> {
+    use std::io::Write;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S");
-    let path = dir.join(format!("PromptFlow Archive {stamp}.json"));
-    std::fs::write(&path, encode(doc)?).map_err(|e| e.to_string())?;
-    Ok(path)
+    let json = encode(doc)?;
+    for n in 0..1000 {
+        let name = if n == 0 {
+            format!("PromptFlow Archive {stamp}.json")
+        } else {
+            format!("PromptFlow Archive {stamp} ({n}).json")
+        };
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                f.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err("could not find a free archive filename".into())
 }
 
 #[cfg(test)]
@@ -292,5 +327,59 @@ mod tests {
         let _ = pending;
         // Age gate: nothing is old enough yet.
         assert!(collect(&s, Some(now_ms() - 60_000)).is_empty());
+    }
+
+    #[test]
+    fn write_archive_never_overwrites_a_prior_backup() {
+        // Two writes in the same wall-clock second must produce TWO files — the backup-
+        // first guarantee is void if the second write truncates the first.
+        let dir = std::env::temp_dir().join(format!("pf-archive-test-{}", now_ms()));
+        let mut s = Store::open_in_memory_for_tests();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        s.set_text(a.new_node.unwrap(), "first".into(), None, None, None)
+            .unwrap();
+        let doc1 = document(&s, &s.roots(), &HashSet::new());
+        let (_, b) = s.append_root(NodeKind::BulletPoint).unwrap();
+        s.set_text(b.new_node.unwrap(), "second".into(), None, None, None)
+            .unwrap();
+        let doc2 = document(&s, &s.roots(), &HashSet::new());
+
+        let p1 = write_archive(&dir, &doc1).unwrap();
+        let p2 = write_archive(&dir, &doc2).unwrap();
+        assert_ne!(p1, p2, "second archive overwrote the first's path");
+        assert!(p1.exists() && p2.exists());
+        // The first file's content survived intact.
+        let back1 = decode(&std::fs::read_to_string(&p1).unwrap()).unwrap();
+        assert_eq!(back1.roots.len(), 1);
+        assert_eq!(back1.roots[0].text, "first");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn age_gate_never_slices_a_completed_unit() {
+        // A completed parent whose stamp is too RECENT, over an old completed child:
+        // complete the child on day 1, the parent on day 10, sweep on day 11. The unit
+        // is the parent — the sweep must take it whole or leave it alone, never reach
+        // past a completed node to pull its children out from under it.
+        let day = 24 * 60 * 60 * 1000i64;
+        let now = now_ms();
+        let mut parent = NodeRec::new("parent".into(), NodeKind::Checkbox, None, 0);
+        parent.is_completed = true;
+        parent.completed_at = Some(now - day); // recent: inside a 3-day retention
+        let mut child = NodeRec::new("child".into(), NodeKind::Checkbox, Some(parent.id), 0);
+        child.is_completed = true;
+        child.completed_at = Some(now - 10 * day); // old
+        let (pid, cid) = (parent.id, child.id);
+
+        let mut s = Store::open_in_memory_for_tests();
+        s.insert_tree(vec![parent, child]).unwrap();
+
+        // Threshold sits between the two stamps: the parent is too recent, the child old.
+        let units = collect(&s, Some(now - 3 * day));
+        assert!(
+            !units.contains(&cid),
+            "child archived out of a still-present completed parent: {units:?}",
+        );
+        assert!(units.is_empty() || units == vec![pid]);
     }
 }
