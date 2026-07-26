@@ -398,7 +398,11 @@ function captureGhosts(
 
   const overlay = document.createElement("div");
   overlay.className = "collapse-ghosts";
-  inner.querySelectorAll<HTMLElement>(".vrow").forEach((v) => {
+  // ":scope >" so a still-fading `.collapse-ghosts` overlay (deliberately left in `inner`
+  // by removeOverlays) or a live drawer's clones don't match — their `.vrow` clones keep
+  // the class AND a stale `data-index`, which would re-clone a just-left row on top of
+  // the current one (double-draw). The real rows are direct children of `inner`.
+  inner.querySelectorAll<HTMLElement>(":scope > .vrow").forEach((v) => {
     const row = prevRows[Number(v.getAttribute("data-index"))];
     if (!row || !keep(row)) return;
     const c = v.cloneNode(true) as HTMLElement;
@@ -451,9 +455,11 @@ function buildDrawer(m: AnimMode, rootId: string, rows: RenderRow[]): boolean {
   sweep.appendChild(content);
   clip.appendChild(sweep);
 
-  // Clone only the RENDERED rows of the block, repositioned block-local.
+  // Clone only the RENDERED rows of the block, repositioned block-local. ":scope >" so a
+  // lingering ghost overlay's clones (left mid-fade by removeOverlays) can't match on a
+  // stale data-index — the real rows are direct children of `inner`.
   let hMeasured = 0;
-  inner.querySelectorAll<HTMLElement>(".vrow").forEach((v) => {
+  inner.querySelectorAll<HTMLElement>(":scope > .vrow").forEach((v) => {
     const i = Number(v.getAttribute("data-index"));
     if (!(i > p && i < e)) return;
     const mm = env.measureAt(i);
