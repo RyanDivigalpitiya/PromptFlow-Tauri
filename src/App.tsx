@@ -198,11 +198,13 @@ export default function App() {
       }
       const meta = e.metaKey;
       if (!meta) return;
-      if (e.ctrlKey && e.shiftKey && e.code === "Digit7") {
-        // Dev: ⌘⌃⇧7 seeds a large synthetic tree for performance testing.
+      if (import.meta.env.DEV && e.ctrlKey && e.shiftKey && e.code === "Digit7") {
+        // Dev: ⌘⌃⇧7 seeds a large synthetic tree for performance testing. DEV-gated: the
+        // seed_demo command ships registered, so an ungated hook let ⌘⌃⇧7 inject ~11k
+        // nodes into the user's real outline in a release build.
         e.preventDefault();
         void api.seedDemo(40, 25, 10).then((n) => console.log(`seeded ${n}`));
-      } else if (e.ctrlKey && e.shiftKey && e.code === "Digit8") {
+      } else if (import.meta.env.DEV && e.ctrlKey && e.shiftKey && e.code === "Digit8") {
         // Dev: ⌘⌃⇧8 measures the idle rAF ceiling (no animation) — tells 60Hz-capped
         // webview apart from animation jank.
         e.preventDefault();
