@@ -328,7 +328,18 @@ impl Store {
         if changes.is_empty() {
             return Ok(self.empty_delta());
         }
-        persist::apply(&mut self.db, changes.iter().map(|c| (c.id, c.after.as_ref())))?;
+        // A failed write must leave NO trace in memory. The mutation has already been
+        // applied to `nodes`, but on error we bump no `rev` and emit no delta — so a
+        // store that kept the change would diverge from every window permanently, with
+        // nothing to tell them about it. Roll back to the before-images instead.
+        if let Err(e) = persist::apply(&mut self.db, changes.iter().map(|c| (c.id, c.after.as_ref())))
+        {
+            let mut discard = Vec::new();
+            for ch in &changes {
+                self.apply_image(ch.id, ch.before.clone(), &mut discard);
+            }
+            return Err(e);
+        }
         self.push_undo(UndoEntry {
             coalesce: coalesce.clone(),
             at_ms: now_ms(),
@@ -388,14 +399,21 @@ impl Store {
         let Some(entry) = self.undo_stack.pop() else {
             return Ok(self.empty_delta());
         };
+        // Persist BEFORE touching memory, so a failed write leaves the store exactly as
+        // it was. Mutating first would strand the popped entry (never pushed to redo)
+        // AND move the tree without bumping `rev` or emitting a delta — a silent,
+        // permanent divergence between the store and every window.
+        if let Err(e) = persist::apply(
+            &mut self.db,
+            entry.changes.iter().map(|c| (c.id, c.before.as_ref())),
+        ) {
+            self.undo_stack.push(entry); // nothing happened — put the step back
+            return Err(e);
+        }
         let mut ops = Vec::new();
         for ch in &entry.changes {
             self.apply_image(ch.id, ch.before.clone(), &mut ops);
         }
-        persist::apply(
-            &mut self.db,
-            entry.changes.iter().map(|c| (c.id, c.before.as_ref())),
-        )?;
         self.redo_stack.push(entry);
         self.rev += 1;
         Ok(Delta {
@@ -411,14 +429,18 @@ impl Store {
         let Some(entry) = self.redo_stack.pop() else {
             return Ok(self.empty_delta());
         };
+        // Persist before mutating — see the note in `undo`.
+        if let Err(e) = persist::apply(
+            &mut self.db,
+            entry.changes.iter().map(|c| (c.id, c.after.as_ref())),
+        ) {
+            self.redo_stack.push(entry); // nothing happened — put the step back
+            return Err(e);
+        }
         let mut ops = Vec::new();
         for ch in &entry.changes {
             self.apply_image(ch.id, ch.after.clone(), &mut ops);
         }
-        persist::apply(
-            &mut self.db,
-            entry.changes.iter().map(|c| (c.id, c.after.as_ref())),
-        )?;
         self.undo_stack.push(entry);
         self.rev += 1;
         Ok(Delta {
@@ -825,6 +847,16 @@ impl Store {
                 return Ok((self.empty_delta(), MutationOut::default()));
             }
         }
+        // A drag's projection resolves `after` from the caller window's mirror, which can
+        // lag a concurrent delete (another window's ⋯ Delete, the deferred auto-archive
+        // sweep). `position_after` indexes `self.nodes[&after]` directly, so a stale id
+        // would PANIC under the held store mutex and poison it for every window. Treat a
+        // vanished drop target as a graceful no-op, like the cycle guard above.
+        if let Some(r) = after {
+            if !self.nodes.contains_key(&r) {
+                return Ok((self.empty_delta(), MutationOut::default()));
+            }
+        }
         self.begin();
         let mut expand = Vec::new();
         let new_position = if let Some(r) = after {
@@ -1216,6 +1248,13 @@ impl Store {
                 expand.push(np);
             }
         }
+        // A stale `after` (concurrently deleted drop target) would panic `position_after`'s
+        // direct HashMap index under the held mutex — see `move_to`. No-op instead.
+        if let Some(r) = after {
+            if !self.nodes.contains_key(&r) {
+                return Ok((self.empty_delta(), MutationOut::default()));
+            }
+        }
         self.begin();
         let mut anchor = after;
         for node in block {
@@ -1478,6 +1517,26 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), positions.len());
+    }
+
+    #[test]
+    fn move_to_stale_after_is_noop_not_panic() {
+        // A drag whose `after` target was deleted concurrently must NOT panic the store
+        // (which would poison the mutex for every window) — it does nothing.
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, b) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let b = b.new_node.unwrap();
+        let ghost = Uuid::new_v4(); // never in the store
+        let (delta, out) = s.move_to(b, None, Some(ghost)).unwrap();
+        assert!(delta.ops.is_empty(), "stale drop target should move nothing");
+        assert!(!out.moved);
+        assert_eq!(s.roots(), vec![a, b]); // unchanged
+        // The block variant too.
+        let (delta2, _) = s.move_block_to(&[b], None, Some(ghost)).unwrap();
+        assert!(delta2.ops.is_empty());
+        assert_eq!(s.roots(), vec![a, b]);
     }
 
     #[test]
