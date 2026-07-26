@@ -134,8 +134,10 @@ function applyDelta(delta: Delta) {
   if (!loaded) return;
   if (delta.rev <= rev) return; // stale echo (e.g. snapshot already covered it)
   if (delta.rev !== rev + 1) {
-    // Missed a delta — resync from a full snapshot.
-    void reload();
+    // Missed a delta — resync from a full snapshot. A rejection here just means the
+    // resync will be retried on the next gap delta (the gap persists), so swallow it
+    // rather than surfacing an unhandled rejection.
+    void reload().catch(() => {});
     return;
   }
   rev = delta.rev;
@@ -245,11 +247,23 @@ async function load(snapshot: Snapshot) {
 }
 
 let reloading = false;
-async function reload() {
-  if (reloading) return;
+/** A resync was requested while one was already in flight. The snapshot in flight may
+ * have been read from the store BEFORE that newer delta committed, so it can't be
+ * assumed to cover it — run ONE more reload after the current one rather than dropping
+ * the request, or the mirror could settle a rev below the store and stay there (the
+ * documented "a window can never silently drift" invariant). */
+let reloadQueued = false;
+async function reload(): Promise<void> {
+  if (reloading) {
+    reloadQueued = true;
+    return;
+  }
   reloading = true;
   try {
-    await load(await api.snapshot());
+    do {
+      reloadQueued = false;
+      await load(await api.snapshot());
+    } while (reloadQueued);
   } finally {
     reloading = false;
   }
@@ -261,7 +275,18 @@ export function startMirror(): Promise<void> {
   if (!started) {
     started = (async () => {
       await onDelta(applyDelta);
-      await reload();
+      // The initial snapshot can fail transiently — e.g. a briefly-poisoned store mutex
+      // from a background-thread panic. `started` is memoized, so a permanent reject
+      // strands THIS window blank forever with no path back. Retry a few times first.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await reload();
+          return;
+        } catch (e) {
+          if (attempt >= 5) throw e;
+          await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+        }
+      }
     })();
   }
   return started;

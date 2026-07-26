@@ -434,6 +434,15 @@ export function setHideCompleted(on: boolean) {
   );
 }
 
+/** Per-id token of the MOST RECENT hold. A hold's expiry timer releases an id only if
+ * it still owns that id's token — so a later, longer hold (revealNode's 60s) or a
+ * re-completion supersedes an earlier short timer, which would otherwise fire first and
+ * release the id ~1.4s in, cutting the newer grace off mid-animation (the untracked-timer
+ * bug). windowState.holdVisible is a no-op when the id is already held, so the token — not
+ * the set — is what carries ownership across overlapping holds. */
+let holdSeq = 0;
+const holdTokens = new Map<string, number>();
+
 /** Hold just-completed nodes on screen, then animate them away. The timer lives HERE and
  * not in windowState: the store's old inline setTimeout was a bare `set` with no arming
  * commit — the exact analogue of calling setCollapsed directly — so the row vanished
@@ -442,11 +451,21 @@ export function setHideCompleted(on: boolean) {
 export function holdVisible(ids: string | readonly string[], ms = 1400) {
   const list = typeof ids === "string" ? [ids] : [...ids];
   if (list.length === 0) return;
-  for (const id of list) ws().holdVisible(id);
+  const tokens = new Map<string, number>();
+  for (const id of list) {
+    ws().holdVisible(id);
+    const t = ++holdSeq;
+    holdTokens.set(id, t);
+    tokens.set(id, t);
+  }
   setTimeout(() => {
     const s = ws();
-    const live = list.filter((id) => s.keepVisible.has(id));
-    if (live.length === 0) return; // un-completed or deleted meanwhile
+    // Only ids this timer still owns — a newer hold bumped the token of any it superseded,
+    // and THAT hold's (later) timer will release those.
+    const owned = list.filter((id) => holdTokens.get(id) === tokens.get(id));
+    for (const id of owned) holdTokens.delete(id);
+    const live = owned.filter((id) => s.keepVisible.has(id));
+    if (live.length === 0) return; // un-completed, deleted, or superseded meanwhile
     const keep = new Set(s.keepVisible);
     for (const id of live) keep.delete(id);
     // If the nodes were un-completed or hide-completed was switched off meanwhile the

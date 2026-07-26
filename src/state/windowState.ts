@@ -108,22 +108,54 @@ interface PersistedShape {
   focusTopHeight?: FocusTopHeight;
 }
 
+const DEFAULT_PERSISTED: PersistedShape = {
+  collapsed: [],
+  hideCompleted: false,
+  fontSize: OutlineLayout.baseFontSize,
+  drill: null,
+};
+
+/** Coerce an untrusted parsed blob into a safe shape. `loadInitial`'s try/catch only
+ * covered `JSON.parse`; the parsed value was then consumed at module scope with NO
+ * validation — so a corrupt or hand-edited localStorage entry (e.g. `collapsed` not an
+ * array) threw at `new Set(initial.collapsed)` during module evaluation and left the
+ * window permanently blank, or poisoned `fontSize` into `NaN` via `Math.max(9, undefined)`.
+ * Every field is now defended; malformed optionals fall back to `undefined` so the
+ * `?? default` + clamps at the store site take over. */
+function sanitizePersisted(raw: unknown): PersistedShape {
+  const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const num = (v: unknown): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  return {
+    collapsed: Array.isArray(o.collapsed)
+      ? o.collapsed.filter((x): x is string => typeof x === "string")
+      : [],
+    hideCompleted: o.hideCompleted === true,
+    fontSize: num(o.fontSize) ?? OutlineLayout.baseFontSize,
+    drill: typeof o.drill === "string" ? o.drill : null,
+    focusPaneExpanded:
+      typeof o.focusPaneExpanded === "boolean" ? o.focusPaneExpanded : undefined,
+    focusPaneLayout:
+      o.focusPaneLayout === "top" || o.focusPaneLayout === "sidebar"
+        ? o.focusPaneLayout
+        : undefined,
+    focusSidebarWidth: num(o.focusSidebarWidth),
+    focusTopHeight:
+      o.focusTopHeight === "auto" ? "auto" : num(o.focusTopHeight),
+  };
+}
+
 function loadInitial(): PersistedShape {
   try {
     const own = localStorage.getItem(WIN_KEY);
-    if (own) return JSON.parse(own);
+    if (own) return sanitizePersisted(JSON.parse(own));
     // Fresh window: inherit the device's most recent window state.
     const device = localStorage.getItem(DEVICE_KEY);
-    if (device) return JSON.parse(device);
+    if (device) return sanitizePersisted(JSON.parse(device));
   } catch {
     // fall through to defaults
   }
-  return {
-    collapsed: [],
-    hideCompleted: false,
-    fontSize: OutlineLayout.baseFontSize,
-    drill: null,
-  };
+  return { ...DEFAULT_PERSISTED };
 }
 
 const initial = loadInitial();
@@ -286,6 +318,20 @@ export const useWindowState = create<WindowState>((set, get) => ({
       const forward = clean(s.forward);
       if (back.length !== s.back.length) patch.back = back;
       if (forward.length !== s.forward.length) patch.forward = forward;
+    }
+    // Prune deleted ids out of `collapsed` and `keepVisible` too. `collapsed` is
+    // serialized to localStorage on every change, so a collapsed parent that is later
+    // deleted would otherwise linger in the set — and the persisted blob — forever,
+    // growing without bound over a document's edit history.
+    if ([...s.collapsed].some((id) => ids.has(id))) {
+      const next = new Set(s.collapsed);
+      for (const id of ids) next.delete(id);
+      patch.collapsed = next;
+    }
+    if ([...s.keepVisible].some((id) => ids.has(id))) {
+      const next = new Set(s.keepVisible);
+      for (const id of ids) next.delete(id);
+      patch.keepVisible = next;
     }
     if (Object.keys(patch).length > 0) set(patch);
   },
