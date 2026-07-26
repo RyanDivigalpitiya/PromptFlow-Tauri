@@ -288,8 +288,9 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   only that once). **All timing lives in styles.css `:root`, never in JS**:
   `--collapse-anim-dur`/`-ease` is the shared clock, with five deliberate exceptions —
   `--reorder-anim-dur` (⌥↑/↓), `--glide-anim-dur` (Tab/⇧Tab, BOTH axes),
-  `--wedge-anim-dur` (the progress pie), `--kind-anim-dur`
-  (the glyph kind morph) and `--enter-fade-ease` (an entering row's opacity only).
+  `--wedge-anim-dur` (the progress pie), `--kind-anim-dur` (the glyph kind morph AND the
+  row reflow its height change causes) and `--enter-fade-ease` (an entering row's opacity
+  only).
   `animDurationMs()` reads the LIVE
   value for whichever is running so the teardown always tracks it; `COLLAPSE_ANIM_MS` is
   only a fallback (a hardcoded mirror desynced the moment the CSS was retuned and tore the
@@ -481,13 +482,31 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   it, and the note — which renders at 0.82em of the row — slid 9.06px while its own text
   slid 12.2px (caught by measuring both transforms in the same frame). Registering makes
   the value compute once, at `.node-row`, and inherit as an absolute px.
-  Two accepted artifacts, both the same trade the bar's ghost makes: the leaving box is
+  (6) the row's own HEIGHT change (~18px at fontSize 16) no longer snaps the rows BELOW it:
+  `runKindReflow` slides them, retimed onto the morph's clock by `.rows-kind`. It is the
+  simplest orchestration here — TWO commits, no invert — because the split a transition
+  needs is free on this path: commit 1 arms the flags and resolves every row's current
+  translateY, commit 2 applies the kind (which changes the row's DOM box but NOT any
+  transform, since the flatten is byte-identical), and only then does the new height become
+  new translateYs. Its trigger is invisible to `diffRows`, so it needs its own delta
+  classification — `kindFlips` in `StructureChange`, and the mirror calls the seam for it
+  WITHOUT setting `structural` (the flatten is unchanged, so a structure notify would
+  recompute it for nothing). Commit 3 is not an invert but a
+  `virtualizer.resizeItem` — waiting on the ResizeObserver instead costs two frames and the
+  list visibly reacts late to the panel. It must be `resizeItem`, NOT `measureElement`:
+  called without an observer entry the latter returns the CACHED size for an
+  already-measured row (virtual-core's own guard), reads the old height straight back, and
+  changes nothing.
+  Two accepted artifacts, both the same trade the bar's ghost makes. The leaving box is
   taller than the row it leaves (~12px), so it overhangs the next row for the fade (a
-  4.5%-white wash, and the next `.vrow` still paints over it), and the ROW HEIGHT itself
-  still snaps (~18px at fontSize 16) — arming `.rows-animating` for it was measured to look
-  worse, since the growing row's own height is a single-paint change, and a kind change
-  emits no structural delta to arm it from; a real fix is a clip boundary for a growing
-  row, i.e. a design project.
+  4.5%-white wash, and the next `.vrow` still paints over it). And the growing row reaches
+  full height in ONE paint while the rows below take the animation to clear it, so a
+  prompt's panel briefly overlaps them — which is exactly why this was once measured as
+  WORSE than snapping and left undone. What changed is that the panel now fades up from
+  nothing on the same clock, so the overlap happens while it is still near-transparent.
+  Tiling it properly (clipping the growing row to `h0 + Δ·f`, the drawer's trick) needs Δ
+  measured across the commit and a clip the ResizeObserver can't see; still a design
+  project, and this is the cheap 90%.
 - **Drag** (`drag.ts` + `dragGesture.ts`): `projectDrop` is the pure port of the Swift
   projection (gap by `midY <= pointerY`, depth band `[minDepth, prev.depth+1]`, divider
   can't parent, drill floor 1). Frames come from `virtualizer.measurementsCache`

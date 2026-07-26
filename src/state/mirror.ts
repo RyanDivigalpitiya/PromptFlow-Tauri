@@ -108,6 +108,11 @@ export interface StructureChange {
   moved: string[];
   /** isCompleted flipped — a visibility change under hide-completed, a restyle otherwise. */
   completionFlips: string[];
+  /** `kind` changed (⌘1/⌘2/⌘3/⌘4, the ⋯ menu, ⌘Z, a remote window). Moves no row in the
+   * FLATTEN — which is why it is NOT `structural` — but it changes the row's own HEIGHT
+   * (a prompt panel is taller than a text line, a divider shorter), so everything below
+   * it has to slide rather than jump. The animation layer's only notice of it. */
+  kindFlips: string[];
 }
 
 /** Wrapper around a delta's structural notification, installed by the animation layer so
@@ -148,6 +153,7 @@ function applyDelta(delta: Delta) {
   const inserted: string[] = [];
   const moved: string[] = [];
   const completionFlips: string[] = [];
+  const kindFlips: string[] = [];
   /** Records whose map entries are dropped in publish(), not here — see the note there. */
   const pendingDeletes: string[] = [];
   for (const op of delta.ops) {
@@ -179,6 +185,10 @@ function applyDelta(delta: Delta) {
         completionFlips.push(rec.id);
         if (rec.parent) touched.push(rec.parent);
       }
+      // Deliberately NOT `structural`: the flatten is byte-identical across a kind change,
+      // so a structure notify would recompute it for nothing. It still has to reach the
+      // seam, which is why the dispatch below tests this list separately.
+      if (old && old.kind !== rec.kind) kindFlips.push(rec.id);
       if (old && old.isHighlighted !== rec.isHighlighted) {
         // The highlight-ancestor breadcrumb is computed over the whole forest.
         structural = true;
@@ -220,7 +230,8 @@ function applyDelta(delta: Delta) {
     if (deleted.size > 0) deletedHooks.forEach((h) => h(deleted));
     if (structural) notifyStructure();
   };
-  if (structural) {
+  // A kind change is not structural but still reaches the seam — it resizes a row.
+  if (structural || kindFlips.length > 0) {
     structureCommit(
       {
         origin: delta.origin,
@@ -230,6 +241,7 @@ function applyDelta(delta: Delta) {
         reparented,
         moved,
         completionFlips,
+        kindFlips,
       },
       publish,
     );

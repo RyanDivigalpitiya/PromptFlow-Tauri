@@ -88,6 +88,7 @@ export function cssDurationMs(name: string, fallback: number): number {
 function animDurationMs(): number {
   if (reordering) return cssDurationMs("--reorder-anim-dur", COLLAPSE_ANIM_MS);
   if (glideRoots !== null) return cssDurationMs("--glide-anim-dur", COLLAPSE_ANIM_MS);
+  if (kindReflow) return cssDurationMs("--kind-anim-dur", COLLAPSE_ANIM_MS);
   return cssDurationMs("--collapse-anim-dur", COLLAPSE_ANIM_MS);
 }
 
@@ -104,6 +105,11 @@ let drawerShowing = false;
 /** The live animation is a pure REORDER — nothing entered, nothing left, rows just
  * traded places (⌥↑/↓). Retimes the reflow to `--reorder-anim-dur`/`-ease`. */
 let reordering = false;
+/** The live animation is a KIND reflow — no row moved in the flatten, but one row's own
+ * HEIGHT changed and everything below it slides. Retimes the reflow to the morph's clock,
+ * `--kind-anim-*`, so the panel materialising and the list opening for it read as one
+ * event. */
+let kindReflow = false;
 /** The row id the mount band hangs off. For a collapse/expand toggle and the tab glide
  * it is the toggled/moved NODE and the band starts after its child block; for the
  * enter/leave/reorder paths it is a SURVIVING row and the band starts AT it. Null for
@@ -164,6 +170,11 @@ export function isReordering(): boolean {
  * on one too, or the row travels along a curve instead of a straight line. */
 export function isGliding(): boolean {
   return animating && glideRoots !== null;
+}
+/** True while a kind reflow is live — OutlineView puts `.rows-kind` on `.outline-inner`
+ * for it, retiming the row reflow onto `--kind-anim-*`. */
+export function isKindReflow(): boolean {
+  return animating && kindReflow;
 }
 /** True while an expand animation is live AND this row was NOT present before the
  * toggle — i.e. it should play the entrance. Always false during a collapse. */
@@ -253,6 +264,11 @@ export interface AnimEnv {
   measureAt: (i: number) => { start: number; end: number } | undefined;
   totalSize: () => number;
   rows: () => RenderRow[];
+  /** Hand the virtualizer these rows' CURRENT DOM heights right now, instead of waiting
+   * for its ResizeObserver. Only the kind reflow needs it: that is the one animation whose
+   * trigger changes a row's own height, and the RO round trip cost two frames before the
+   * rows below began to move — enough to read as the list reacting late to the panel. */
+  remeasure: (rowIds: readonly string[]) => void;
 }
 const EMPTY_ENV: AnimEnv = {
   inner: null,
@@ -260,6 +276,7 @@ const EMPTY_ENV: AnimEnv = {
   measureAt: () => undefined,
   totalSize: () => 0,
   rows: () => [],
+  remeasure: () => {},
 };
 let env: AnimEnv = EMPTY_ENV;
 
@@ -536,6 +553,7 @@ export function endAnimNow(): void {
     animating = false;
     drawerShowing = false;
     reordering = false;
+    kindReflow = false;
     prevOrder = new Map();
     animAnchorId = null;
     animAnchorSkipBlock = true;
@@ -571,6 +589,7 @@ export function runCollapseAnim(
   prevOrder = new Map(prevRows.map((r, i) => [r.id, i]));
   mode = m;
   reordering = false;
+  kindReflow = false;
   // A drawer needs one parent to hang off; bulk ops have no single B/H.
   const rootId = roots.length === 1 ? roots[0] : null;
 
@@ -689,6 +708,7 @@ export function runRowsAnim(
   // Nothing entered and nothing left ⇒ rows only traded places (⌥↑/↓). Set BEFORE the
   // teardown timer is scheduled, since animDurationMs() keys off it.
   reordering = d.entering.size === 0 && d.leaving.size === 0;
+  kindReflow = false;
   // On a LEAVE the anchor must sit PAST the removed block, so the band's reach scales
   // with the removed height (see anchorRowId).
   animAnchorId = anchorRowId(
@@ -836,7 +856,24 @@ setStructureCommit((c, publish) => {
     return;
   }
 
-  // 2. Nothing that can move a row ⇒ don't even flatten. This is the ⌘⇧F highlight-flip
+  // 2. KIND change, and nothing that moves a row ⇒ the row's own HEIGHT changed and the
+  //    rows below it must slide. Checked BEFORE the bail below, which would otherwise
+  //    swallow it: a kind change moves nothing in the flatten, so every list here is
+  //    empty. A kind change that arrives WITH real movement (an undo of "convert and
+  //    indent", another window's compound edit) falls through to the normal paths, whose
+  //    reflow already carries the height change with it.
+  if (
+    c.kindFlips.length > 0 &&
+    c.inserted.length === 0 &&
+    c.deleted.size === 0 &&
+    c.moved.length === 0 &&
+    c.completionFlips.length === 0
+  ) {
+    runKindReflow(c.kindFlips, inner, publish);
+    return;
+  }
+
+  // 3. Nothing that can move a row ⇒ don't even flatten. This is the ⌘⇧F highlight-flip
   //    exit: structural (the breadcrumb walk is global), but no row moves.
   if (
     c.inserted.length === 0 &&
@@ -848,7 +885,7 @@ setStructureCommit((c, publish) => {
     return;
   }
 
-  // 3. purgeDeleted resets `drill` INSIDE publish when the drill root dies, replacing the
+  // 4. purgeDeleted resets `drill` INSIDE publish when the drill root dies, replacing the
   //    whole view. That is navigation, not a row change, and the flatten computed here
   //    would be for a doomed view.
   const st = useWindowState.getState();
@@ -857,7 +894,7 @@ setStructureCommit((c, publish) => {
     return;
   }
 
-  // 4. The flatten is a pure function of the ALREADY-MUTATED mirror (upserts are eager,
+  // 5. The flatten is a pure function of the ALREADY-MUTATED mirror (upserts are eager,
   //    and a delete's sibling-list removal is eager too — only the record survives into
   //    publish), so this is byte-exact what OutlineView's memo will produce in commit 2.
   const next = st.drill
@@ -874,6 +911,99 @@ setStructureCommit((c, publish) => {
  * Completed, seed_demo (⌘⌃⇧7, ~11k inserts), a large undo. Publish and snap — cheaper
  * than flattening twice to discover the same thing. */
 const DELTA_MAX_OPS = 400;
+
+/**
+ * KIND REFLOW — a row changed kind, so its own HEIGHT changed (a prompt panel is taller
+ * than a text line by ~18px at fontSize 16; a divider is shorter), and the rows below it
+ * slide instead of jumping.
+ *
+ * This is the ONE path here whose trigger is invisible to the flatten: no row enters,
+ * leaves or moves, `diffRows` reports nothing, and the virtualizer's own measurements are
+ * still the OLD ones when this runs. That is also what makes it the SIMPLEST path — two
+ * commits, no third:
+ *
+ *   1  flags only, rows UNCHANGED  ─ forced reflow ─▶ resolves every row's current
+ *                                                     translateY as its FROM value
+ *   2  the kind change             ─────────────────▶ the row's DOM box changes height;
+ *                                                     the `.vrow` transforms do NOT
+ *   …then the virtualizer's ResizeObserver reports the new height, `resizeItem` rewrites
+ *      every translateY below it, and because that is a SEPARATE style change from (1)
+ *      the transition just runs. The tab glide needs an extra invert commit only because
+ *      it writes its own FROM value; here the browser hands us the split for free.
+ *
+ * The growing row reaches its full height in one paint while the rows below take the
+ * animation to get out of its way, so a prompt's panel overlaps them briefly. That was
+ * measured as WORSE than snapping back when the panel appeared instantly — but the panel
+ * now fades up from nothing over the same clock, so the overlap happens while it is still
+ * near-transparent. A true fix (clipping the growing row to `h0 + Δ·f`, the drawer's
+ * tiling trick) needs Δ measured across the commit and a clip that the ResizeObserver
+ * can't see; that is still a design project, and this is the cheap 90%.
+ */
+function runKindReflow(
+  ids: readonly string[],
+  inner: HTMLElement,
+  publish: () => void,
+) {
+  const rows = env.rows();
+  // Anchor on the TOPMOST changed row that is actually on screen: everything below it
+  // slides, and `mountBand` keeps ~a screenful of those rendered so none of them is
+  // created fresh (and therefore un-transitionable) mid-animation. A changed row that
+  // isn't in the flatten at all — collapsed under a parent, filtered by hide-completed —
+  // moves nothing, so there is nothing to animate.
+  const want = new Set(ids);
+  let anchor: string | null = null;
+  for (const r of rows) {
+    if (r.kind === "node" && want.has(r.nodeId)) {
+      anchor = r.id;
+      break;
+    }
+  }
+  if (!anchor) {
+    publish();
+    return;
+  }
+
+  endAnimNow(); // one owner for `.rows-animating` and the teardown timer
+
+  prevOrder = new Map(rows.map((r, i) => [r.id, i]));
+  // Nothing enters on this path, so "collapse" just means "fade nothing in"; the flatten
+  // is identical either way, which also makes `rowRank` a no-op (no row can change place).
+  mode = "collapse";
+  reordering = false;
+  drawerShowing = false;
+  kindReflow = true;
+  animAnchorId = anchor;
+  animAnchorSkipBlock = false;
+  animating = true;
+
+  // COMMIT 1 — flags only; then resolve that style.
+  flushSync(bump);
+  void inner.offsetHeight;
+
+  // COMMIT 2 — the kind change. The rows' translateYs are untouched by this: the flatten
+  // is identical and the virtualizer still holds the old measurements.
+  flushSync(publish);
+
+  // COMMIT 3 — feed the changed rows' new heights straight to the virtualizer, which
+  // rewrites every translateY below them. Waiting for its ResizeObserver instead works,
+  // but costs two frames (measured), and the rows below then visibly start moving after
+  // the panel has begun fading. This is a separate style change from commit 1's resolved
+  // transform, which is all the transition needs — hence no invert commit.
+  flushSync(() => env.remeasure(ids));
+
+  const dur = animDurationMs();
+  if (import.meta.env.DEV) measureFrames("kind", dur + 120);
+  // Extra slack on top of the usual buffer: unlike every other path here the transition
+  // does not start in THIS task — it waits on the ResizeObserver and the re-render that
+  // follows it. Tearing `.rows-animating` off before that lands would leave the rows to
+  // snap, which is the whole thing being fixed. Slack costs only a few idle ms with the
+  // class still on.
+  endTimer = setTimeout(endAnimNow, dur + TEARDOWN_BUFFER_MS + KIND_REFLOW_SLACK_MS);
+}
+
+/** Grace for the ResizeObserver round trip before the kind reflow's teardown — see the
+ * note at the end of `runKindReflow`. */
+const KIND_REFLOW_SLACK_MS = 120;
 
 /** The tab glide's three-commit sequence (see the doc comment above the seam). */
 function runGlide(

@@ -297,6 +297,19 @@ body {
   transition-timing-function: var(--reorder-anim-ease);
 }
 
+/* …and so does a KIND change, where no row MOVES at all — one row's own height changes
+   (a prompt panel is taller than a text line by ~18px at fontSize 16, a divider shorter)
+   and everything below it slides out of the way. Retimed onto the morph's own clock so
+   the panel materialising and the list opening for it are one event rather than two
+   overlapping ones. Unlike every other rule here the transition is not started by the
+   commit that arms it: the virtualizer's ResizeObserver turns the row's new height into
+   new translateYs a beat later, and that is the separate style change the transition
+   runs from (see runKindReflow). */
+.rows-animating.rows-kind .vrow:not(.entering-row) {
+  transition-duration: var(--kind-anim-dur);
+  transition-timing-function: var(--kind-scale-ease);
+}
+
 /* …and so does a Tab glide, which is the OTHER animation here that moves rows rather
    than opening a distance. This is the vertical half of the glide: it must be retimed
    in lockstep with the horizontal half (rule 1b), or the row's two axes finish at

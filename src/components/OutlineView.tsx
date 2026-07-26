@@ -23,6 +23,7 @@ import {
   isEntering,
   isGlideArming,
   isGliding,
+  isKindReflow,
   isNewRow,
   isReordering,
   publishAnimEnv,
@@ -226,6 +227,28 @@ export function OutlineView() {
     measureAt: (i) => virtualizer.measurementsCache[i],
     totalSize: () => virtualizer.getTotalSize(),
     rows: () => rows,
+    // `resizeItem`, NOT `measureElement`: the latter is the row `ref`'s entry point, and
+    // when it is called without a ResizeObserver entry it deliberately returns the CACHED
+    // size for an already-measured row (virtual-core's own guard) — so it read the old
+    // height back, delta 0, and changed nothing. `resizeItem` takes the size we measured.
+    // `Math.round` of the border-box height is exactly what the observer path would report
+    // (`Math.round(borderBoxSize.blockSize)`), so when the real observation lands a moment
+    // later it is a no-op instead of a second, competing move.
+    // Top-to-bottom, since resizing one row shifts every row after it.
+    remeasure: (rowIds) => {
+      const inner = innerRef.current;
+      if (!inner) return;
+      const want = new Set(rowIds);
+      for (let i = 0; i < rows.length; i++) {
+        if (!want.has(rows[i].id)) continue;
+        const el = inner.querySelector<HTMLElement>(
+          `:scope > .vrow[data-index="${i}"]`,
+        );
+        if (el) {
+          virtualizer.resizeItem(i, Math.round(el.getBoundingClientRect().height));
+        }
+      }
+    },
   });
 
   // Geometry for the drag projection: every flattened row's content-space extent
@@ -282,6 +305,7 @@ export function OutlineView() {
           (isAnimating() ? " rows-animating" : "") +
           (isReordering() ? " rows-reorder" : "") +
           (isGliding() ? " rows-glide" : "") +
+          (isKindReflow() ? " rows-kind" : "") +
           (isDrawerShowing() ? " drawer-showing" : "")
         }
         style={{ height: virtualizer.getTotalSize() }}
