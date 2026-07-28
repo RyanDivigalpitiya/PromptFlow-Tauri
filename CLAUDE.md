@@ -22,7 +22,7 @@ scripts/dev.sh [store.sqlite]  # tauri dev against an ISOLATED store (default /t
 scripts/build.sh             # release bundle -> src-tauri/target/release/bundle/macos/PromptFlow.app
 scripts/verify.sh            # launch smoke test of the release build (throwaway store, polls for a window)
 npm test                     # vitest: 8 suites / 61 tests (resolveKey, wrap, bold, runs, projectDrop, projectSelectionHead, rowBands, kindMorph)
-cd src-tauri && cargo test   # 12 tests (store mutations/undo, archive round-trip + collect)
+cd src-tauri && cargo test   # 15 tests (store mutations/undo, archive round-trip + collect)
 npx tsc --noEmit             # typecheck (strict; noUnusedLocals/Parameters)
 npm run dev & node scripts/qa.mjs [outDir]   # headless visual QA in WebKit (see below)
 ```
@@ -57,11 +57,20 @@ npm run dev & node scripts/qa.mjs [outDir]   # headless visual QA in WebKit (see
   silently no-ops reads as a broken feature. Prefer the harness below.
 - **Headless visual QA** (`scripts/qa.mjs`, Playwright WebKit = the WKWebView's engine):
   boots the Vite dev server with a STUBBED `window.__TAURI_INTERNALS__` (invoke answers
-  `snapshot` from a fixture tree; mutations are recorded, never applied), so the
+  `snapshot` from a fixture tree; mutations are recorded, never applied — the ONE
+  exception is `toggle_completed`, which flips the local copy and broadcasts a real
+  `store://delta` synchronously inside the invoke, as the Rust command does, because a
+  completion ANIMATION has nothing to show unless the second state actually arrives
+  through the mirror), so the
   components, stylesheet and layout constants under test are the shipping ones. Asserts
   geometry + per-frame transition values, writes PNGs, reaches `:hover`/`:focus`, real
   keys and real mouse drags (it is how the multi-select sweep is covered), touches no
-  window. Playwright resolves from the npx cache, NOT a project
+  window. Sections that need their own tree open a SECOND page with its own fixture
+  (the completion section does) — the sweep tests anchor on "the last row" and on the
+  empty background under the list, so growing the main fixture breaks them. Deterministic
+  filmstrips come from clicking, then pausing `document.getAnimations()` and scrubbing
+  `currentTime`; screenshotting in real time perturbs the timing it is sampling.
+  Playwright resolves from the npx cache, NOT a project
   dependency (`npx playwright install webkit` once). Does NOT cover anything Rust-side
   (menus, store, deltas) or WebKit-in-Cocoa (macOS text substitution — see the RowEditor
   entry; `isControlledByAutomation()` disables it).
@@ -409,9 +418,10 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   reaches it). Driven by the fraction VALUE, never a "just changed" flag, so it covers
   remote windows / ⌘Z / block toggles / auto-archive — and because a transition needs a
   resolved previous value it can never self-start on mount, so a wedge scrolling back
-  into view paints at its true fraction. Keep `Wedge` a COMPONENT: in the checkbox branch
-  it alternates with the check mark at the same child index, and React never reconciles a
-  component element with a host one. Timing is `--wedge-anim-dur` (320ms ease-out),
+  into view paints at its true fraction. Keep `Wedge` a COMPONENT: it and the check mark
+  are two host `<path>`s over one circle, and React never reconciles a component element
+  with a host one — the guard that stops a check's resolved dashoffset leaking into a
+  wedge if a later edit puts them back at one child index. Timing is `--wedge-anim-dur` (320ms ease-out),
   deliberately NOT `--collapse-anim-dur` — that one gets dialled past 500ms to debug the
   drawer. Unlike everything else here it is a main-thread repaint (WebKit composites only
   transform/opacity/filter), which at 14×14px is free.
@@ -429,6 +439,7 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   direction silently lost its `r` transition while the shrink kept it (shipped in this
   change, caught by measuring computed style, fixed). Bullets are NOT covered: a leaf dot
   is an HTML span and a parent ring an svg, so there is no single geometry to interpolate.
+- **Completed-parent tick** (`Glyphs.tsx` checkbox branch; CSS `--check-anim-*` / `.wedge-checked`): a checkbox PARENT that is itself completed draws the same drawCheck-animated tick a leaf does — the pie tracks the CHILDREN, the tick tracks THIS node, so they are two independent child slots and never a ternary between them (which is also what keeps the `Wedge` component off the check's host `<path>` index). The tick is drawn against the node's OWN circle diameter and re-centred in the fixed box (`co = (box − d)/2`), so a parent's mark sits in its 16px ring exactly as a leaf's does in its 13px one — measured ink/diameter 0.46 in both (`qa.mjs`), at the same 1.6 stroke the 1.5 border gets. For a leaf `d === leaf`, i.e. byte-identical to before. The pie does not unmount when the tick appears — it stays mounted at `opacity: 0` (`suppressed`) purely so the swap can be a TRANSITION: unmounting takes a full green disc off the screen one frame before anything replaces it, and a transition with no resolved previous value never runs at all (the same rule the wedge's fraction relies on — which is also why a completed parent scrolling back into the virtualizer's window paints an empty circle instead of fading one in). It rides `--check-anim-*`, drawCheck's own clock and delay, NOT `--wedge-anim-*`: the fill being replaced by the tick is ONE event with the tick drawing, whereas the wedge clock times the pie tracking its children. Both are green, so the tick is invisible against the fill it draws into for the first third and emerges as the fill goes — the pie reads as CONDENSING into the check. The ring's own colour still means "all children done" (`allDone`) and is deliberately independent of the node's own completion, so a completed parent with work left under it looks exactly like a completed leaf, white ring and all. Un-checking drops the tick in one frame (exactly as a leaf's does — it has never had an exit animation) and runs the pie's transition backwards; moving the 50ms delay off that direction was measured as only 3 frames better and left un-done. NOT covered: a completed node gaining its first child (or losing its last) resizes the tick in one frame while the circle's `r` animates — the tick's `d` is an attribute, the same wall the wedge's own `d` hit; it was a full disappearance before this change, so it is strictly better, not a regression.
 - **Glyph kind morph** (`lib/kindMorph.ts` truth table + `useKindMorph`/`Glyph` in
   `Glyphs.tsx`; CSS `.glyph-layer` / `.glyph-prompt-ghost` / `.prompt-panel-ghost`):
   ⌘1/⌘2/⌘3 cross-animate TWO

@@ -87,12 +87,27 @@ const SNAPSHOT = { rev: 1, nodes: NODES, canUndo: false, canRedo: false };
 /** Runs BEFORE any app code: stands up just enough of `window.__TAURI_INTERNALS__` for
  * @tauri-apps/api (invoke + the event plugin's callback registry + window metadata).
  * Mutating commands are answered with an empty MutationOut and logged, never applied —
- * this harness renders states, it does not exercise the store (that is `cargo test`). */
+ * this harness renders states, it does not exercise the store (that is `cargo test`).
+ *
+ * ONE exception: `toggle_completed` flips the flag on the local snapshot copy and
+ * broadcasts a real `store://delta`, synchronously inside the invoke exactly as the Rust
+ * command does. The completion glyph is an ANIMATION between two store states, so there
+ * is nothing to look at unless the second state actually arrives — and going through the
+ * delta path means the mirror, the row's re-render and `markCompleting` all run for real
+ * rather than being simulated. Still no store semantics: no spawn-a-sibling, no undo. */
 function tauriStub(snapshot) {
   const calls = [];
   window.__PF_QA_CALLS = calls;
   const cbs = new Map();
   let next = 1;
+  // Mutable copy — the fixture the page was handed is the initial state, not the truth.
+  const nodes = new Map(snapshot.nodes.map((n) => [n.id, { ...n }]));
+  let rev = snapshot.rev;
+  /** event name -> transformCallback ids, so a delta can reach `api.ts`'s listener. */
+  const subs = new Map();
+  const emit = (event, payload) => {
+    for (const id of subs.get(event) ?? []) window[`_${id}`]?.({ event, id, payload });
+  };
   window.__TAURI_INTERNALS__ = {
     metadata: {
       currentWindow: { label: "main" },
@@ -115,10 +130,35 @@ function tauriStub(snapshot) {
     convertFileSrc: (p) => p,
     async invoke(cmd, args) {
       calls.push({ cmd, args });
-      if (cmd === "snapshot") return snapshot;
+      if (cmd === "snapshot")
+        return { ...snapshot, rev, nodes: [...nodes.values()] };
       if (cmd === "get_settings") return { autoArchive: false };
       if (cmd === "log_msg") return null;
+      if (cmd === "plugin:event|listen") {
+        if (!subs.has(args.event)) subs.set(args.event, new Set());
+        subs.get(args.event).add(args.handler);
+        return args.handler;
+      }
+      if (cmd === "plugin:event|unlisten") {
+        subs.get(args.event)?.delete(args.eventId);
+        return null;
+      }
       if (cmd.startsWith("plugin:event|")) return 0;
+      if (cmd === "toggle_completed") {
+        const n = nodes.get(args.node ?? args.nodeId ?? args.id);
+        if (n) {
+          n.isCompleted = !n.isCompleted;
+          if (n.isCompleted) n.isHighlighted = false;
+          n.completedAt = n.isCompleted ? Date.now() : null;
+          emit("store://delta", {
+            rev: ++rev,
+            origin: "main",
+            ops: [{ type: "upsert", node: { ...n } }],
+            canUndo: true,
+            canRedo: false,
+          });
+        }
+      }
       return { newNode: null, expand: [], moved: false };
     },
   };
@@ -453,8 +493,166 @@ await page.keyboard.press("Escape");
 await page.mouse.up();
 await page.waitForTimeout(80);
 
+// ---- 5. Completion glyph: a parent's tick REPLACES its progress pie ----------
+// A checkbox parent used to draw only the pie, so completing the node itself changed
+// nothing inside the circle. Now it draws the same tick a leaf does, at its own circle's
+// proportions, and the pie fades out from under it on drawCheck's clock.
+//
+// Its own page, with its own fixture: the sweep tests above anchor on "the last row" and
+// on the empty background under the list, so growing the main fixture would break them.
+const CHECK_NODES = [
+  node("c1", null, 0, "Parent, half done", "checkbox"),
+  node("c1a", "c1", 0, "done child", "checkbox", { isCompleted: true, completedAt: T }),
+  node("c1b", "c1", 1024, "open child", "checkbox"),
+  node("c2", null, 1024, "Parent, all done", "checkbox"),
+  node("c2a", "c2", 0, "done child A", "checkbox", { isCompleted: true, completedAt: T }),
+  node("c2b", "c2", 1024, "done child B", "checkbox", { isCompleted: true, completedAt: T }),
+  node("c3", null, 2048, "Parent already completed", "checkbox", {
+    isCompleted: true,
+    completedAt: T,
+  }),
+  node("c3a", "c3", 0, "its child", "checkbox", { isCompleted: true, completedAt: T }),
+  node("c4", null, 3072, "Leaf already completed", "checkbox", {
+    isCompleted: true,
+    completedAt: T,
+  }),
+  node("c5", null, 4096, "Leaf, open", "checkbox"),
+];
+
+const cp = await b.newPage({
+  viewport: { width: 720, height: 620 },
+  deviceScaleFactor: 2,
+  colorScheme: "dark",
+});
+cp.on("pageerror", (e) => errors.push(String(e)));
+cp.on("console", (m) => {
+  if (m.type() === "error") errors.push(m.text());
+});
+await cp.addInitScript(tauriStub, {
+  rev: 1,
+  nodes: CHECK_NODES,
+  canUndo: false,
+  canRedo: false,
+});
+await cp.addInitScript(() =>
+  localStorage.setItem(
+    "pf.win.main",
+    JSON.stringify({
+      collapsed: [],
+      hideCompleted: false,
+      fontSize: 16,
+      drill: null,
+      focusPaneExpanded: false,
+      focusPaneLayout: "top",
+      focusSidebarWidth: 260,
+      focusTopHeight: "auto",
+    }),
+  ),
+);
+await cp.goto(URL_, { waitUntil: "domcontentloaded" });
+await cp.waitForSelector(".node-row", { timeout: 15000 });
+await cp.addStyleTag({ content: "html,body{background:#101014 !important}" });
+await cp.waitForTimeout(300);
+
+const cRow = (text) => cp.locator(".node-row", { hasText: text }).first();
+/** The glyph's numbers: circle radius, the pie's opacity + fill, and the tick's own
+ * geometry — measured from the rendered SVG, so it covers the path maths too. */
+const glyphState = (text) =>
+  cRow(text).evaluate((el) => {
+    const circle = el.querySelector(".glyph-circle");
+    const wedge = el.querySelector(".glyph-wedge");
+    const check = el.querySelector(".glyph-check");
+    const num = (v) => (v == null ? null : +parseFloat(v).toFixed(3));
+    return {
+      r: circle ? num(getComputedStyle(circle).r) : null,
+      wedge: wedge
+        ? {
+            opacity: num(getComputedStyle(wedge).opacity),
+            offset: num(getComputedStyle(wedge).strokeDashoffset),
+          }
+        : null,
+      check: check
+        ? {
+            // Ink box in the svg's own user units == px (no viewBox), so this is
+            // directly comparable between a leaf's circle and a parent's.
+            w: num(check.getBBox().width),
+            h: num(check.getBBox().height),
+            cx: num(check.getBBox().x + check.getBBox().width / 2),
+            cy: num(check.getBBox().y + check.getBBox().height / 2),
+            offset: num(getComputedStyle(check).strokeDashoffset),
+            stroke: getComputedStyle(check).stroke,
+          }
+        : null,
+    };
+  });
+
+const restDoneParent = await glyphState("Parent already completed");
+const restDoneLeaf = await glyphState("Leaf already completed");
+const restOpenParent = await glyphState("Parent, all done");
+await shot("complete-rest", cp.locator(".app-body"));
+
+/** Click a row's glyph and sample the two interpolating numbers every frame. */
+async function toggleAndSample(text, ms = 520) {
+  const row = cRow(text);
+  const sampling = row.evaluate(
+    (el, ms) =>
+      new Promise((res) => {
+        const out = [];
+        const t0 = performance.now();
+        const tick = () => {
+          const w = el.querySelector(".glyph-wedge");
+          const c = el.querySelector(".glyph-check");
+          out.push({
+            t: Math.round(performance.now() - t0),
+            w: w ? +parseFloat(getComputedStyle(w).opacity).toFixed(3) : null,
+            c: c ? +parseFloat(getComputedStyle(c).strokeDashoffset).toFixed(3) : null,
+          });
+          if (performance.now() - t0 < ms) requestAnimationFrame(tick);
+          else res(out);
+        };
+        requestAnimationFrame(tick);
+      }),
+    ms,
+  );
+  await row.locator(".glyph-slot").first().click();
+  return await sampling;
+}
+
+const fullPie = await toggleAndSample("Parent, all done");
+const partPie = await toggleAndSample("Parent, half done");
+await cp.waitForTimeout(200);
+const afterFull = await glyphState("Parent, all done");
+const afterPart = await glyphState("Parent, half done");
+
+// Un-checking runs the same transition backwards — the tick goes, the pie comes back.
+const unchecked = await toggleAndSample("Parent already completed");
+await cp.waitForTimeout(200);
+const afterUncheck = await glyphState("Parent already completed");
+await shot("complete-toggled", cp.locator(".app-body"));
+
+// A DETERMINISTIC filmstrip: click, then pause every running animation/transition and
+// scrub it. Screenshotting in real time perturbs the very timing it is sampling.
+await cp.reload({ waitUntil: "domcontentloaded" });
+await cp.waitForSelector(".node-row", { timeout: 15000 });
+await cp.addStyleTag({ content: "html,body{background:#101014 !important}" });
+await cp.waitForTimeout(250);
+const filmRow = cRow("Parent, all done");
+await filmRow.locator(".glyph-slot").first().click();
+await cp.evaluate(() => document.getAnimations().forEach((a) => a.pause()));
+const paused = await cp.evaluate(() => document.getAnimations().length);
+for (const t of [0, 60, 120, 180, 240, 350]) {
+  await cp.evaluate((t) => {
+    for (const a of document.getAnimations()) a.currentTime = t;
+  }, t);
+  await shot(`complete-frame-${String(t).padStart(3, "0")}`, filmRow);
+}
+
 // ---- Report ------------------------------------------------------------------
 const eq = (a, b, tol = 0.6) => Math.abs(a - b) <= tol;
+const distinct = (xs) => new Set(xs.filter((v) => v != null)).size;
+// The tick's ink as a fraction of its own circle's diameter — the one number that says
+// "the same check mark" across two circle sizes.
+const inkRatio = (g) => (g.check ? +(g.check.w / (2 * g.r + 2)).toFixed(3) : null);
 const checks = [
   ["divider at rest: rule starts at the row's content edge", eq(rest.ruleLeft, rest.contentLeft)],
   ["divider at rest: actions clip is 0 wide", rest.clipW === 0],
@@ -490,6 +688,25 @@ const checks = [
   ["sweep: the editor's own text selection is gone with it", sweepFromEditor.native === ""],
   ["sweep: a background press anchors on the last row", JSON.stringify(sweepFromBackground.members) === '["Prompt drafts","Tail node"]' && sweepFromBackground.native === ""],
   ["sweep: a glyph press is still the reorder drag", glyphDrag.selected === 0 && glyphDrag.ghost === 1],
+  // --- completion glyph ---
+  ["complete: a completed PARENT draws a check mark", restDoneParent.check !== null],
+  ["complete: an incomplete parent draws none", restOpenParent.check === null],
+  ["complete: its pie is mounted but invisible", restDoneParent.wedge?.opacity === 0],
+  ["complete: an incomplete parent's pie is visible", restOpenParent.wedge?.opacity === 1],
+  ["complete: the parent's circle stays the PARENT size", restDoneParent.r > restDoneLeaf.r],
+  ["complete: the tick is bigger on the bigger circle", restDoneParent.check.w > restDoneLeaf.check.w],
+  ["complete: …by the SAME proportion of its circle", eq(inkRatio(restDoneParent), inkRatio(restDoneLeaf), 0.02)],
+  ["complete: the tick is centred in the glyph box", eq(restDoneParent.check.cx, restDoneLeaf.check.cx, 0.6) && eq(restDoneParent.check.cy, restDoneLeaf.check.cy, 0.6)],
+  ["complete: the tick is the completion green", restDoneParent.check.stroke === restDoneLeaf.check.stroke],
+  ["complete: a resting tick is fully drawn (no self-start)", restDoneParent.check.offset === 0],
+  ["complete: checking a parent strokes the tick in (>4 frames)", distinct(fullPie.map((f) => f.c)) > 4],
+  ["complete: …and fades the pie out under it (>4 frames)", distinct(fullPie.map((f) => f.w)) > 4],
+  ["complete: the pie starts opaque and ends invisible", fullPie[0].w === 1 && afterFull.wedge.opacity === 0],
+  ["complete: the tick ends fully drawn", afterFull.check?.offset === 0],
+  ["complete: a PARTIAL pie fades the same way", distinct(partPie.map((f) => f.w)) > 4 && afterPart.wedge.opacity === 0],
+  ["complete: un-checking removes the tick", afterUncheck.check === null],
+  ["complete: …and brings the pie back, interpolated", distinct(unchecked.map((f) => f.w)) > 4 && afterUncheck.wedge.opacity === 1],
+  ["complete: the pie and the tick are both live animations", paused >= 2],
   ["no page errors", errors.length === 0],
 ];
 console.log("\nrest    :", JSON.stringify(rest));
@@ -500,6 +717,10 @@ console.log("bullet  :", JSON.stringify(bullet));
 console.log("ink     :", JSON.stringify(inkOffsets), "(px from the row centre; + was +1.33 before the padding fix)");
 console.log("arrows  :", JSON.stringify(arrows));
 console.log("sweep   :", JSON.stringify({ sweepSiblings, sweepClamp, sweepUp, sweepFromEditor, sweepFromBackground, glyphDrag }));
+console.log("complete:", JSON.stringify({ restDoneParent, restDoneLeaf, restOpenParent, afterFull, afterPart, afterUncheck }));
+console.log("  ratio :", "parent", inkRatio(restDoneParent), "leaf", inkRatio(restDoneLeaf), "(tick ink / circle diameter)");
+console.log("  pie   :", fullPie.map((f) => `${f.t}:${f.w}`).join(" "));
+console.log("  tick  :", fullPie.map((f) => `${f.t}:${f.c}`).join(" "));
 if (errors.length) console.log("errors  :", errors.slice(0, 5));
 console.log();
 let failed = 0;

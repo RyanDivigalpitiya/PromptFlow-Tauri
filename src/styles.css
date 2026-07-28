@@ -72,6 +72,18 @@
 
   --wedge-anim-dur: 320ms;
   --wedge-anim-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  /* The check mark STROKING ITSELF IN — drawCheck's clock, and shared by the one other
+     thing that happens in the same instant: a completed PARENT's progress pie fading out
+     from under its own tick. Those two are one event (the fill is replaced BY the tick),
+     so they must not drift apart; before this var they were two copies of `0.3s 0.05s
+     ease`, exactly the desync hazard --collapse-anim-dur's teardown comment describes.
+     NOT --wedge-anim-*: that clock times the pie tracking its CHILDREN (and the circle
+     growing with them), which is a different event from this node being completed.
+     The delay is what lets glyphPop's scale-up start first, so the tick draws into a
+     glyph that is already moving. */
+  --check-anim-dur: 0.3s;
+  --check-anim-delay: 0.05s;
+  --check-anim-ease: ease;
   /* Glyph KIND morph (⌘1/⌘2/⌘3) — the outgoing glyph collapsing while the incoming one
      grows out of the same point. Its own clock for the same reason the wedge has one:
      this is a 14px glyph event in the COMPLETION family, not a layout distance being
@@ -608,9 +620,12 @@ body {
   }
 }
 
+/* Every checkbox that is completed draws this tick — LEAF or PARENT. A parent's is the
+   same mark at its own (larger) circle's proportions; see Glyphs.tsx. */
 .node-row.just-completed .glyph-check {
   stroke-dasharray: 1;
-  animation: drawCheck 0.3s 0.05s ease both;
+  animation: drawCheck var(--check-anim-dur) var(--check-anim-delay)
+    var(--check-anim-ease) both;
 }
 
 /* ---------- Parent progress wedge ----------
@@ -632,7 +647,24 @@ body {
   stroke-dasharray: 1;
   transition:
     stroke-dashoffset var(--wedge-anim-dur) var(--wedge-anim-ease),
-    stroke var(--wedge-anim-dur) var(--wedge-anim-ease);
+    stroke var(--wedge-anim-dur) var(--wedge-anim-ease),
+    opacity var(--check-anim-dur) var(--check-anim-delay) var(--check-anim-ease);
+}
+
+/* The node itself is completed, so its CHECK MARK is the glyph now and the pie steps
+   aside. The path is still mounted (Glyphs.tsx `suppressed`) purely so this can be a
+   TRANSITION: unmounting it would take the fill away in a single frame, and — the same
+   rule the wedge's own comment states — a transition with no resolved previous value
+   never runs at all. Mounted-at-0 is also why a completed parent scrolling back into the
+   virtualizer's window paints an empty circle rather than fading one in.
+
+   On drawCheck's clock, delay included, so the disc clears exactly as the tick lands:
+   both are green, so for the first ~third the tick is drawing into fill it can't be seen
+   against, and it emerges as the fill goes. That reads as the pie CONDENSING into the
+   check, which is the point — an instant unmount pops a full green disc off the screen
+   50ms before anything replaces it. Un-checking runs the same transition backwards. */
+.glyph-wedge.wedge-checked {
+  opacity: 0;
 }
 
 /* A checkbox's circle GROWS when the node gains its first child (leaf 11.5·s → parent

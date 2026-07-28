@@ -39,16 +39,27 @@ function ringPath(c: number, r: number): string {
  * window, ⌘Z, a block toggle, the auto-archive sweep), all of which a flag set in
  * `controller.toggleCompleted` would miss.
  *
- * Keep this a COMPONENT, not an inlined `<path>`: in the checkbox branch it alternates
- * with the check mark at the same child index, and React never reconciles a component
- * element with a host element — so a check's resolved dashoffset can't leak into a
- * wedge. Inlining it back would reintroduce that hazard.
+ * Keep this a COMPONENT, not an inlined `<path>`: it and the check mark are two host
+ * `<path>`s over the same circle, and React never reconciles a component element with a
+ * host one — so a check's resolved dashoffset can't leak into a wedge even if a later
+ * edit puts them back at one child index. Inlining it would drop that guard.
+ *
+ * `suppressed` = the node is itself completed, so its own check mark is showing INSTEAD
+ * of the pie. The path stays MOUNTED and merely fades (see `.wedge-checked` in
+ * styles.css) — unmounting it would pop the fill away in one frame, and a transition
+ * needs a resolved previous value to run at all.
  */
-function Wedge(p: { c: number; radius: number; fraction: number; color: string }) {
+function Wedge(p: {
+  c: number;
+  radius: number;
+  fraction: number;
+  color: string;
+  suppressed?: boolean;
+}) {
   const f = Math.max(0, Math.min(1, p.fraction));
   return (
     <path
-      className="glyph-wedge"
+      className={"glyph-wedge" + (p.suppressed ? " wedge-checked" : "")}
       d={ringPath(p.c, p.radius / 2)}
       // Normalizes the dash units against the length the RASTERIZER measures, so the
       // dash closes exactly at f=1 — a literal 2πr would depend on WebKit's arc→bezier
@@ -302,9 +313,11 @@ function GlyphInk(
     const d = p.isParent ? box : leaf;
     const c = box / 2;
     const r = d / 2 - 1;
-    // The check mark is a LEAF-only glyph, so it keeps the leaf geometry and is merely
-    // re-centred in the (larger) box.
-    const co = (box - leaf) / 2;
+    // The check mark is drawn against THIS node's own circle diameter and re-centred in
+    // the (fixed) box, so a parent's tick sits in its larger ring exactly as a leaf's
+    // does in the smaller one — same proportions, same 1.6 stroke as the 1.5 border it
+    // shares the glyph with. For a leaf d === leaf, i.e. byte-identical to before.
+    const co = (box - d) / 2;
     const border = accented
       ? p.highlightColor
       : allDone
@@ -333,30 +346,39 @@ function GlyphInk(
             style={{ stroke: border, r: `${r}px` } as CSSProperties}
             strokeWidth={1.5}
           />
-          {p.isParent ? (
+          {/* Two independent slots, never a ternary between them: the pie tracks the
+              CHILDREN, the tick tracks THIS node, and a completed parent shows both for
+              the length of one cross-fade. Keeping them at fixed child indices is also
+              what stops React ever reconciling the `Wedge` component against the check's
+              host `<path>` (the rule the Wedge comment states). */}
+          {p.isParent && (
             // A checkbox parent fills with the SAME wedge as a bullet parent —
-            // minus the centre dot, so it reads as a plain pie.
+            // minus the centre dot, so it reads as a plain pie. Once the node is itself
+            // completed the tick REPLACES the fill: the pie fades out (it is still
+            // mounted, see `suppressed`) on drawCheck's own clock, so the green disc
+            // condenses into the green tick instead of blinking out from under it.
             <Wedge
               key="wedge"
               c={c}
               radius={r - 1.5}
               fraction={p.completedFraction}
               color={allDone ? Theme.completeColor : "rgba(255,255,255,0.55)"}
+              suppressed={p.isCompleted}
             />
-          ) : (
-            p.isCompleted && (
-              <path
-                key="check"
-                className="glyph-check"
-                pathLength={1}
-                d={`M ${co + leaf * 0.28} ${co + leaf * 0.52} L ${co + leaf * 0.45} ${co + leaf * 0.68} L ${co + leaf * 0.74} ${co + leaf * 0.32}`}
-                fill="none"
-                stroke={Theme.completeColor}
-                strokeWidth={1.6}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            )
+          )}
+          {/* Drawn AFTER the wedge, so it paints over the fading pie. */}
+          {p.isCompleted && (
+            <path
+              key="check"
+              className="glyph-check"
+              pathLength={1}
+              d={`M ${co + d * 0.28} ${co + d * 0.52} L ${co + d * 0.45} ${co + d * 0.68} L ${co + d * 0.74} ${co + d * 0.32}`}
+              fill="none"
+              stroke={Theme.completeColor}
+              strokeWidth={1.6}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
           )}
         </svg>
       </span>
