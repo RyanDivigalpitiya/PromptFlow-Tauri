@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::utils::config::WindowEffectsConfig;
-use tauri::window::Effect as WindowEffect;
+use tauri::window::{Effect as WindowEffect, EffectState as WindowEffectState};
 use tauri::{AppHandle, Emitter, Manager, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
 
 use commands::StoreState;
@@ -48,9 +48,15 @@ pub fn spawn_window(app: &AppHandle) -> tauri::Result<String> {
         // keep an 8px bottom offset inside it, so button center lands at y-2 from top.)
         .traffic_light_position(tauri::LogicalPosition::new(18.0, 24.0))
         .theme(Some(tauri::Theme::Dark))
+        // `Active`, never the NSVisualEffectView default (`FollowsWindowActiveState`,
+        // which is also what `state: None` leaves it at): the glass is the app's whole
+        // look, and following the active state swaps the material for a flat fill the
+        // moment the window stops being key — so a background window read as OPAQUE. The
+        // app's own wash (--bg-tint, 45% dark) is constant, so the blur behind it is the
+        // only thing that was changing. Must match tauri.conf.json's main window.
         .effects(WindowEffectsConfig {
             effects: vec![WindowEffect::UnderWindowBackground],
-            state: None,
+            state: Some(WindowEffectState::Active),
             radius: None,
             color: None,
         });

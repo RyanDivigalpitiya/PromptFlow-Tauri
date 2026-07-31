@@ -602,6 +602,7 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   height changes. The strip is `data-tauri-drag-region="deep"` (whole subtree drags;
   `<button>`s still click). Alignment is verified by pixel-measuring screenshots, not
   eyeballing.
+- **The glass is `windowEffects.state: "active"`, and BOTH window paths must say so** — `tauri.conf.json` (main) and the `.effects(...)` call in `lib.rs`'s ⌘N builder, where the field is `Some(WindowEffectState::Active)` and `None` is NOT a neutral default (window-vibrancy simply doesn't set the property, leaving NSVisualEffectView at its own default, which is `followsWindowActiveState` — the same wrong value the config used to spell out). Following the active state swaps the `underWindowBackground` material for a flat fill the instant the window stops being key, so an unfocused window read as OPAQUE while the focused one was translucent (shipped bug, fixed). Nothing in CSS was involved: the app's wash `--bg-tint` is a constant `rgba(10,10,14,0.45)` over a `transparent: true` window, so the blur behind it is the only variable, and it is macOS's to vary. `Active` is also what a multi-window app wants by definition — every ⌘N peer is a full peer, and only one of them can be key.
 - **Programmatic focus needs `e.preventDefault()` on mousedown** (static row, glyphs,
   buttons): the mousedown default action steals focus to body AFTER handlers run,
   blurring the editor the click just focused.

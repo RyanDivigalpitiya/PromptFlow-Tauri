@@ -26,7 +26,7 @@
         "theme": "Dark",
         "windowEffects": {
           "effects": ["underWindowBackground"],
-          "state": "followsWindowActiveState"
+          "state": "active"
         }
       }
     ],
