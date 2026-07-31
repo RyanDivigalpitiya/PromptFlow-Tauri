@@ -91,29 +91,75 @@ function isSentinel(n: Node): boolean {
   return n.nodeName === "BR" && (n as HTMLElement).dataset?.pfSentinel === "1";
 }
 
-/** The editor's text: text nodes in document order; <br> counts as "\n". */
-export function serializeEditor(el: HTMLElement): string {
-  let out = "";
-  let hasText = false;
+/** Every <br> in `el` that is ZERO-width: it contributes no "\n" to the serialization
+ * and consumes no offset. Serialization, offset counting and offset placement all read
+ * this ONE set — they must agree on which <br>s exist, or the caret lands off by the
+ * newlines they disagree about.
+ *
+ * Two kinds qualify, for the same reason: WebKit gives a trailing empty line no line
+ * box of its own (measured — `<span>a\n</span>` is 18px tall, `<span>a\n</span><br>` is
+ * 36), so a caret sitting after a final "\n" needs a stand-in element. buildRunDom
+ * appends OUR sentinel for that; WebKit inserts its OWN placeholder the instant an edit
+ * empties the last line, and our input handler sees that DOM first — backspacing the
+ * last character of "alpha\nbravo" gives `<span>alpha\n<br></span>`. Counting that
+ * placeholder as a newline appended a phantom empty line to the model on EVERY "delete
+ * the last line" (backspace, forward-delete or a selection), which then persisted in
+ * the store (shipped bug, fixed).
+ *
+ * Deliberately narrow: only the LAST <br>, and only when the text before it already
+ * ends in "\n" — i.e. exactly when its line break is one the model already carries. The
+ * no-text case is the same placeholder in a fully emptied editor, and skipping it is
+ * what keeps a just-emptied node counting as empty (so Backspace still deletes it). A
+ * <br> that carries a newline of its OWN — text dropped into the editor, the one
+ * insertion path we don't intercept — still serializes as "\n". */
+function zeroWidthBrs(el: HTMLElement): Set<Node> {
+  const parts: { node: Node; br: boolean; text: string }[] = [];
   const walk = (n: Node) => {
-    if (n.nodeType === Node.TEXT_NODE) {
-      const v = n.nodeValue ?? "";
-      if (v.length > 0) hasText = true;
-      out += v;
-    } else if (n.nodeName === "BR") {
-      if (!isSentinel(n)) out += "\n";
+    if (n.nodeType === Node.TEXT_NODE)
+      parts.push({ node: n, br: false, text: n.nodeValue ?? "" });
+    else if (n.nodeName === "BR") parts.push({ node: n, br: true, text: "\n" });
+    else n.childNodes.forEach(walk);
+  };
+  el.childNodes.forEach(walk);
+
+  const zero = new Set<Node>();
+  for (const p of parts) if (p.br && isSentinel(p.node)) zero.add(p.node);
+  // The last part that renders anything: an empty text node is no more content than a
+  // sentinel is.
+  let i = parts.length - 1;
+  while (i >= 0 && (zero.has(parts[i].node) || parts[i].text === "")) i--;
+  if (i >= 0 && parts[i].br) {
+    const before = parts
+      .slice(0, i)
+      .filter((p) => !zero.has(p.node))
+      .map((p) => p.text)
+      .join("");
+    if (before === "" || before.endsWith("\n")) zero.add(parts[i].node);
+  }
+  return zero;
+}
+
+/** The editor's text: text nodes in document order; <br> counts as "\n" unless it is
+ * zero-width (see `zeroWidthBrs`). */
+export function serializeEditor(el: HTMLElement): string {
+  const zero = zeroWidthBrs(el);
+  let out = "";
+  const walk = (n: Node) => {
+    if (n.nodeType === Node.TEXT_NODE) out += n.nodeValue ?? "";
+    else if (n.nodeName === "BR") {
+      if (!zero.has(n)) out += "\n";
     } else n.childNodes.forEach(walk);
   };
   el.childNodes.forEach(walk);
-  // A lone <br> with NO text is WebKit's placeholder for an emptied contenteditable,
-  // not a real newline — serializing it as "\n" left just-emptied nodes holding "\n"
-  // (so they no longer counted as empty and Backspace stopped deleting them). Treat it
-  // as empty. A genuine newline node renders text via buildRunDom, so hasText is true.
-  if (!hasText && out === "\n") return "";
   return out;
 }
 
-function offsetOfPoint(root: HTMLElement, node: Node, nodeOffset: number): number {
+function offsetOfPoint(
+  root: HTMLElement,
+  node: Node,
+  nodeOffset: number,
+  zero: Set<Node>,
+): number {
   let total = 0;
   let found = -1;
   const walk = (n: Node): boolean => {
@@ -144,7 +190,7 @@ function offsetOfPoint(root: HTMLElement, node: Node, nodeOffset: number): numbe
         found = total;
         return true;
       }
-      if (!isSentinel(n)) total += 1;
+      if (!zero.has(n)) total += 1;
     } else {
       for (const c of Array.from(n.childNodes)) {
         if (walk(c)) return true;
@@ -165,16 +211,18 @@ export function selectionOffsets(
   if (!sel || sel.rangeCount === 0) return null;
   const r = sel.getRangeAt(0);
   if (!el.contains(r.startContainer) || !el.contains(r.endContainer)) return null;
-  const start = offsetOfPoint(el, r.startContainer, r.startOffset);
+  const zero = zeroWidthBrs(el);
+  const start = offsetOfPoint(el, r.startContainer, r.startOffset, zero);
   const end = r.collapsed
     ? start
-    : offsetOfPoint(el, r.endContainer, r.endOffset);
+    : offsetOfPoint(el, r.endContainer, r.endOffset, zero);
   return { start: Math.min(start, end), end: Math.max(start, end) };
 }
 
 function pointAtOffset(
   el: HTMLElement,
   offset: number,
+  zero: Set<Node>,
 ): { node: Node; offset: number } {
   let remaining = offset;
   let last: { node: Node; offset: number } = { node: el, offset: 0 };
@@ -187,7 +235,7 @@ function pointAtOffset(
       return null;
     }
     if (n.nodeName === "BR") {
-      if (isSentinel(n)) return null; // zero-width — never consumes an offset
+      if (zero.has(n)) return null; // zero-width — never consumes an offset
       const parent = n.parentNode!;
       const idx = Array.prototype.indexOf.call(parent.childNodes, n);
       if (remaining === 0) return { node: parent, offset: idx };
@@ -208,8 +256,9 @@ function pointAtOffset(
 export function setSelectionOffsets(el: HTMLElement, start: number, end = start) {
   const sel = window.getSelection();
   if (!sel) return;
-  const a = pointAtOffset(el, start);
-  const b = end === start ? a : pointAtOffset(el, end);
+  const zero = zeroWidthBrs(el);
+  const a = pointAtOffset(el, start, zero);
+  const b = end === start ? a : pointAtOffset(el, end, zero);
   const range = document.createRange();
   range.setStart(a.node, a.offset);
   range.setEnd(b.node, b.offset);

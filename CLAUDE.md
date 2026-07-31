@@ -21,7 +21,7 @@ npm install                  # once
 scripts/dev.sh [store.sqlite]  # tauri dev against an ISOLATED store (default /tmp/promptflow-tauri-dev.sqlite)
 scripts/build.sh             # release bundle -> src-tauri/target/release/bundle/macos/PromptFlow.app
 scripts/verify.sh            # launch smoke test of the release build (throwaway store, polls for a window)
-npm test                     # vitest: 8 suites / 61 tests (resolveKey, wrap, bold, runs, projectDrop, projectSelectionHead, rowBands, kindMorph)
+npm test                     # vitest: 9 suites / 77 tests (resolveKey, wrap, bold, runs, caret, projectDrop, projectSelectionHead, rowBands, kindMorph)
 cd src-tauri && cargo test   # 15 tests (store mutations/undo, archive round-trip + collect)
 npx tsc --noEmit             # typecheck (strict; noUnusedLocals/Parameters)
 npm run dev & node scripts/qa.mjs [outDir]   # headless visual QA in WebKit (see below)
@@ -184,11 +184,7 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   is still a plain `<textarea>`). Invariants:
   (1) the editor's children are IMPERATIVE (`buildRunDom`) and the two branches carry
   distinct React keys ("editor"/"static") — without them React appends the static
-  span beside the leftover editor spans (shipped bug, fixed); (2) every input is
-  serialized (`serializeEditor`: text nodes + `<br>`=\n, sentinel `<br
-  data-pf-sentinel>` = zero-width) then re-rendered from the model with the caret
-  restored (`selectionOffsets`/`setSelectionOffsets`); the sentinel is appended when
-  text ends in \n so the trailing line has a line box; (3) ⌘B/I/U ALWAYS
+  span beside the leftover editor spans (shipped bug, fixed); (2) every input is serialized (`serializeEditor`: text nodes + `<br>`=\n) then re-rendered from the model with the caret restored (`selectionOffsets`/`setSelectionOffsets`). WHICH `<br>`s count is ONE rule — `zeroWidthBrs` in `caret.ts`, read by the serializer and by BOTH offset mappers, which must agree or the caret lands off by the newlines they don't. A `<br>` is zero-width when it is our sentinel (`data-pf-sentinel`, appended by `buildRunDom` when the text ends in \n) or when it is the LAST content-bearing node and the text before it already ends in \n (or is empty). Both stand in for the same missing line box: WebKit gives a trailing \n no line of its own (measured — `<span>a\n</span>` is 18px tall, `<span>a\n</span><br>` is 36), so it inserts its OWN placeholder the instant an edit empties the last line, and the raw DOM our handler sees is `<span>alpha\n<br></span>`. Counting that as a newline appended a phantom empty line to the MODEL on every delete-the-last-line — by backspace, forward-delete or selection, in any kind, and it then persisted to the store (shipped bug, fixed; `caret.test.ts` records the measured shapes). Deliberately narrow: a `<br>` carrying a newline of its OWN — text DROPPED into the editor, the one insertion path not intercepted — still serializes as \n, which is why the rule is not "every trailing `<br>`". The empty-text case is the same placeholder in an emptied editor, and skipping it is what keeps a just-emptied node reading as empty so Backspace still deletes it. `StaticText` renders the sentinel too: without it a row whose text ends in \n was a full line SHORTER unfocused than focused (measured 21.6px), so deleting the last line and clicking away snapped the row up and clicking back in grew it again — the original has no static/live split at all (one NSTextView per row, whose extra line fragment always draws that line), so parity IS the port. `node-note-static` does the same against the `.grow-wrap::after` mirror, which already gives the focused note textarea that line (17.7px); (3) ⌘B/I/U ALWAYS
   preventDefault (the browser's own rich-text engine must never touch the DOM), and
   paste/copy/cut are intercepted (plain text in, RAW text out; ⇧⌘C = markdown);
   (4) style refs seed in a LAYOUT effect declared before the run-DOM builder (a

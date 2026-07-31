@@ -117,6 +117,15 @@ function StaticText({
         </span>
       ))}
       {rec.text === "" && "​"}
+      {/* The same trailing-line sentinel buildRunDom appends to the editor, for the
+        * same measured reason: WebKit gives a text ending in "\n" no line box for that
+        * last empty line (`<span>a\n</span>` renders exactly as tall as `<span>a</span>`).
+        * Without it the row is a full line SHORTER unfocused than focused — measured at
+        * 21.6px — so deleting the last line of a node and clicking away snapped the row
+        * up, and clicking back in grew it again. The original has no static/live split
+        * at all (every row is one NSTextView, whose extra line fragment renders the
+        * empty line always), so matching it means rendering the line box in both. */}
+      {rec.text.endsWith("\n") && <br data-pf-sentinel="1" />}
     </span>
   );
 }
@@ -706,6 +715,11 @@ export const NoteEditor = memo(function NoteEditor(p: {
       }}
     >
       {rec.note}
+      {/* Same trailing line box as the main text's sentinel, for the same reason — and
+        * here the FOCUSED side already has one: the .grow-wrap::after mirror that
+        * autosizes the textarea appends \200B, so a note ending in "\n" measured a line
+        * taller focused (63px) than static (45.3px) until this. */}
+      {rec.note.endsWith("\n") && <br />}
     </div>
   );
 });
