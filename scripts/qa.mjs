@@ -493,6 +493,104 @@ await page.keyboard.press("Escape");
 await page.mouse.up();
 await page.waitForTimeout(80);
 
+// ---- 4b. Ending a live selection --------------------------------------------
+// A selection used to be somewhere the app could get stuck: nothing is first responder
+// while one is live, so only ⇧/⌥/Tab/⌘-combos and Escape did anything at all. A press on
+// any BUTTON left the tint behind with nothing acting on it, a bare arrow fell through to
+// no one, and ⌫ deleted the block and then focused nothing. These pin the ways out.
+//
+// The stub records mutations without applying them, so where a check can only see the
+// INVOKE that is what it asserts — the store semantics are `cargo test`'s job. The caret
+// checks are real: focus is entirely frontend.
+
+/** Sweep a range and LEAVE it live — `sweepSelect` above Escapes out of its own. */
+async function selectRange(fromText, toText) {
+  const a = await textBox(fromText);
+  const bb = await rowOf(toText).boundingBox();
+  await page.mouse.move(a.x + 8, a.y + a.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bb.x + 120, bb.y + bb.height / 2, { steps: 8 });
+  await page.waitForTimeout(60);
+  await page.mouse.up();
+  await page.waitForTimeout(60);
+  return await marked("selected");
+}
+const lastCall = () => page.evaluate(() => window.__PF_QA_CALLS.at(-1));
+/** The two adjacent siblings the checks below sweep over, by their row text. */
+const SEL_A = "Press the + at the bottom";
+const SEL_B = "A checkbox child";
+
+// A press on a row BUTTON (here the ⋯, whose menu is Rust-side and stubbed out) is still
+// a press "elsewhere" — it must drop the selection like any other.
+const selBeforeButton = await selectRange(SEL_A, SEL_B);
+await rowOf("Tail node").locator('button[aria-label="Node menu"]').first().click();
+await page.waitForTimeout(100);
+const afterButtonPress = await marked("selected");
+
+// …but a press on a MEMBER's glyph is the block DRAG, and must keep it (dragGesture reads
+// selectionIds() at its 4px threshold, long after the outside-press handler has run).
+await selectRange(SEL_A, SEL_B);
+const memberGlyph = await rowOf(SEL_B).locator(".glyph-slot").first().boundingBox();
+await page.mouse.move(
+  memberGlyph.x + memberGlyph.width / 2,
+  memberGlyph.y + memberGlyph.height / 2,
+);
+await page.mouse.down();
+const dragTo = await rowOf("Tail node").boundingBox();
+await page.mouse.move(dragTo.x + 120, dragTo.y + dragTo.height / 2, { steps: 8 });
+await page.waitForTimeout(80);
+const memberGlyphDrag = {
+  selected: await marked("selected"),
+  ghost: await page.locator(".drag-ghost").innerText(),
+};
+await page.keyboard.press("Escape");
+await page.mouse.up();
+await page.waitForTimeout(80);
+
+// A bare ↓ / ↑ ends the selection and puts the caret just outside the block — past the
+// whole TINTED span, and stepping over the divider that sits between here and n1d.
+await selectRange(SEL_A, SEL_B);
+await page.keyboard.press("ArrowDown");
+await page.waitForTimeout(160);
+const afterArrowDown = {
+  selected: (await marked("selected")).length,
+  focused: await focusedRowText(),
+};
+await selectRange(SEL_A, SEL_B);
+await page.keyboard.press("ArrowUp");
+await page.waitForTimeout(160);
+const afterArrowUp = {
+  selected: (await marked("selected")).length,
+  focused: await focusedRowText(),
+};
+
+// ⌘B over a block: whole-text bold, which only exists as a block command.
+await selectRange(SEL_A, SEL_B);
+await page.keyboard.press("Meta+b");
+await page.waitForTimeout(140);
+const boldCall = await lastCall();
+
+// ⌘3 over a block of NON-prompt nodes FOLDS it into one prompt…
+await selectRange(SEL_A, SEL_B);
+await page.keyboard.press("Meta+3");
+await page.waitForTimeout(140);
+const foldCall = await lastCall();
+// …but a range that already contains a prompt is a conversion, not a collection.
+await selectRange("You are a helpful coding agent", "A prompt with children");
+await page.keyboard.press("Meta+3");
+await page.waitForTimeout(140);
+const convertCall = await lastCall();
+
+// ⌫ deletes the block and lands the caret ABOVE it. The stub doesn't actually delete, so
+// what this pins is the caret TARGET (resolved before the invoke) and the deselect.
+await selectRange(SEL_A, SEL_B);
+await page.keyboard.press("Backspace");
+await page.waitForTimeout(200);
+const afterDelete = {
+  selected: (await marked("selected")).length,
+  focused: await focusedRowText(),
+};
+
 // ---- 5. Completion glyph: a parent's tick REPLACES its progress pie ----------
 // A checkbox parent used to draw only the pie, so completing the node itself changed
 // nothing inside the circle. Now it draws the same tick a leaf does, at its own circle's
@@ -647,6 +745,72 @@ for (const t of [0, 60, 120, 180, 240, 350]) {
   await shot(`complete-frame-${String(t).padStart(3, "0")}`, filmRow);
 }
 
+// ---- 6. Parent glyphs: a full bullet pie must not read as a checkbox ---------
+// At full progress the two parent glyphs used to paint the SAME thing — a solid green
+// disc. A bullet parent's centre dot goes green at all-done too, so it vanished into its
+// own fill and the glyph looked like a checkbox you could tick off. The bullet's pie is
+// now translucent green at the same alpha its incomplete state already had, so the opaque
+// dot reads through it and the two glyphs are told apart at a glance.
+//
+// Its own page and fixture, like section 5: the sweep tests anchor on the main tree.
+const PARENT_NODES = [
+  node("p1", null, 0, "Bullet parent, all done", "bulletPoint"),
+  node("p1a", "p1", 0, "its done child", "checkbox", { isCompleted: true, completedAt: T }),
+  node("p2", null, 1024, "Bullet parent, half done", "bulletPoint"),
+  node("p2a", "p2", 0, "one done", "checkbox", { isCompleted: true, completedAt: T }),
+  node("p2b", "p2", 1024, "one open", "checkbox"),
+  node("p3", null, 2048, "Checkbox parent, all done", "checkbox"),
+  node("p3a", "p3", 0, "the done child", "checkbox", { isCompleted: true, completedAt: T }),
+];
+
+const pp = await b.newPage({
+  viewport: { width: 720, height: 520 },
+  deviceScaleFactor: 2,
+  colorScheme: "dark",
+});
+pp.on("pageerror", (e) => errors.push(String(e)));
+pp.on("console", (m) => {
+  if (m.type() === "error") errors.push(m.text());
+});
+await pp.addInitScript(tauriStub, {
+  rev: 1,
+  nodes: PARENT_NODES,
+  canUndo: false,
+  canRedo: false,
+});
+await pp.goto(URL_, { waitUntil: "domcontentloaded" });
+await pp.waitForSelector(".node-row", { timeout: 15000 });
+await pp.addStyleTag({ content: "html,body{background:#101014 !important}" });
+await pp.waitForTimeout(300);
+
+/** The two colours that decide whether a parent glyph reads as a bullet or a checkbox:
+ * the pie's stroke and (bullets only) the centre dot's fill, as WebKit resolved them. */
+const parentGlyph = (text) =>
+  pp
+    .locator(".node-row", { hasText: text })
+    .first()
+    .evaluate((el) => {
+      const wedge = el.querySelector(".glyph-wedge");
+      const dot = el.querySelector(".glyph-ring .glyph-tint");
+      return {
+        wedge: wedge ? getComputedStyle(wedge).stroke : null,
+        dot: dot ? getComputedStyle(dot).fill : null,
+      };
+    });
+
+const bulletDone = await parentGlyph("Bullet parent, all done");
+const bulletHalf = await parentGlyph("Bullet parent, half done");
+const checkboxDone = await parentGlyph("Checkbox parent, all done");
+await shot("parent-glyphs", pp.locator(".app-body"));
+
+/** Alpha of a resolved CSS colour; 1 when it came back as an opaque rgb(). */
+const alpha = (c) => {
+  const m = /^rgba?\(([^)]+)\)$/.exec(c ?? "");
+  if (!m) return null;
+  const parts = m[1].split(",").map((s) => parseFloat(s));
+  return parts.length > 3 ? parts[3] : 1;
+};
+
 // ---- Report ------------------------------------------------------------------
 const eq = (a, b, tol = 0.6) => Math.abs(a - b) <= tol;
 const distinct = (xs) => new Set(xs.filter((v) => v != null)).size;
@@ -688,6 +852,17 @@ const checks = [
   ["sweep: the editor's own text selection is gone with it", sweepFromEditor.native === ""],
   ["sweep: a background press anchors on the last row", JSON.stringify(sweepFromBackground.members) === '["Prompt drafts","Tail node"]' && sweepFromBackground.native === ""],
   ["sweep: a glyph press is still the reorder drag", glyphDrag.selected === 0 && glyphDrag.ghost === 1],
+  // --- ending a selection ---
+  ["end sel: the sweep left a two-node selection live", selBeforeButton.length === 2],
+  ["end sel: pressing a row BUTTON drops it", afterButtonPress.length === 0],
+  ["end sel: pressing a MEMBER's glyph keeps it", memberGlyphDrag.selected.length === 2],
+  ["end sel: …and drags the whole block", memberGlyphDrag.ghost === "2 items"],
+  ["end sel: ↓ clears it and focuses past the block (over the divider)", afterArrowDown.selected === 0 && afterArrowDown.focused === "After the nested divider"],
+  ["end sel: ↑ clears it and focuses the row above", afterArrowUp.selected === 0 && afterArrowUp.focused === "Welcome to PromptFlow"],
+  ["end sel: ⌘B runs the block bold over both members", boldCall.cmd === "toggle_bold_block" && boldCall.args.ids.length === 2],
+  ["end sel: ⌘3 over non-prompts FOLDS them into one prompt", foldCall.cmd === "merge_into_prompt" && foldCall.args.ids.length === 2],
+  ["end sel: ⌘3 over a range holding a prompt converts instead", convertCall.cmd === "set_kind_block" && convertCall.args.kind === "promptDraft"],
+  ["end sel: ⌫ clears it and leaves the caret above the block", afterDelete.selected === 0 && afterDelete.focused === "Welcome to PromptFlow"],
   // --- completion glyph ---
   ["complete: a completed PARENT draws a check mark", restDoneParent.check !== null],
   ["complete: an incomplete parent draws none", restOpenParent.check === null],
@@ -707,6 +882,13 @@ const checks = [
   ["complete: un-checking removes the tick", afterUncheck.check === null],
   ["complete: …and brings the pie back, interpolated", distinct(unchecked.map((f) => f.w)) > 4 && afterUncheck.wedge.opacity === 1],
   ["complete: the pie and the tick are both live animations", paused >= 2],
+  // --- parent glyph identity (bullet vs checkbox at full progress) ---
+  ["parent glyph: an all-done BULLET's pie is translucent", alpha(bulletDone.wedge) < 1],
+  ["parent glyph: its centre dot stays opaque", alpha(bulletDone.dot) === 1],
+  ["parent glyph: so the dot is not lost in its own fill", bulletDone.wedge !== bulletDone.dot],
+  ["parent glyph: an all-done CHECKBOX's pie is opaque", alpha(checkboxDone.wedge) === 1],
+  ["parent glyph: the two all-done glyphs no longer paint the same fill", bulletDone.wedge !== checkboxDone.wedge],
+  ["parent glyph: the bullet's last child is a pure HUE change (alpha unchanged)", alpha(bulletDone.wedge) === alpha(bulletHalf.wedge)],
   ["no page errors", errors.length === 0],
 ];
 console.log("\nrest    :", JSON.stringify(rest));
@@ -717,10 +899,12 @@ console.log("bullet  :", JSON.stringify(bullet));
 console.log("ink     :", JSON.stringify(inkOffsets), "(px from the row centre; + was +1.33 before the padding fix)");
 console.log("arrows  :", JSON.stringify(arrows));
 console.log("sweep   :", JSON.stringify({ sweepSiblings, sweepClamp, sweepUp, sweepFromEditor, sweepFromBackground, glyphDrag }));
+console.log("end sel :", JSON.stringify({ selBeforeButton, afterButtonPress, memberGlyphDrag, afterArrowDown, afterArrowUp, boldCall, foldCall, convertCall, afterDelete }));
 console.log("complete:", JSON.stringify({ restDoneParent, restDoneLeaf, restOpenParent, afterFull, afterPart, afterUncheck }));
 console.log("  ratio :", "parent", inkRatio(restDoneParent), "leaf", inkRatio(restDoneLeaf), "(tick ink / circle diameter)");
 console.log("  pie   :", fullPie.map((f) => `${f.t}:${f.w}`).join(" "));
 console.log("  tick  :", fullPie.map((f) => `${f.t}:${f.c}`).join(" "));
+console.log("parents :", JSON.stringify({ bulletDone, bulletHalf, checkboxDone }));
 if (errors.length) console.log("errors  :", errors.slice(0, 5));
 console.log();
 let failed = 0;

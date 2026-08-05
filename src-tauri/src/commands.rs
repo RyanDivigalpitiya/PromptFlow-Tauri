@@ -309,6 +309,28 @@ pub fn set_kind_block(
 }
 
 #[tauri::command]
+pub fn toggle_bold_block(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<StoreState>,
+    ids: Vec<Uuid>,
+) -> Result<MutationOut, String> {
+    let r = state.lock().unwrap().toggle_bold_block(&ids);
+    run_mutation(&app, &window, r)
+}
+
+#[tauri::command]
+pub fn merge_into_prompt(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<StoreState>,
+    ids: Vec<Uuid>,
+) -> Result<MutationOut, String> {
+    let r = state.lock().unwrap().merge_into_prompt(&ids);
+    run_mutation(&app, &window, r)
+}
+
+#[tauri::command]
 pub fn delete_block(
     app: AppHandle,
     window: WebviewWindow,

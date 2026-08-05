@@ -100,6 +100,15 @@ export const api = {
   setKindBlock: (ids: string[], kind: NodeKind) =>
     invoke<MutationOut>("set_kind_block", { ids, kind }),
 
+  toggleBoldBlock: (ids: string[]) =>
+    invoke<MutationOut>("toggle_bold_block", { ids }),
+
+  /** ⌘3 over a non-prompt block: fold it into its first member as a "- " list. The
+   * returned `newNode` is that member (the node to focus), or null when the block had
+   * fewer than two mergeable nodes and nothing happened. */
+  mergeIntoPrompt: (ids: string[]) =>
+    invoke<MutationOut>("merge_into_prompt", { ids }),
+
   deleteBlock: (ids: string[]) => invoke<MutationOut>("delete_block", { ids }),
 
   undo: () => invoke<void>("undo"),

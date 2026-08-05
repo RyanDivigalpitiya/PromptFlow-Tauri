@@ -67,6 +67,47 @@ pub fn spawn_window(app: &AppHandle) -> tauri::Result<String> {
     Ok(label)
 }
 
+/// Fraction of the screen's usable WIDTH the app opens at. Height is always the full
+/// work area, and the window is centred horizontally in it.
+const LAUNCH_WIDTH_FRACTION: f64 = 0.75;
+
+/// Place the app's first window at its launch default: full work-area height, 75% of the
+/// work-area width, centred horizontally.
+///
+/// It has to be code, not config: `tauri.conf.json` takes absolute px only, and the right
+/// size depends on the display the app happens to open on. The config window is therefore
+/// created `"visible": false` and shown once this has run — resizing a VISIBLE window
+/// would make every launch jump from the placeholder rect to the real one.
+///
+/// The WORK AREA, never `monitor.size()`: on macOS the display bounds include the menu bar
+/// and the Dock, so a full-display-height window gets shoved down by AppKit's own frame
+/// constraining and hangs its bottom off the screen. Physical units end to end, because
+/// that is what the work area is reported in — going through logical points would round
+/// twice against the scale factor and leave a seam at the screen edge.
+///
+/// ⌘N peers deliberately keep their own cascade (see `spawn_window`): this is where the
+/// app OPENS, not a rule imposed on every window.
+fn place_launch_window(win: &tauri::WebviewWindow) {
+    let Some(monitor) = win
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| win.primary_monitor().ok().flatten())
+    else {
+        return; // no monitor to measure — leave the config's placeholder rect alone
+    };
+    let area = *monitor.work_area();
+    let width = ((area.size.width as f64) * LAUNCH_WIDTH_FRACTION).round() as u32;
+    let _ = win.set_size(tauri::PhysicalSize::new(
+        width.max(1),
+        area.size.height.max(1),
+    ));
+    let _ = win.set_position(tauri::PhysicalPosition::new(
+        area.position.x + (area.size.width as i32 - width as i32) / 2,
+        area.position.y,
+    ));
+}
+
 fn store_path(app: &AppHandle) -> std::path::PathBuf {
     // PROMPTFLOW_STORE overrides for dev/verify isolation (same convention as the
     // SwiftUI app): an absolute path is used as-is; a bare leaf lands in app-data.
@@ -251,6 +292,15 @@ pub fn run() {
                 }
                 _ => {}
             });
+
+            // Last in setup, so the window appears with the menu already installed. `show`
+            // runs even if the placement bailed: the config keeps the window hidden purely
+            // so the resize can't be seen, and a window that never appears at all is far
+            // worse than one at the placeholder size.
+            if let Some(main) = app.get_webview_window("main") {
+                place_launch_window(&main);
+                let _ = main.show();
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -276,6 +326,8 @@ pub fn run() {
             commands::move_block_to,
             commands::toggle_completed_block,
             commands::set_kind_block,
+            commands::toggle_bold_block,
+            commands::merge_into_prompt,
             commands::delete_block,
             commands::undo,
             commands::redo,

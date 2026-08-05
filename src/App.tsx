@@ -6,9 +6,12 @@ import { TopBar } from "./components/TopBar";
 import { api, onRowMenuAction } from "./lib/api";
 import { endAnimNow } from "./state/collapseAnim";
 import {
+  collapseSelectionToCaret,
   copyBlock,
+  deleteBlockAndFocus,
   holdVisible,
   indentTargetParent,
+  mergeSelectionIntoPrompt,
   performRowMenuAction,
   setCollapsed,
   setCollapsedAll,
@@ -51,6 +54,15 @@ function handleSelectionKey(e: KeyboardEvent): boolean {
       done();
       return true;
     }
+    if (!e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
+      // A BARE arrow ends the selection and puts the caret back in the outline, just
+      // outside the block. Nothing is first responder while a selection is live, so
+      // before this the key fell through to no one and the selection was a dead end.
+      e.preventDefault();
+      e.stopPropagation();
+      collapseSelectionToCaret(dir);
+      return true;
+    }
   }
   if (e.key === "Tab" && !e.metaKey) {
     if (e.shiftKey) {
@@ -80,9 +92,43 @@ function handleSelectionKey(e: KeyboardEvent): boolean {
     done();
     return true;
   }
+  if (
+    e.metaKey &&
+    !e.shiftKey &&
+    !e.altKey &&
+    !e.ctrlKey &&
+    (e.key === "b" || e.key === "B")
+  ) {
+    // Whole-text bold across the block, as a UNIFORM toggle (Store::toggle_bold_block).
+    // The per-character ⌘B lives in RowEditor and needs a caret; nothing is first
+    // responder while a selection is live, so this is the only place it can land.
+    void api.toggleBoldBlock(ids).then(() => sel.refresh());
+    done();
+    return true;
+  }
   if (e.metaKey && (e.key === "1" || e.key === "2" || e.key === "3")) {
     const kind =
       e.key === "1" ? "bulletPoint" : e.key === "2" ? "checkbox" : "promptDraft";
+    // ⌘3 over two-or-more NON-prompt nodes FOLDS them into a single prompt — their texts
+    // become its "- " list and the rest are deleted (Store::merge_into_prompt) — rather
+    // than converting each into a prompt of its own. That is the "collect these lines
+    // into a prompt" gesture; a prompt already inside the range means the user is
+    // converting a mixed selection instead, so that falls through to the per-node form.
+    // Dividers are inert to ⌘1/2/3, so they neither count toward the two nor block it.
+    const foldable = ids.filter((id) => {
+      const k = mirror.get(id)?.kind;
+      return k !== undefined && k !== "line";
+    });
+    if (
+      kind === "promptDraft" &&
+      foldable.length > 1 &&
+      foldable.every((id) => mirror.get(id)?.kind !== "promptDraft")
+    ) {
+      e.preventDefault();
+      e.stopPropagation();
+      void mergeSelectionIntoPrompt(foldable);
+      return true;
+    }
     void api.setKindBlock(ids, kind).then(() => sel.refresh());
     done();
     return true;
@@ -94,13 +140,45 @@ function handleSelectionKey(e: KeyboardEvent): boolean {
     return true;
   }
   if ((e.key === "Backspace" || e.key === "Delete") && !e.metaKey) {
-    void api.deleteBlock(ids);
+    // Clears the selection AND lands the caret where the block was — deleting used to
+    // leave nothing focused, so the cursor simply vanished.
+    void deleteBlockAndFocus(ids);
     e.preventDefault();
     e.stopPropagation();
-    sel.clear();
     return true;
   }
   return false;
+}
+
+/** Controls that are USING the live selection rather than leaving it behind — the glyph
+ * column, which drags the whole block. Everything else drops it. */
+const SELECTION_KEEPING_PRESS = ".glyph-slot, .prompt-line-bullet";
+
+/** Any plain press outside a live selection drops it. The outline's own handlers only
+ * covered rows and the blank background, so pressing a row's chevron/+/zoom/⋯, the top
+ * bar, the focus pane or the settings popover left a tinted block on screen with nothing
+ * acting on it — it read as stuck.
+ *
+ * Window-level and CAPTURE phase, so it resolves before React's root listeners and
+ * therefore before `selectionMouseDown` reads the anchor. Two exemptions:
+ *   • SHIFT, because that press EXTENDS the selection — RowEditor's static branch and the
+ *     mouse sweep both resolve their range from the surviving anchor.
+ *   • a glyph press on a row that is itself a MEMBER, because that drags the whole block:
+ *     `dragGesture` reads `selectionIds()` at its 4px threshold, long after this ran.
+ * The modifier guard otherwise matches `selectionMouseDown`'s, so "is this a plain press"
+ * has ONE definition across the two handlers.
+ *
+ * `Element`, not `HTMLElement`: half the glyph column is SVG (`<circle>`, `<path>`), and
+ * an instanceof HTMLElement test would miss exactly the presses the exemption is for. */
+function clearSelectionOnOutsidePress(e: MouseEvent) {
+  if (e.button !== 0 || e.shiftKey || e.metaKey || e.altKey || e.ctrlKey) return;
+  const sel = useSelection.getState();
+  if (!sel.isActive()) return;
+  const t = e.target instanceof Element ? e.target : null;
+  if (t && t.closest(SELECTION_KEEPING_PRESS) && t.closest(".node-row.selected")) {
+    return;
+  }
+  sel.clear();
 }
 
 export default function App() {
@@ -118,6 +196,14 @@ export default function App() {
   // A structural change can move/remove selection members — re-resolve.
   useEffect(() => {
     return subscribeStructure(() => useSelection.getState().refresh());
+  }, []);
+
+  // A press anywhere outside the selection ends it (see the handler for the two presses
+  // that are exempt). Window-level so it also covers the chrome the outline never sees.
+  useEffect(() => {
+    window.addEventListener("mousedown", clearSelectionOnOutsidePress, true);
+    return () =>
+      window.removeEventListener("mousedown", clearSelectionOnOutsidePress, true);
   }, []);
 
   // Native row (⋯) menu selections arrive as events from Rust — run them here.

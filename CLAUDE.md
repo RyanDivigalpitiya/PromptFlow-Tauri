@@ -22,7 +22,7 @@ scripts/dev.sh [store.sqlite]  # tauri dev against an ISOLATED store (default /t
 scripts/build.sh             # release bundle -> src-tauri/target/release/bundle/macos/PromptFlow.app
 scripts/verify.sh            # launch smoke test of the release build (throwaway store, polls for a window)
 npm test                     # vitest: 9 suites / 77 tests (resolveKey, wrap, bold, runs, caret, projectDrop, projectSelectionHead, rowBands, kindMorph)
-cd src-tauri && cargo test   # 15 tests (store mutations/undo, archive round-trip + collect)
+cd src-tauri && cargo test   # 19 tests (store mutations/undo, block bold + prompt merge, archive round-trip + collect)
 npx tsc --noEmit             # typecheck (strict; noUnusedLocals/Parameters)
 npm run dev & node scripts/qa.mjs [outDir]   # headless visual QA in WebKit (see below)
 ```
@@ -66,8 +66,12 @@ npm run dev & node scripts/qa.mjs [outDir]   # headless visual QA in WebKit (see
   geometry + per-frame transition values, writes PNGs, reaches `:hover`/`:focus`, real
   keys and real mouse drags (it is how the multi-select sweep is covered), touches no
   window. Sections that need their own tree open a SECOND page with its own fixture
-  (the completion section does) — the sweep tests anchor on "the last row" and on the
-  empty background under the list, so growing the main fixture breaks them. Deterministic
+  (the completion section and the parent-glyph section each do) — the sweep tests anchor
+  on "the last row" and on the
+  empty background under the list, so growing the main fixture breaks them. Where a check
+  can only see the INVOKE a gesture fires (⌘B / ⌘3 over a block), that is what it asserts,
+  read back from the stub's `window.__PF_QA_CALLS` — the store semantics behind it are
+  `cargo test`'s job, and the two halves meet at the command name + args. Deterministic
   filmstrips come from clicking, then pausing `document.getAnimations()` and scrubbing
   `currentTime`; screenshotting in real time perturbs the timing it is sampling.
   Playwright resolves from the npx cache, NOT a project
@@ -435,6 +439,18 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   direction silently lost its `r` transition while the shrink kept it (shipped in this
   change, caught by measuring computed style, fixed). Bullets are NOT covered: a leaf dot
   is an HTML span and a parent ring an svg, so there is no single geometry to interpolate.
+  **A BULLET parent's full pie is TRANSLUCENT green (`BULLET_WEDGE_DONE`), a checkbox
+  parent's is opaque, and that is the only thing telling the two glyphs apart at full
+  progress.** They used to be pixel-identical: a bullet parent's centre dot goes green at
+  all-done too, so it vanished into its own fill and both glyphs painted one solid green
+  disc — which made a bullet read as a checkbox you could tick off (shipped bug, fixed).
+  The alpha is the SAME 0.45 the incomplete state already carried, so completing the last
+  child is a pure hue change on a property that was already transitioning, and the opaque
+  dot reads THROUGH the fill: an all-done bullet is a halo around its dot, an all-done
+  checkbox a filled disc. It must be an alpha, not a pre-blended opaque green — the wash
+  behind a row is `--bg-tint` over a transparent window, i.e. not a fixed colour. Pinned
+  by `qa.mjs`'s parent-glyph section, which reads both resolved colours and fails if the
+  two pies ever match again.
 - **Completed-parent tick** (`Glyphs.tsx` checkbox branch; CSS `--check-anim-*` / `.wedge-checked`): a checkbox PARENT that is itself completed draws the same drawCheck-animated tick a leaf does — the pie tracks the CHILDREN, the tick tracks THIS node, so they are two independent child slots and never a ternary between them (which is also what keeps the `Wedge` component off the check's host `<path>` index). The tick is drawn against the node's OWN circle diameter and re-centred in the fixed box (`co = (box − d)/2`), so a parent's mark sits in its 16px ring exactly as a leaf's does in its 13px one — measured ink/diameter 0.46 in both (`qa.mjs`), at the same 1.6 stroke the 1.5 border gets. For a leaf `d === leaf`, i.e. byte-identical to before. The pie does not unmount when the tick appears — it stays mounted at `opacity: 0` (`suppressed`) purely so the swap can be a TRANSITION: unmounting takes a full green disc off the screen one frame before anything replaces it, and a transition with no resolved previous value never runs at all (the same rule the wedge's fraction relies on — which is also why a completed parent scrolling back into the virtualizer's window paints an empty circle instead of fading one in). It rides `--check-anim-*`, drawCheck's own clock and delay, NOT `--wedge-anim-*`: the fill being replaced by the tick is ONE event with the tick drawing, whereas the wedge clock times the pie tracking its children. Both are green, so the tick is invisible against the fill it draws into for the first third and emerges as the fill goes — the pie reads as CONDENSING into the check. The ring's own colour still means "all children done" (`allDone`) and is deliberately independent of the node's own completion, so a completed parent with work left under it looks exactly like a completed leaf, white ring and all. Un-checking drops the tick in one frame (exactly as a leaf's does — it has never had an exit animation) and runs the pie's transition backwards; moving the 50ms delay off that direction was measured as only 3 frames better and left un-done. NOT covered: a completed node gaining its first child (or losing its last) resizes the tick in one frame while the circle's `r` animates — the tick's `d` is an attribute, the same wall the wedge's own `d` hit; it was a full disappearance before this change, so it is strictly better, not a regression.
 - **Glyph kind morph** (`lib/kindMorph.ts` truth table + `useKindMorph`/`Glyph` in
   `Glyphs.tsx`; CSS `.glyph-layer` / `.glyph-prompt-ghost` / `.prompt-panel-ghost`):
@@ -526,6 +542,8 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   on every structural change (wired in `App.tsx`). THREE entry points, one range
   definition: boundary ⇧↑/⇧↓ (`resolveKey`), shift-click (`RowEditor`'s static branch),
   and the mouse sweep below — all of them land on `start(anchor, head)`.
+- **Ending a selection** — a live selection used to be a state the app could get STUCK in, because nothing is first responder while one is up, so anything `handleSelectionKey` didn't claim reached no one. Three ways out, all added together. (1) **Any plain press outside it clears it** — `clearSelectionOnOutsidePress`, a window-level CAPTURE mousedown in `App.tsx`. The outline's own handlers only ever covered rows and blank background, so a press on a row's chevron/+/zoom/⋯, the TopBar, the focus pane or the settings popover left a tinted block with nothing acting on it. Capture, and on `window`, so it resolves before React's root listeners and therefore before `selectionMouseDown` reads the anchor. TWO exemptions: SHIFT (that press EXTENDS the range — both shift-click and the sweep resolve from the surviving anchor) and a `.glyph-slot`/`.prompt-line-bullet` press on a row already carrying `.selected` (that press DRAGS the block; `dragGesture` reads `selectionIds()` at its 4px threshold, long after this ran). Its modifier guard matches `selectionMouseDown`'s so "a plain press" has one definition. Test `Element`, never `HTMLElement` — half the glyph column is SVG. (2) **A bare ↑/↓ collapses it to a caret** (`collapseSelectionToCaret`), on the same caret intents `performDecision`'s cross-node arrows use, so it lands where arrowing out of the block's edge node would have. (3) **⌫ lands the caret where the block was** (`deleteBlockAndFocus`, which resolves both neighbours BEFORE the invoke and re-checks them against the mirror after, since the fallback below can name a member that just died). (2) and (3) share `nodeOutsideBlock`, the block twin of `neighborNode`: it steps off the whole TINTED span, not off the last MEMBER — the tint is what the user sees as the block, and a member's own visible descendants sit between the two. It walks ROWS (so collapsed subtrees and hidden completed rows fall out for free), skips dividers like every other caret path, and falls back to the block's own edge member at the ends of the document.
+- **Block styling / folding**: ⌘B over a selection is `toggle_bold_block` — a UNIFORM toggle (any member not bold end-to-end ⇒ bold them all), the same all-or-nothing shape `toggle_completed_block` has, because per-member toggling turns a mixed selection into its own inverse and reads as nothing happening. Empty-text members are SKIPPED, not given a `[0,0]` run, or the block could never be un-bolded. ⌘3 over two-or-more NON-prompt members is `merge_into_prompt`, which FOLDS the block into its first member: that node becomes a `promptDraft` whose text is every member as a `"- "` list, the rest are deleted (subtrees included, exactly as `delete_block` does — merging is a text operation with no non-arbitrary home for unmentioned children), and it is ONE transaction, so one ⌘Z puts the block back. Style runs are carried across, shifted by each member's offset in the merged string (`push_shifted_ranges`, the mirror of `split_ranges`); offsets are UTF-16 units (`utf16_len`), never `String::len()`. Dividers are skipped for the same reason ⌘1/2/3 never converts one, so they neither count toward the two nor get folded. A range that already CONTAINS a prompt falls through to `set_kind_block` — the user is converting a mixed selection, not collecting one. `MutationOut.new_node` carries the head so the caller focuses it; the selection is dropped, since one surviving node is nothing left to act on.
 - **Mouse multi-select** (`selectionDrag.ts`, the `MultiSelectMouseSession` port): armed
   from `.outline-scroll`'s `onMouseDownCapture` and deliberately PASSIVE at mousedown (no
   preventDefault, no stopPropagation), so every row handler underneath still runs and a
@@ -569,7 +587,10 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   ⌘E/⌘D collapse/expand focused, ⌘⇧E/⌘⇧D collapse/expand ALL, ⌘Z/⇧⌘Z fallback,
   ⌘⌃⇧7 seed, ⌘⌃⇧8 idle perf baseline); (3) `handleSelectionKey` capture-phase (block ops
   while a node selection is
-  live; an open ⋯ menu is a modal NSMenu, so Escape closes IT and never reaches the
+  live — ⇧↑/⇧↓ extend, ⌥↑/⌥↓ move, Tab/⇧Tab, ⌘⏎, ⌘B block bold, ⌘1/2/3 (⌘3 FOLDS a
+  non-prompt block into one prompt — see "Block styling / folding"), ⌘C, ⌫, bare ↑/↓ and
+  Escape, the last two being the two ways OUT of a selection;
+  an open ⋯ menu is a modal NSMenu, so Escape closes IT and never reaches the
   webview — one layer per press, with no in-app guard). Plus native menu accelerators (⌘N/⌘Z/⇧⌘Z + clipboard roles —
   the predefined cut/copy/paste/select_all items are REQUIRED; a macOS webview gets no
   ⌘C/⌘V without them). The Window submenu is registered via
@@ -593,6 +614,7 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   `core:window:allow-start-dragging`: `core:default` does NOT include it, and without it
   the title-bar drag region silently fails (the injected drag.js invoke is denied) —
   window can't be moved.
+- **Launch geometry lives in `lib.rs`, not the config** (`place_launch_window`): the app opens at the FULL work-area height, 75% of its width, centred horizontally. Percentages can't be spelled in `tauri.conf.json` and the right rect depends on the display, so the config window ships `"visible": false` with its 1100×760 kept only as a fallback, and setup sizes it and then `show()`s it — resizing a VISIBLE window makes every launch jump from the placeholder rect to the real one. `show()` runs even when the placement bails, or a failed monitor query would mean no window at all. Use `monitor.work_area()`, never `monitor.size()`: on macOS the display bounds include the menu bar and the Dock, so a full-display-height window gets shoved down by AppKit's own frame constraining and hangs its bottom off-screen. Physical units end to end, since that is what the work area is reported in — converting through logical points would round twice against the scale factor. ⌘N peers keep their own cascade (`spawn_window`); this is where the app OPENS, not a rule for every window. Verified by measuring the live window's CGWindow bounds against `NSScreen.visibleFrame`, not by eyeballing (measured 1542×1290 at (257,39) on a 2056×1290 work area).
 - **Chrome-less title bar is a three-part coupling — change all or none**: `.topbar`
   height 44px (styles.css) ⟷ `trafficLightPosition {x:18, y:24}` in BOTH
   `tauri.conf.json` (main window) and the ⌘N builder in `lib.rs`. On this macOS the
@@ -693,7 +715,7 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   Enter split keeps styling on both halves. Export writes `italicRanges`/
   `underlineRanges` ONLY when non-empty — style-free documents stay byte-identical to
   the SwiftUI format (whose decoder ignores the extra keys on styled ones).
-- **The mutation surface is the Rust commands** (37 registered in `lib.rs`; typed
+- **The mutation surface is the Rust commands** (39 registered in `lib.rs`; typed
   wrappers in `src/lib/api.ts`). Never mutate the mirror locally — apply state only from
   deltas. New mutations follow the pattern: store method → command → `emit_delta` →
   `MutationOut` hints for the caller.

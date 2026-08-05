@@ -89,6 +89,26 @@ struct TxData {
 
 /// Split flat `[loc, len, …]` style pairs at `at`: head keeps runs before the split
 /// (clipped), tail keeps runs after it, rebased to 0. Runs straddling `at` split.
+/// Style-run offsets are UTF-16 code units — the units the SwiftUI app's `NSRange`s use
+/// and the units the frontend's `String` indices use. NEVER `text.len()`, which is BYTES:
+/// any non-ASCII character would put every run after it at the wrong offset.
+fn utf16_len(s: &str) -> i64 {
+    s.encode_utf16().count() as i64
+}
+
+/// Append `ranges` onto `out`, shifted right by `off` — the merge's counterpart to
+/// `split_ranges`: where a split rebases runs to a new zero, this rebases them onto a
+/// position inside a longer text. Zero/negative lengths are dropped rather than carried.
+fn push_shifted_ranges(out: &mut Vec<i64>, ranges: &[i64], off: i64) {
+    for pair in ranges.chunks(2) {
+        if pair.len() < 2 || pair[1] <= 0 {
+            continue;
+        }
+        out.push(pair[0] + off);
+        out.push(pair[1]);
+    }
+}
+
 fn split_ranges(ranges: &[i64], at: i64) -> (Vec<i64>, Vec<i64>) {
     let mut head = Vec::new();
     let mut tail = Vec::new();
@@ -1208,6 +1228,116 @@ impl Store {
         Ok((delta, MutationOut::default()))
     }
 
+    /// ⌘B on a block: UNIFORM toggle, the same all-or-nothing shape `toggle_completed_block`
+    /// uses — if ANY member's text isn't bold end to end, bold every member whole; only when
+    /// they all already are does it clear them. (Per-member toggling would flip a mixed
+    /// selection into its own inverse, which reads as nothing having happened.)
+    ///
+    /// Members with no text are skipped rather than given an empty run: a `[0, 0]` range is
+    /// not "bold", so leaving them in would make `full` false forever and the block could
+    /// never be un-bolded. Dividers have no text of their own at all.
+    pub fn toggle_bold_block(&mut self, ids: &[Uuid]) -> Result<(Delta, MutationOut), String> {
+        let block: Vec<Uuid> = self
+            .normalized_block(ids)
+            .into_iter()
+            .filter(|x| self.nodes[x].kind != NodeKind::Line && !self.nodes[x].text.is_empty())
+            .collect();
+        if block.is_empty() {
+            return Ok((self.empty_delta(), MutationOut::default()));
+        }
+        let whole = |r: &NodeRec| -> Vec<i64> { vec![0, utf16_len(&r.text)] };
+        let make_bold = block.iter().any(|x| self.nodes[x].bold_ranges != whole(&self.nodes[x]));
+        self.begin();
+        for node in block {
+            let run = if make_bold {
+                whole(&self.nodes[&node])
+            } else {
+                Vec::new()
+            };
+            self.edit(node, |r| {
+                r.bold_ranges = run;
+                r.updated_at = now_ms();
+            });
+        }
+        let delta = self.commit(None)?;
+        Ok((delta, MutationOut::default()))
+    }
+
+    /// ⌘3 on a block of NON-prompt nodes: FOLD it into its first member. That node becomes a
+    /// `promptDraft` whose text is every member's text as a `"- "` list, and the rest are
+    /// deleted — the "collect these lines into one prompt" gesture, as opposed to
+    /// `set_kind_block`, which converts each member into a prompt of its own.
+    ///
+    /// One transaction, so a single ⌘Z puts the whole block back. The deleted members take
+    /// their SUBTREES with them, exactly as `delete_block` does — merging is a text
+    /// operation, and there is no non-arbitrary place to reparent children that were never
+    /// mentioned. The head keeps its own children, note, and position.
+    ///
+    /// Style runs are carried across rather than dropped: each member's text lands at a known
+    /// offset in the merged string, so its runs shift by exactly that much (`push_shifted_
+    /// ranges`). Dividers are skipped here for the same reason ⌘1/2/3 never converts one —
+    /// they are inert to kind operations — so a divider inside the range survives the merge
+    /// instead of being folded into it or deleted.
+    ///
+    /// `new_node` names the HEAD: it is not newly created, but `MutationOut`'s contract for
+    /// that field is "the node the calling window should focus", which is exactly what the
+    /// caller wants next.
+    pub fn merge_into_prompt(&mut self, ids: &[Uuid]) -> Result<(Delta, MutationOut), String> {
+        const BULLET: &str = "- ";
+        let block: Vec<Uuid> = self
+            .normalized_block(ids)
+            .into_iter()
+            .filter(|x| self.nodes[x].kind != NodeKind::Line)
+            .collect();
+        // Below two members there is nothing to merge; the caller falls back to set_kind.
+        if block.len() < 2 {
+            return Ok((self.empty_delta(), MutationOut::default()));
+        }
+        let head = block[0];
+        // Composed BEFORE any mutation, so the whole text/run computation reads one
+        // consistent tree and the transaction below is pure application.
+        let mut text = String::new();
+        let mut bold: Vec<i64> = Vec::new();
+        let mut italic: Vec<i64> = Vec::new();
+        let mut underline: Vec<i64> = Vec::new();
+        // Where the NEXT character lands in the merged text, in UTF-16 units.
+        let mut off: i64 = 0;
+        for (i, id) in block.iter().enumerate() {
+            if i > 0 {
+                text.push('\n');
+                off += 1;
+            }
+            text.push_str(BULLET);
+            off += utf16_len(BULLET);
+            let rec = &self.nodes[id];
+            push_shifted_ranges(&mut bold, &rec.bold_ranges, off);
+            push_shifted_ranges(&mut italic, &rec.italic_ranges, off);
+            push_shifted_ranges(&mut underline, &rec.underline_ranges, off);
+            text.push_str(&rec.text);
+            off += utf16_len(&rec.text);
+        }
+        self.begin();
+        for id in &block[1..] {
+            self.delete_subtree(*id);
+        }
+        self.edit(head, |r| {
+            r.kind = NodeKind::PromptDraft;
+            r.text = text;
+            r.bold_ranges = bold;
+            r.italic_ranges = italic;
+            r.underline_ranges = underline;
+            r.updated_at = now_ms();
+        });
+        let delta = self.commit(None)?;
+        Ok((
+            delta,
+            MutationOut {
+                new_node: Some(head),
+                ..Default::default()
+            },
+        ))
+    }
+
     /// Batch delete: every selected node (subtrees cascade), one undo step.
     pub fn delete_block(&mut self, ids: &[Uuid]) -> Result<(Delta, MutationOut), String> {
         let block = self.normalized_block(ids);
@@ -1396,6 +1526,95 @@ mod tests {
         assert_eq!(split_ranges(&[1, 4], 3), (vec![1, 2], vec![0, 2]));
         assert_eq!(split_ranges(&[4, 2], 3), (vec![], vec![1, 2]));
         assert_eq!(split_ranges(&[0, 2], 3), (vec![0, 2], vec![]));
+    }
+
+    #[test]
+    fn toggle_bold_block_is_uniform() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, b) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let b = b.new_node.unwrap();
+        s.set_text(a, "alpha".into(), Some(vec![0, 5]), None, None).unwrap();
+        s.set_text(b, "beta".into(), None, None, None).unwrap();
+        // MIXED (a whole-bold, b not) ⇒ bold everything, never per-member inversion.
+        s.toggle_bold_block(&[a, b]).unwrap();
+        assert_eq!(s.get(a).unwrap().bold_ranges, vec![0, 5]);
+        assert_eq!(s.get(b).unwrap().bold_ranges, vec![0, 4]);
+        // Now all bold ⇒ clear.
+        s.toggle_bold_block(&[a, b]).unwrap();
+        assert_eq!(s.get(a).unwrap().bold_ranges, Vec::<i64>::new());
+        assert_eq!(s.get(b).unwrap().bold_ranges, Vec::<i64>::new());
+    }
+
+    #[test]
+    fn toggle_bold_block_counts_utf16_units() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        // "é" is 2 BYTES but 1 UTF-16 unit; "😀" is 4 bytes and 2 units. A byte length
+        // here would push every later run past the end of the text.
+        s.set_text(a, "é😀x".into(), None, None, None).unwrap();
+        s.toggle_bold_block(&[a]).unwrap();
+        assert_eq!(s.get(a).unwrap().bold_ranges, vec![0, 4]);
+    }
+
+    #[test]
+    fn merge_into_prompt_folds_block_and_shifts_runs() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, b) = s.append_root(NodeKind::Checkbox).unwrap();
+        let b = b.new_node.unwrap();
+        let (_, c) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let c = c.new_node.unwrap();
+        s.set_text(a, "one".into(), Some(vec![0, 3]), None, None).unwrap();
+        s.set_text(b, "two".into(), Some(vec![1, 2]), None, None).unwrap();
+        s.set_text(c, "three".into(), None, None, None).unwrap();
+        // b gets a child, to pin that a folded member takes its subtree with it.
+        let (_, kid) = s.append_child(b, NodeKind::BulletPoint).unwrap();
+        let kid = kid.new_node.unwrap();
+
+        let (_, out) = s.merge_into_prompt(&[a, b, c]).unwrap();
+        assert_eq!(out.new_node, Some(a));
+        let head = s.get(a).unwrap();
+        assert_eq!(head.kind, NodeKind::PromptDraft);
+        assert_eq!(head.text, "- one\n- two\n- three");
+        // "- one" bold [2,3]; "- two" starts at 6, its "wo" run at 6+2+1 = 9.
+        assert_eq!(head.bold_ranges, vec![2, 3, 9, 2]);
+        assert!(s.get(b).is_none());
+        assert!(s.get(c).is_none());
+        assert!(s.get(kid).is_none());
+        assert_eq!(s.roots(), vec![a]);
+        // ONE undo step puts the whole block back.
+        s.undo().unwrap();
+        assert_eq!(s.get(a).unwrap().text, "one");
+        assert_eq!(s.get(a).unwrap().kind, NodeKind::BulletPoint);
+        assert_eq!(s.roots(), vec![a, b, c]);
+        assert!(s.get(kid).is_some());
+    }
+
+    #[test]
+    fn merge_into_prompt_skips_dividers_and_needs_two() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, d) = s.append_root(NodeKind::Line).unwrap();
+        let d = d.new_node.unwrap();
+        s.set_text(a, "solo".into(), None, None, None).unwrap();
+        // One mergeable member + a divider is not a merge: nothing happens at all.
+        let (delta, out) = s.merge_into_prompt(&[a, d]).unwrap();
+        assert!(delta.ops.is_empty());
+        assert_eq!(out.new_node, None);
+        assert_eq!(s.get(a).unwrap().kind, NodeKind::BulletPoint);
+        // With a second real member the divider is left standing, not folded or deleted.
+        let (_, b) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let b = b.new_node.unwrap();
+        s.set_text(b, "two".into(), None, None, None).unwrap();
+        s.merge_into_prompt(&[a, d, b]).unwrap();
+        assert_eq!(s.get(a).unwrap().text, "- solo\n- two");
+        assert_eq!(s.get(d).unwrap().kind, NodeKind::Line);
+        assert!(s.get(b).is_none());
     }
 
     #[test]

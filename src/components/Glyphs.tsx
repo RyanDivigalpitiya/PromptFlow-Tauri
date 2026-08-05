@@ -113,6 +113,25 @@ export interface KindMorph {
   epoch: number;
 }
 
+/**
+ * The BULLET parent's pie, at full progress. `Theme.completeColor` at the SAME 0.45 alpha
+ * its incomplete state already carries, so completing the last child is a pure hue change
+ * on one already-transitioning property — and, the point of it, so the opaque centre dot
+ * still reads THROUGH the fill.
+ *
+ * A checkbox parent's pie stays opaque, and that difference is now the whole tell between
+ * the two glyphs. At full progress they used to be pixel-identical: both drew a solid
+ * green disc (the bullet's dot is green at all-done too, so it vanished into its own
+ * fill), which made a bullet look like a checkbox you could tick off. Now an all-done
+ * checkbox is a solid green disc and an all-done bullet is a green HALO around its dot
+ * (shipped bug, fixed).
+ *
+ * Alpha, not a pre-blended opaque green: the glass background behind a row is not a fixed
+ * colour (--bg-tint is user-adjustable, and the window is translucent over the desktop),
+ * so a hardcoded blend would drift from the wash it is meant to sit in.
+ */
+const BULLET_WEDGE_DONE = "rgba(6, 255, 154, 0.45)";
+
 /** Fallback only — `--kind-anim-dur` in styles.css `:root` is the truth (read live). */
 const KIND_ANIM_MS = 200;
 /** Grace before dropping the layers, so the last frame has settled. Tearing down early
@@ -423,18 +442,22 @@ function GlyphInk(
         />
         {/* R = r − 1. The ring's inner edge sits only ~0.4px outside the wedge's
             outer edge, so never widen this stroke without shrinking the path radius
-            to match. */}
+            to match. Both colours are translucent at the SAME alpha — see
+            BULLET_WEDGE_DONE for why the done state is not the flat green a checkbox
+            parent's pie uses. */}
         <Wedge
           c={c}
           radius={r - 1}
           fraction={p.completedFraction}
           color={
             p.completedFraction >= 1
-              ? Theme.completeColor
+              ? BULLET_WEDGE_DONE
               : "rgba(255,255,255,0.45)"
           }
         />
-        {/* Drawn OVER the wedge — the visible pie is the annulus [dotR, r−1]. */}
+        {/* Drawn OVER the wedge — the visible pie is the annulus [dotR, r−1]. The dot is
+            OPAQUE in both states, which is what keeps the bullet legible as a bullet once
+            the fill behind it goes green. */}
         <circle
           className="glyph-tint"
           cx={c}

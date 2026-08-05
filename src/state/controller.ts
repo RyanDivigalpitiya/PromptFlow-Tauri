@@ -12,7 +12,7 @@ import { inheritableKind, type NodeKind } from "../lib/types";
 import { runCollapseAnim, runRowsAnim } from "./collapseAnim";
 import { mirror } from "./mirror";
 import { markCompleting } from "./rowAnim";
-import { useSelection } from "./selection";
+import { useSelection, type SelectionResolved } from "./selection";
 import { useWindowState, type CaretIntent } from "./windowState";
 
 /** The outline's gesture semantics — the port of OutlineView's glue between key
@@ -223,6 +223,103 @@ export async function confirmDelete(nodeId: string) {
     if (!ok) return;
   }
   await deleteAndFocusPrev(nodeId);
+}
+
+// MARK: Multi-selection (what happens when a live block selection ENDS)
+
+/** The nearest FOCUSABLE node row just outside a selection's whole visual span, in `dir`.
+ *
+ * The span is the members PLUS their visible descendants — everything `tint` covers —
+ * because that is the block the user sees: stepping off the last MEMBER instead would
+ * land the caret inside that member's own subtree, which is still highlighted. Row
+ * indices, not sibling indices, so collapsed subtrees and hidden completed rows fall out
+ * for free.
+ *
+ * Falls back to the block's own edge member when the outline has nothing beyond it, so
+ * every caller has somewhere to put the caret at the very top or bottom of the document.
+ * Callers that DELETE the block must re-check that id against the mirror afterwards. */
+function nodeOutsideBlock(sel: SelectionResolved, dir: -1 | 1): string | null {
+  const ids = new Set(sel.ids);
+  let first = -1;
+  let last = -1;
+  for (let i = 0; i < currentRows.length; i++) {
+    const row = currentRows[i];
+    // A derived "+" placeholder carries its PARENT's id, so the tint test covers it too
+    // and the span ends where the user actually sees it end.
+    if (sel.tint.has(row.nodeId)) last = i;
+    if (first < 0 && row.kind === "node" && ids.has(row.nodeId)) first = i;
+  }
+  if (first < 0) return null;
+  const from = dir < 0 ? first : Math.max(last, first);
+  for (let i = from + dir; i >= 0 && i < currentRows.length; i += dir) {
+    const row = currentRows[i];
+    if (row.kind !== "node") continue;
+    if (mirror.get(row.nodeId)?.kind === "line") continue; // the caret steps over dividers
+    return row.nodeId;
+  }
+  return dir < 0 ? sel.ids[0] : sel.ids[sel.ids.length - 1];
+}
+
+/** ↑/↓ while a node selection is live: drop the selection and put the caret on the
+ * nearest focusable row just outside the block, so the arrows keep walking the outline.
+ * Without this a selection was a dead end — nothing is first responder while one is live,
+ * so a plain arrow fell through `handleSelectionKey` and did nothing at all.
+ *
+ * The caret intents are the SAME ones `performDecision`'s cross-node arrows use, so
+ * collapsing a selection upward/downward lands the caret exactly where arrowing out of
+ * the block's edge node would have. */
+export function collapseSelectionToCaret(dir: -1 | 1) {
+  const sel = useSelection.getState();
+  const resolved = sel.resolved;
+  if (!resolved || resolved.ids.length === 0) return;
+  const target = nodeOutsideBlock(resolved, dir);
+  sel.clear();
+  if (!target) return;
+  ws().focusNode(
+    target,
+    "main",
+    dir < 0 ? { type: "lastLineStart" } : { type: "start" },
+  );
+}
+
+/** ⌫ on a multi-selection: delete every member's subtree in ONE undo step, then land the
+ * caret where the block was — the row above it, else the row below, else nothing.
+ *
+ * Both neighbours are resolved BEFORE the invoke, since the rows that name them are about
+ * to stop existing, and re-checked against the mirror after it: `nodeOutsideBlock` falls
+ * back to a MEMBER when the block runs to the end of the outline, and that member is
+ * exactly what just went away. The old path focused nothing at all, which left the caret
+ * gone with no key able to bring it back. */
+export async function deleteBlockAndFocus(ids: string[]) {
+  const resolved = useSelection.getState().resolved;
+  const prev = resolved ? nodeOutsideBlock(resolved, -1) : null;
+  const next = resolved ? nodeOutsideBlock(resolved, 1) : null;
+  useSelection.getState().clear();
+  await api.deleteBlock(ids);
+  const s = ws();
+  if (prev && mirror.get(prev)) s.focusNode(prev, "main", { type: "end" });
+  else if (next && mirror.get(next)) s.focusNode(next, "main", { type: "start" });
+  else s.clearFocus();
+}
+
+/** ⌘3 over a block of non-prompt nodes: fold it into ONE prompt whose text is the members
+ * as a "- " list. The store does the folding in a single transaction (see
+ * `merge_into_prompt`), so this is only the focus half.
+ *
+ * The selection is dropped and the caret goes into the resulting prompt — that panel is
+ * what the user is about to type in, and a "selection" of the one surviving node would be
+ * a state with nothing left to act on. `newNode` is null when the store found fewer than
+ * two mergeable members, in which case nothing happened and the selection must survive
+ * intact. */
+export async function mergeSelectionIntoPrompt(ids: string[]) {
+  const out = await api.mergeIntoPrompt(ids);
+  const sel = useSelection.getState();
+  if (!out.newNode) {
+    sel.refresh();
+    return;
+  }
+  sel.clear();
+  ws().focusNode(out.newNode, "main", { type: "end" });
 }
 
 /** Run a native row-(⋯)-menu selection through the existing gesture handlers — the
