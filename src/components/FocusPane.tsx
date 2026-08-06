@@ -7,7 +7,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { currentTaskChain } from "../lib/currentTask";
+import { walkCurrentTask } from "../lib/currentTask";
 import type { NodeRec } from "../lib/types";
 import { revealNode } from "../state/controller";
 import { useFocusPane } from "../state/focusPane";
@@ -40,37 +40,35 @@ function useNodeRec(id: string) {
   return mirror.get(id);
 }
 
-/** The pinned node's live Current Task — the first open leaf under it (`currentTask.ts`),
- * or null when nothing is left to do there.
+/** The pinned node's live Current Task — the first open thing under it that can be one
+ * (`currentTask.ts`), or null when there is nothing left to do there.
  *
- * The walk's result depends on exactly two things: the CHILD LISTS it scanned, and the
- * `kind`/`isCompleted` of the children in them. A child list change and a completion flip
- * are both STRUCTURAL, so the pane's own structure subscription re-runs this walk for
- * those — but a `kind` flip is deliberately NOT structural (the flatten is unchanged), and
- * neither is the task's own TEXT. So subscribe to every record the walk could have read:
- * the children of the focused node and of each node it descended into. That set is a
- * superset of what it examined and contains the task itself, which is what keeps the line
- * tracking a live edit from this window or any other — the same two-grain rule the row
- * title already follows, and the same one whose absence left mirrored titles stale. */
+ * The walk's result depends on the CHILD LISTS it scanned and on the `kind`/`isCompleted`
+ * of the children in them; the DISPLAY depends on the task's own text. A child list change
+ * and a completion flip are both STRUCTURAL, so the pane's structure subscription re-runs
+ * the walk for those — but a `kind` flip is deliberately NOT structural (the flatten is
+ * unchanged), and neither is text. So subscribe to `visited`, which is precisely the
+ * records the walk READ: the ones it rejected as much as the ones it descended into, since
+ * a rejection is a decision. That is the same two-grain rule the row title already follows,
+ * and the same one whose absence left mirrored titles stale. */
 function useCurrentTask(focusedId: string): NodeRec | null {
-  const chain = currentTaskChain(mirror, focusedId);
-  const watched = [focusedId, ...chain].flatMap((p) => mirror.childrenOf(p));
-  // Re-subscribe only when the watched SET changes; the closures below are recreated with
-  // it, so a stale `watched` can never outlive the key that describes it.
-  const key = watched.join("\u0000");
+  const { chain, visited } = walkCurrentTask(mirror, focusedId);
+  // Re-subscribe only when the visited SET changes; the closures below are recreated with
+  // it, so a stale `visited` can never outlive the key that describes it.
+  const key = visited.join("\u0000");
   const subscribe = useMemo(
     () => (cb: () => void) => {
-      const offs = watched.map((id) => subscribeNode(id)(cb));
+      const offs = visited.map((id) => subscribeNode(id)(cb));
       return () => {
         for (const off of offs) off();
       };
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `key` describes `watched`
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `key` describes `visited`
     [key],
   );
   const version = useCallback(
-    () => watched.map(nodeVersion).join(","),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `key` describes `watched`
+    () => visited.map(nodeVersion).join(","),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `key` describes `visited`
     [key],
   );
   useSyncExternalStore(subscribe, version);

@@ -21,7 +21,7 @@ npm install                  # once
 scripts/dev.sh [store.sqlite]  # tauri dev against an ISOLATED store (default /tmp/promptflow-tauri-dev.sqlite)
 scripts/build.sh             # release bundle -> src-tauri/target/release/bundle/macos/PromptFlow.app
 scripts/verify.sh            # launch smoke test of the release build (throwaway store, polls for a window)
-npm test                     # vitest: 10 suites / 89 tests (resolveKey, wrap, bold, runs, caret, projectDrop, projectSelectionHead, rowBands, kindMorph, currentTask)
+npm test                     # vitest: 10 suites / 97 tests (resolveKey, wrap, bold, runs, caret, projectDrop, projectSelectionHead, rowBands, kindMorph, currentTask)
 cd src-tauri && cargo test   # 19 tests (store mutations/undo, block bold + prompt merge, archive round-trip + collect)
 npx tsc --noEmit             # typecheck (strict; noUnusedLocals/Parameters)
 npm run dev & node scripts/qa.mjs [outDir]   # headless visual QA in WebKit (see below)
@@ -140,22 +140,30 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   nodes (shared store, synced by delta); only the numbered `pf.focusOrder` is per-device.
   **A row is `title ▸ CURRENT TASK`, not a breadcrumb** — the ancestor chain said where a
   pinned node LIVES, which the outline already shows. The task (`lib/currentTask.ts`,
-  pinned by `currentTask.test.ts`) is the first OPEN LEAF under the node: descend the child
-  lists taking the first child that is neither completed nor a divider, and stop where
-  there is no such child. So `Example > Parent 1 > Child 1` reads as `Child 1`, NOT as its
+  pinned by `currentTask.test.ts`) is the first OPEN thing under the node that can BE one:
+  descend the child lists taking the first child that is open work, and stop where nothing
+  open is left below. So `Example > Parent 1 > Child 1` reads as `Child 1`, NOT as its
   first CHILD `Parent 1` — a parent is a container for work, not the work. A completed node
   is skipped WHOLESALE and never descended into (ticking one means its subtree is done), so
   the one case that stops on a non-leaf is a node whose children are ALL done while it is
-  not: nothing is left under it, so it IS what remains. No open descendant ⇒ no
+  not: nothing is left under it, so it IS what remains. **Two kinds can never be the task,
+  and the difference between them is the whole reason this BACKTRACKS**: a `line` is
+  skipped outright (it renders no text and parents nothing, exactly as every caret path
+  steps over one), but a `promptDraft` is stepped over and still DESCENDED INTO — a draft
+  is something you write, not something you do, yet real work parented under one must not
+  go invisible. A prompt with nothing open under it therefore can't stand as the answer,
+  and the walk falls back out of it to the next sibling. No such descendant ⇒ no
   `.focus-task` ELEMENT at all (not an empty one), and the row is just its accent title —
   repeating the pinned node as its own task would say nothing. The whole row (disc,
   title, task line) reveals the TASK, falling back to the pinned node when there is none.
-  `useCurrentTask` subscribes to every record the walk could have READ — the children of
-  the focused node and of each node it descended into — because the walk's result turns on
-  their `kind` and `isCompleted` and the display on the task's TEXT, and of those only
-  `isCompleted` is structural (a `kind` flip deliberately isn't: the flatten is unchanged).
-  The structure subscription alone would leave the line stale, exactly as it once did for
-  titles.
+  `useCurrentTask` subscribes to the walk's `visited` — precisely the records it READ, the
+  ones it rejected as much as the ones it descended into, since a rejection is a decision
+  (siblings PAST the answer are deliberately absent: nothing they do matters while the
+  winner stands, and if it stops standing that is a change to a record already in the set).
+  It has to be that and not the structure version, because the result turns on their `kind`
+  and `isCompleted` and the display on the task's TEXT, and of those only `isCompleted` is
+  structural — a `kind` flip deliberately isn't (the flatten is unchanged), so converting
+  the task to a prompt is a repaint the structure subscription can't see at all.
   Two subscription grains, both load-bearing: (1) each `FocusRow` subscribes to ITS node
   via `subscribeNode` (`useNodeRec`) so a title tracks a live text
   edit — a highlight flip is structural but a keystroke is NOT, so the pane's own

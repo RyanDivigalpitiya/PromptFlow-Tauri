@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { currentTaskChain, currentTaskId, type TaskTree } from "./currentTask";
+import { currentTaskId, walkCurrentTask, type TaskTree } from "./currentTask";
 import type { NodeKind } from "./types";
 
 /** The screenshot's tree, which is the whole point of the descent rule:
@@ -98,19 +98,125 @@ describe("currentTaskId", () => {
     ).toBeNull();
   });
 
-  it("takes a prompt or a checkbox as a task like any other node", () => {
-    expect(
-      taskIn({
-        Example: { parent: null },
-        Draft: { parent: "Example", kind: "promptDraft" },
-      }),
-    ).toBe("Draft");
+  it("takes a checkbox as a task like any other node", () => {
     expect(
       taskIn({
         Example: { parent: null },
         Box: { parent: "Example", kind: "checkbox" },
       }),
     ).toBe("Box");
+  });
+});
+
+describe("currentTaskId, prompts", () => {
+  it("never shows a prompt as the task — it steps over one", () => {
+    expect(
+      taskIn({
+        Example: { parent: null },
+        Draft: { parent: "Example", kind: "promptDraft" },
+        Real: { parent: "Example" },
+      }),
+    ).toBe("Real");
+  });
+
+  it("…but DESCENDS into it, so work parented under a prompt is never hidden", () => {
+    expect(
+      taskIn({
+        Example: { parent: null },
+        Draft: { parent: "Example", kind: "promptDraft" },
+        "Refine the wording": { parent: "Draft" },
+        Later: { parent: "Example" },
+      }),
+    ).toBe("Refine the wording");
+  });
+
+  it("backtracks out of a prompt with nothing open under it", () => {
+    // The whole reason this is a backtracking walk: `Draft` is reached first and descended
+    // into, and only when it yields nothing does the walk fall back to its next sibling.
+    expect(
+      taskIn({
+        Example: { parent: null },
+        Draft: { parent: "Example", kind: "promptDraft" },
+        "its done child": { parent: "Draft", done: true },
+        "The real next action": { parent: "Example" },
+      }),
+    ).toBe("The real next action");
+  });
+
+  it("backtracks out of nested prompts too", () => {
+    expect(
+      taskIn({
+        Example: { parent: null },
+        Outer: { parent: "Example", kind: "promptDraft" },
+        Inner: { parent: "Outer", kind: "promptDraft" },
+        Real: { parent: "Example" },
+      }),
+    ).toBe("Real");
+  });
+
+  it("has no task when a prompt is all there is", () => {
+    expect(
+      taskIn({
+        Example: { parent: null },
+        Draft: { parent: "Example", kind: "promptDraft" },
+      }),
+    ).toBeNull();
+  });
+
+  it("still skips a COMPLETED prompt wholesale — never looks inside it", () => {
+    expect(
+      taskIn({
+        Example: { parent: null },
+        Draft: { parent: "Example", kind: "promptDraft", done: true },
+        "buried under a done prompt": { parent: "Draft" },
+        Real: { parent: "Example" },
+      }),
+    ).toBe("Real");
+  });
+});
+
+describe("walkCurrentTask", () => {
+  it("returns the descent — focused exclusive, task inclusive", () => {
+    expect(walkCurrentTask(tree(SCREENSHOT), "Example").chain).toEqual([
+      "Parent 1",
+      "Child 1",
+    ]);
+  });
+
+  it("is empty when there is no task, so a view subscribes to nothing extra", () => {
+    expect(walkCurrentTask(tree(SCREENSHOT), "Child 1").chain).toEqual([]);
+  });
+
+  it("visits every record it READ, including the ones it rejected", () => {
+    const spec: Record<string, Spec> = {
+      Example: { parent: null },
+      Rule: { parent: "Example", kind: "line" },
+      Done: { parent: "Example", done: true },
+      "buried under Done": { parent: "Done" },
+      Draft: { parent: "Example", kind: "promptDraft" },
+      "under the prompt": { parent: "Draft", done: true },
+      Real: { parent: "Example" },
+      Later: { parent: "Example" },
+    };
+    const { chain, visited } = walkCurrentTask(tree(spec), "Example");
+    expect(chain).toEqual(["Real"]);
+    // The divider, the completed node and the fruitless prompt all decided the outcome by
+    // their kind/completion, so all three are watched — as is the prompt's own child, read
+    // while descending. `buried under Done` was never read (a completed node is skipped
+    // wholesale) and `Later` never reached, since `Real` already won.
+    expect(visited).toEqual(["Rule", "Done", "Draft", "under the prompt", "Real"]);
+  });
+
+  it("watches the task's own children — they are why it is the task", () => {
+    const { visited } = walkCurrentTask(
+      tree({
+        Example: { parent: null },
+        "Parent 1": { parent: "Example" },
+        "done kid": { parent: "Parent 1", done: true },
+      }),
+      "Example",
+    );
+    expect(visited).toEqual(["Parent 1", "done kid"]);
   });
 
   it("ignores a child the mirror hasn't caught up to", () => {
@@ -129,18 +235,5 @@ describe("currentTaskId", () => {
       get: () => ({ isCompleted: false, kind: "bulletPoint" }),
     };
     expect(currentTaskId(cyclic, "A")).toBe("B");
-  });
-});
-
-describe("currentTaskChain", () => {
-  it("returns the nodes the walk READ — focused exclusive, task inclusive", () => {
-    expect(currentTaskChain(tree(SCREENSHOT), "Example")).toEqual([
-      "Parent 1",
-      "Child 1",
-    ]);
-  });
-
-  it("is empty when there is no task, so a view subscribes to nothing extra", () => {
-    expect(currentTaskChain(tree(SCREENSHOT), "Child 1")).toEqual([]);
   });
 });

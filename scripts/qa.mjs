@@ -884,6 +884,23 @@ const FOCUS_NODES = [
     isCompleted: true,
     completedAt: T,
   }),
+  // A prompt can never BE the task, but the walk still descends INTO one: the task here
+  // is the prompt's own child, not the plain sibling below it.
+  node("fx4", null, 3072, "Work under a prompt", "checkbox", { isHighlighted: true }),
+  node("fx4a", "fx4", 0, "You are a helpful coding agent. Refactor…", "promptDraft"),
+  node("fx4a1", "fx4a", 0, "Refine the wording", "checkbox"),
+  node("fx4b", "fx4", 1024, "A plain sibling task", "checkbox"),
+  // …and a prompt with nothing open under it is BACKTRACKED out of, not stopped on.
+  node("fx5", null, 4096, "Prompt, then a task", "checkbox", { isHighlighted: true }),
+  node("fx5a", "fx5", 0, "A prompt with nothing to do", "promptDraft"),
+  node("fx5a1", "fx5a", 0, "its done child", "checkbox", {
+    isCompleted: true,
+    completedAt: T,
+  }),
+  node("fx5b", "fx5", 1024, "The real next action", "checkbox"),
+  // A prompt is ALL there is: no task at all, exactly as for a childless node.
+  node("fx6", null, 5120, "Only a prompt under here", "checkbox", { isHighlighted: true }),
+  node("fx6a", "fx6", 0, "Just a prompt, nothing to do", "promptDraft"),
 ];
 
 const fp = await b.newPage({
@@ -919,7 +936,7 @@ await fp.addInitScript(
       focusSidebarWidth: 260,
       focusTopHeight: "auto",
     },
-    order: ["fx1", "fx2", "fx3"],
+    order: ["fx1", "fx2", "fx3", "fx4", "fx5", "fx6"],
   },
 );
 await fp.goto(URL_, { waitUntil: "domcontentloaded" });
@@ -1012,6 +1029,18 @@ await fpDelta([
   },
 ]);
 const afterParentDone = await focusTasks();
+
+// A pure KIND flip is deliberately NOT a structural delta (the flatten is unchanged), so
+// the pane's structure subscription can't see it — `visited` is the only thing that
+// repaints this. Turning the prompt's own child into a prompt leaves nothing open under
+// `fx4a`, and the walk backtracks out of it to the plain sibling.
+await fpDelta([
+  {
+    type: "upsert",
+    node: node("fx4a1", "fx4a", 0, "Refine the wording", "promptDraft"),
+  },
+]);
+const afterKindFlip = (await focusTasks())[3];
 
 // The task line is now the row's PRIMARY content, so the narrow dock is where it is most
 // at risk: give it text no 260px sidebar can hold and check it ellipsizes on ONE line
@@ -1131,6 +1160,9 @@ const checks = [
   ["focus: the task is white, the title is not", white(focusRest[0].taskColor) && !white(focusRest[0].titleColor)],
   ["focus: a pinned node with no children has NO task element", focusRest[1].task === null],
   ["focus: …nor has one whose every child is done", focusRest[2].task === null],
+  ["focus: a prompt is never the task, but is DESCENDED into", focusRest[3].task === "Refine the wording"],
+  ["focus: a prompt with nothing open under it is backtracked out of", focusRest[4].task === "The real next action"],
+  ["focus: a prompt alone leaves no task at all", focusRest[5].task === null],
   ["focus: the ancestor breadcrumb is gone entirely", focusStrays === 0],
   ["focus: clicking the row reveals the TASK through collapsed ancestors", afterReveal.focused === "Child 1" && afterReveal.rowExists],
   ["focus: ticking the task off in the outline advances it, live", afterComplete[0] === "Child 2"],
@@ -1139,7 +1171,8 @@ const checks = [
   ["focus: a new first child takes over as the task", afterInsert[0] === "Brand new first child"],
   ["focus: …and deleting it hands the task back", afterRemove[0] === "Child 1, renamed"],
   ["focus: completing a parent skips its whole subtree", afterParentDone[0] === "Child 3"],
-  ["focus: the other rows never moved", JSON.stringify(afterParentDone.slice(1)) === "[null,null]"],
+  ["focus: the other rows never moved", JSON.stringify(afterParentDone.slice(1)) === JSON.stringify(focusRest.slice(1).map((r) => r.task))],
+  ["focus: converting the task to a prompt backtracks off it — on a KIND flip alone", afterKindFlip === "A plain sibling task"],
   ["focus: an over-long task stays on ONE line in the sidebar dock, overflowing", sidebarTask.lines <= 1 && sidebarTask.clipped],
   ["focus: …and that overflow is painted as an ellipsis, not a hard clip", sidebarTask.ellipsis === "ellipsis"],
   ["focus: …without pushing the row wider than the title above it", sidebarTask.withinTitle],
@@ -1160,7 +1193,7 @@ console.log("  pie   :", fullPie.map((f) => `${f.t}:${f.w}`).join(" "));
 console.log("  tick  :", fullPie.map((f) => `${f.t}:${f.c}`).join(" "));
 console.log("parents :", JSON.stringify({ bulletDone, bulletHalf, checkboxDone }));
 console.log("focus   :", JSON.stringify(focusRest));
-console.log("  live  :", JSON.stringify({ afterReveal, afterComplete, afterUncomplete, afterRename, afterInsert, afterRemove, afterParentDone }));
+console.log("  live  :", JSON.stringify({ afterReveal, afterComplete, afterUncomplete, afterRename, afterInsert, afterRemove, afterParentDone, afterKindFlip }));
 console.log("  dock  :", JSON.stringify(sidebarTask));
 if (errors.length) console.log("errors  :", errors.slice(0, 5));
 console.log();
