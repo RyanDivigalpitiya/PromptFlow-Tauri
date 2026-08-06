@@ -1069,6 +1069,256 @@ const sidebarTask = await fp.evaluate(() => {
 });
 await shot("focus-pane-sidebar", fp.locator(".app-body"));
 
+// ---- 8. Folding a HIERARCHICAL selection into one prompt ---------------------
+// A selection is a sibling range with every member's SUBTREE tinted, so what the user
+// sweeps spans levels — and ⌘3 now folds all of it, each descendant its own bullet two
+// spaces deeper per level. Two halves, meeting where the harness can see them:
+//   • the GESTURE, which is all the stub can watch a mutation do — that ⌘3 over a block
+//     whose tint runs deeper still fires `merge_into_prompt`, with the MEMBER ids only
+//     (the store owns the tree and expands them itself);
+//   • the RESULT rendered, staged through `__PF_QA_DELTA` because the stub records
+//     mutations without applying them. The text is the literal `cargo test`'s
+//     `merge_into_prompt_nests_descendants_by_depth` asserts over the same tree — the two
+//     suites meet at that string, exactly as ⌘B's meet at the command name.
+// Worth rendering at all because the indent is LEADING WHITESPACE, which only survives if
+// the prompt's text really is `white-space: pre-wrap` — a detail no Rust test can see.
+//
+// Its own page and fixture: the sweep sections above anchor on "the last row" and on the
+// empty background under the list, so growing the main fixture would break them.
+const FOLD_NODES = [
+  node("g1", null, 0, "Alpha", "bulletPoint"),
+  node("g1a", "g1", 0, "Child one", "checkbox"),
+  node("g1a1", "g1a", 0, "Grandchild", "bulletPoint"),
+  node("g1b", "g1", 1024, "Child two", "bulletPoint"),
+  node("g2", null, 1024, "Beta", "bulletPoint"),
+  node("g2a", "g2", 0, "Beta's child", "bulletPoint"),
+  // Gamma parents a DRAFT: the "is this a conversion instead?" test is member-level, so a
+  // draft buried in a member's subtree is content being collected, not a veto.
+  node("g3", null, 2048, "Gamma", "bulletPoint"),
+  node("g3a", "g3", 0, "a nested draft", "promptDraft"),
+];
+/** What `Store::merge_into_prompt` makes of [Alpha, Beta] — see the cargo test named above. */
+const FOLDED = "- Alpha\n  - Child one\n    - Grandchild\n  - Child two\n- Beta\n  - Beta's child";
+
+const gp = await b.newPage({
+  viewport: { width: 720, height: 620 },
+  deviceScaleFactor: 2,
+  colorScheme: "dark",
+});
+gp.on("pageerror", (e) => errors.push(String(e)));
+gp.on("console", (m) => {
+  if (m.type() === "error") errors.push(m.text());
+});
+await gp.addInitScript(tauriStub, {
+  rev: 1,
+  nodes: FOLD_NODES,
+  canUndo: false,
+  canRedo: false,
+});
+await gp.addInitScript(() =>
+  localStorage.setItem(
+    "pf.win.main",
+    JSON.stringify({
+      collapsed: [],
+      hideCompleted: false,
+      fontSize: 16,
+      drill: null,
+      focusPaneExpanded: false,
+      focusPaneLayout: "top",
+      focusSidebarWidth: 260,
+      focusTopHeight: "auto",
+    }),
+  ),
+);
+await gp.goto(URL_, { waitUntil: "domcontentloaded" });
+await gp.waitForSelector(".node-row", { timeout: 15000 });
+await gp.addStyleTag({ content: "html,body{background:#101014 !important}" });
+await gp.waitForTimeout(300);
+
+const gRow = (text) => gp.locator(".node-row", { hasText: text }).first();
+const gMarked = (cls) =>
+  gp.evaluate(
+    (sel) =>
+      [...document.querySelectorAll(sel)].map(
+        (r) =>
+          r.querySelector(".node-text-wrap, .node-text-static")?.textContent.trim() ?? "",
+      ),
+    `.node-row.${cls}`,
+  );
+/** Sweep from `fromText`'s text out to `toText`'s row and LEAVE the selection live. */
+async function gSweep(fromText, toText) {
+  const a = await gRow(fromText).locator(".node-text-wrap").first().boundingBox();
+  const bb = await gRow(toText).boundingBox();
+  await gp.mouse.move(a.x + 8, a.y + a.height / 2);
+  await gp.mouse.down();
+  await gp.mouse.move(bb.x + 160, bb.y + bb.height / 2, { steps: 8 });
+  await gp.waitForTimeout(60);
+  await gp.mouse.up();
+  await gp.waitForTimeout(60);
+}
+
+// Sweep root-level Alpha DOWN onto a grandchild-level row: the head resolves to Beta, so
+// the members are two root siblings while the tint runs two levels deeper.
+await gSweep("Alpha", "Beta's child");
+const foldSel = { members: await gMarked("selected"), tinted: await gMarked("sel-tint") };
+await shot("fold-selection", gp.locator(".app-body"));
+await gp.keyboard.press("Meta+3");
+await gp.waitForTimeout(140);
+const foldInvoke = await gp.evaluate(() => window.__PF_QA_CALLS.at(-1));
+await gp.keyboard.press("Escape");
+await gp.waitForTimeout(80);
+
+// A member whose SUBTREE holds a prompt still folds — the veto is member-level.
+await gSweep("Beta", "a nested draft");
+await gp.keyboard.press("Meta+3");
+await gp.waitForTimeout(140);
+const nestedDraftInvoke = await gp.evaluate(() => window.__PF_QA_CALLS.at(-1));
+await gp.keyboard.press("Escape");
+await gp.waitForTimeout(80);
+
+// A LONE member is not a fold, however deep its tint runs: sweeping a parent onto its own
+// grandchild resolves the head back to the parent, so the selection is one node — and ⌘3
+// there is the ordinary conversion, which must never silently eat a subtree.
+await gSweep("Alpha", "Grandchild");
+const soloSel = await gMarked("selected");
+await gp.keyboard.press("Meta+3");
+await gp.waitForTimeout(140);
+const soloInvoke = await gp.evaluate(() => window.__PF_QA_CALLS.at(-1));
+await gp.keyboard.press("Escape");
+await gp.waitForTimeout(80);
+
+// Now stage what the store answers with: the head becomes the folded prompt and every
+// node it swallowed — its OWN children included, since they are in its text now — goes.
+// Sampled per frame while it lands: the head GROWS (one line → the whole folded list) in
+// the same delta that removes six rows, and the rows below have to absorb both at once.
+// The seam sends this down the `leave` path — `runKindReflow`'s remeasure fast-path is
+// gated on `deleted.size === 0`, so the head's new height reaches the virtualizer only
+// when its ResizeObserver reports it, and the slide below re-targets mid-flight. What
+// this watches for is the teardown landing BEFORE that corrected slide finishes, which
+// would drop `.rows-animating` and snap the remainder.
+const foldTrace = await gp.evaluate(
+  (folded) =>
+    new Promise((resolve) => {
+      const survivor = () =>
+        [...document.querySelectorAll(".node-row")].find(
+          (r) =>
+            !r.closest(".collapse-ghosts") &&
+            r.querySelector(".node-text-wrap, .node-text-static")?.textContent.trim() ===
+              "Gamma",
+        );
+      const samples = [];
+      const t0 = performance.now();
+      const tick = () => {
+        const el = survivor();
+        samples.push({
+          t: +(performance.now() - t0).toFixed(1),
+          y: el ? +el.getBoundingClientRect().top.toFixed(1) : null,
+          on: document.querySelector(".outline-inner")?.classList.contains("rows-animating"),
+        });
+        if (performance.now() - t0 < 800) requestAnimationFrame(tick);
+        else resolve(samples);
+      };
+      window.__PF_QA_DELTA([
+      {
+        type: "upsert",
+        node: {
+          id: "g1",
+          parent: null,
+          position: 0,
+          text: folded,
+          note: "",
+          kind: "promptDraft",
+          isCompleted: false,
+          isHighlighted: false,
+          isCollapsed: false,
+          boldRanges: [],
+          italicRanges: [],
+          underlineRanges: [],
+          createdAt: 1700000000,
+          updatedAt: 1700000000,
+          completedAt: null,
+        },
+      },
+        ...["g1a1", "g1a", "g1b", "g2a", "g2"].map((id) => ({ type: "delete", id })),
+      ]);
+      requestAnimationFrame(tick);
+    }),
+  FOLDED,
+);
+/** Every LIVE row's first line after the fold: the swallowed nodes are gone — the HEAD's
+ * own children included, which is the half that would show every folded line twice —
+ * while the untouched ones stand. Ghost clones are excluded (the leave animation owns
+ * those and is deliberately left to finish), as is the trailing "+" placeholder. */
+const foldSurvivors = await gp.evaluate(() =>
+  [...document.querySelectorAll(".node-row")]
+    .filter(
+      (r) => !r.closest(".collapse-ghosts") && !r.classList.contains("add-child-row"),
+    )
+    .map(
+      (r) =>
+        (
+          r.querySelector(".node-text-wrap, .node-text-static")?.textContent ?? ""
+        ).split("\n")[0],
+    ),
+);
+
+/** The folded prompt as the engine actually laid it out: the exact text it kept, and for
+ * every line the x/y of its first INK (the bullet's dash — a leading space has no glyph to
+ * measure, and the dash's x IS the indent a reader sees). */
+const folded = await gp.evaluate(() => {
+  const row = document.querySelector(".node-row.kind-promptDraft");
+  const el = row.querySelector(".node-text-static, .node-text-wrap");
+  // Map global text offsets onto the run spans, so a styled fold measures the same way.
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const parts = [];
+  let total = 0;
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    parts.push({ node: n, start: total });
+    total += n.data.length;
+  }
+  const text = parts.map((p) => p.node.data).join("");
+  const rectAt = (i) => {
+    const p = [...parts].reverse().find((q) => q.start <= i);
+    const r = document.createRange();
+    r.setStart(p.node, i - p.start);
+    r.setEnd(p.node, i - p.start + 1);
+    return r.getBoundingClientRect();
+  };
+  const lines = [];
+  let off = 0;
+  for (const line of text.split("\n")) {
+    const ink = line.search(/\S/);
+    const r = ink < 0 ? null : rectAt(off + ink);
+    lines.push({ text: line, x: r ? +r.left.toFixed(2) : null, y: r ? +r.top.toFixed(2) : null });
+    off += line.length + 1;
+  }
+  return {
+    text,
+    lines,
+    panelH: +row.querySelector(".prompt-panel").getBoundingClientRect().height.toFixed(2),
+    lineH: parseFloat(getComputedStyle(el).fontSize) * 1.35,
+  };
+});
+await shot("fold-result", gp.locator(".app-body"));
+/** The landing, read off the trace: the first row BELOW the fold has to absorb six rows
+ * leaving AND the head growing into a six-line panel, and the head's new height only
+ * reaches the virtualizer through its ResizeObserver. `settled` is the whole point — the
+ * distance still to travel at the last frame that had `.rows-animating` on. Anything but
+ * ~0 means the teardown fired first and the rest of the slide was a snap. */
+const foldFinalY = foldTrace[foldTrace.length - 1].y;
+const foldLastOn = [...foldTrace].reverse().find((f) => f.on);
+const foldSlide = {
+  frames: new Set(foldTrace.map((f) => f.y)).size,
+  travel: +(foldTrace[0].y - foldFinalY).toFixed(1),
+  maxStep: +Math.max(
+    ...foldTrace.slice(1).map((f, i) => Math.abs(f.y - foldTrace[i].y)),
+  ).toFixed(1),
+  settled: foldLastOn ? +Math.abs(foldLastOn.y - foldFinalY).toFixed(2) : null,
+};
+const foldX = folded.lines.map((l) => l.x);
+// Indent STEP per level, measured off the rendered dashes: depth 0 → 1 → 2.
+const foldStep = [foldX[1] - foldX[0], foldX[2] - foldX[1]];
+
 // ---- Report ------------------------------------------------------------------
 const eq = (a, b, tol = 0.6) => Math.abs(a - b) <= tol;
 const distinct = (xs) => new Set(xs.filter((v) => v != null)).size;
@@ -1176,6 +1426,24 @@ const checks = [
   ["focus: an over-long task stays on ONE line in the sidebar dock, overflowing", sidebarTask.lines <= 1 && sidebarTask.clipped],
   ["focus: …and that overflow is painted as an ellipsis, not a hard clip", sidebarTask.ellipsis === "ellipsis"],
   ["focus: …without pushing the row wider than the title above it", sidebarTask.withinTitle],
+  // --- folding a hierarchical selection ---
+  ["fold: a sweep onto a deeper row still selects two root members", JSON.stringify(foldSel.members) === '["Alpha","Beta"]'],
+  ["fold: …with both subtrees, two levels deep, tinted", ["Child one", "Grandchild", "Child two", "Beta's child"].every((t) => foldSel.tinted.includes(t))],
+  ["fold: ⌘3 folds the block rather than converting it", foldInvoke.cmd === "merge_into_prompt"],
+  ["fold: it sends the MEMBERS, not the tint — the store expands them", JSON.stringify(foldInvoke.args.ids) === '["g1","g2"]'],
+  ["fold: a draft nested inside a member does not veto the fold", nestedDraftInvoke.cmd === "merge_into_prompt"],
+  ["fold: a LONE member with a deep tint is converted, not folded", soloSel.length === 1 && soloInvoke.cmd === "set_kind_block"],
+  // textContent is CSS-blind, so this pins the STRING the store's literal produced, not
+  // its rendering; the indent-step checks below are what prove the spaces actually paint.
+  ["fold: the prompt's text is the folded list, verbatim", folded.text === FOLDED],
+  ["fold: every folded node is gone, the untouched ones stand", JSON.stringify(foldSurvivors) === '["- Alpha","Gamma","a nested draft"]'],
+  ["fold: each line is its own line box", distinct(folded.lines.map((l) => l.y)) === 6],
+  ["fold: the panel is six lines tall", folded.panelH >= 6 * folded.lineH],
+  ["fold: the leading spaces PAINT — depth 1 starts right of depth 0, depth 2 right of 1 (pre-wrap holds them)", foldStep[0] > 2 && foldStep[1] > 2],
+  ["fold: …by the SAME step per level", eq(foldStep[0], foldStep[1], 0.2)],
+  ["fold: siblings at one depth share an indent", eq(foldX[1], foldX[3]) && eq(foldX[0], foldX[4]) && eq(foldX[3], foldX[5])],
+  ["fold: the rows below SLIDE up as the block leaves (>8 interpolated frames)", foldSlide.frames > 8 && foldSlide.travel > 40],
+  ["fold: …and land before `.rows-animating` drops — the remainder is never snapped", foldSlide.settled !== null && foldSlide.settled <= 1],
   ["no page errors", errors.length === 0],
 ];
 console.log("\nrest    :", JSON.stringify(rest));
@@ -1195,6 +1463,12 @@ console.log("parents :", JSON.stringify({ bulletDone, bulletHalf, checkboxDone }
 console.log("focus   :", JSON.stringify(focusRest));
 console.log("  live  :", JSON.stringify({ afterReveal, afterComplete, afterUncomplete, afterRename, afterInsert, afterRemove, afterParentDone, afterKindFlip }));
 console.log("  dock  :", JSON.stringify(sidebarTask));
+console.log("fold    :", JSON.stringify({ foldSel, foldInvoke, nestedDraftInvoke, soloSel, soloInvoke }));
+console.log("  rows  :", JSON.stringify(foldSurvivors));
+console.log("  lines :", JSON.stringify(folded.lines));
+console.log("  indent:", foldStep.map((s) => s.toFixed(2)).join(" / "), "px per level");
+console.log("  slide :", JSON.stringify(foldSlide));
+console.log("  trace :", foldTrace.filter((f) => f.on).map((f) => `${f.t}:${f.y}`).join(" "), "| then", foldFinalY);
 if (errors.length) console.log("errors  :", errors.slice(0, 5));
 console.log();
 let failed = 0;

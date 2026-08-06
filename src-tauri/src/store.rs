@@ -96,16 +96,26 @@ fn utf16_len(s: &str) -> i64 {
     s.encode_utf16().count() as i64
 }
 
-/// Append `ranges` onto `out`, shifted right by `off` — the merge's counterpart to
-/// `split_ranges`: where a split rebases runs to a new zero, this rebases them onto a
-/// position inside a longer text. Zero/negative lengths are dropped rather than carried.
-fn push_shifted_ranges(out: &mut Vec<i64>, ranges: &[i64], off: i64) {
+/// Append the part of `ranges` covering source `[lo, hi)` onto `out`, rebased so `lo`
+/// lands at `dst` — the merge's counterpart to `split_ranges`: where a split rebases runs
+/// to a new zero, this rebases them onto a position inside a longer text.
+///
+/// It clips as well as shifts because the merge no longer places a member's text as ONE
+/// piece: every LINE of it gets its own indent prefix, so every line lands at its own
+/// offset. A run spanning a newline therefore comes out as two runs with the indent
+/// between them unstyled — which is what you want (indentation is structure, not text)
+/// and is invisible for bold/italic either way. Zero/negative lengths are dropped rather
+/// than carried.
+fn push_clipped_ranges(out: &mut Vec<i64>, ranges: &[i64], lo: i64, hi: i64, dst: i64) {
     for pair in ranges.chunks(2) {
         if pair.len() < 2 || pair[1] <= 0 {
             continue;
         }
-        out.push(pair[0] + off);
-        out.push(pair[1]);
+        let (a, b) = (pair[0].max(lo), (pair[0] + pair[1]).min(hi));
+        if b > a {
+            out.push(a - lo + dst);
+            out.push(b - a);
+        }
     }
 }
 
@@ -1263,62 +1273,160 @@ impl Store {
         Ok((delta, MutationOut::default()))
     }
 
+    /// The block in DOCUMENT order (pre-order, sibling order within a level), each node with
+    /// its depth relative to the block's own level: every root at 0, then its subtree. Not
+    /// "visible" order and not the flatten — collapse is per-window and the store has no
+    /// window, so a collapsed or hide-completed-filtered node folds in like any other, the
+    /// same nodes `delete_block` would take and `copySubtree` would copy. A DIVIDER
+    /// contributes no line of its own —
+    /// it renders no text, exactly as every caret path and the markdown copy treat one — but
+    /// is still descended through. Explicit stack (never recursion) and cycle-guarded, like
+    /// `descendants`, since imported data could be malformed.
+    fn fold_lines(&self, roots: &[Uuid]) -> Vec<(Uuid, usize)> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        let mut stack: Vec<(Uuid, usize)> = roots.iter().rev().map(|r| (*r, 0)).collect();
+        while let Some((cur, depth)) = stack.pop() {
+            let Some(rec) = self.nodes.get(&cur) else {
+                continue;
+            };
+            if !seen.insert(cur) {
+                continue;
+            }
+            if rec.kind != NodeKind::Line {
+                out.push((cur, depth));
+            }
+            if let Some(kids) = self.children.get(&Some(cur)) {
+                for k in kids.iter().rev() {
+                    stack.push((*k, depth + 1));
+                }
+            }
+        }
+        out
+    }
+
     /// ⌘3 on a block of NON-prompt nodes: FOLD it into its first member. That node becomes a
-    /// `promptDraft` whose text is every member's text as a `"- "` list, and the rest are
-    /// deleted — the "collect these lines into one prompt" gesture, as opposed to
-    /// `set_kind_block`, which converts each member into a prompt of its own.
+    /// `promptDraft` whose text is the whole selected BLOCK as an indented `"- "` list, and
+    /// everything else in the block is deleted — the "collect these lines into one prompt"
+    /// gesture, as opposed to `set_kind_block`, which converts each member into a prompt of
+    /// its own.
     ///
-    /// One transaction, so a single ⌘Z puts the whole block back. The deleted members take
-    /// their SUBTREES with them, exactly as `delete_block` does — merging is a text
-    /// operation, and there is no non-arbitrary place to reparent children that were never
-    /// mentioned. The head keeps its own children, note, and position.
+    /// The block is not just the members: a selection is a sibling range with every member's
+    /// SUBTREE tinted, so what the user sees selected spans levels. Each descendant therefore
+    /// becomes its own bullet, indented two spaces per level below its member — the
+    /// bullet-and-indent shape `subtreeLines` (⌘C) already writes to the clipboard. Folding
+    /// used to take the members' text only and drop every descendant on the floor with the
+    /// nodes; now nothing selected goes unmentioned.
     ///
-    /// Style runs are carried across rather than dropped: each member's text lands at a known
-    /// offset in the merged string, so its runs shift by exactly that much (`push_shifted_
-    /// ranges`). Dividers are skipped here for the same reason ⌘1/2/3 never converts one —
-    /// they are inert to kind operations — so a divider inside the range survives the merge
-    /// instead of being folded into it or deleted.
+    /// One transaction, so a single ⌘Z puts the whole block back. The HEAD's own children are
+    /// deleted with the rest, because they are now IN its text — leaving them nested under
+    /// the new prompt would show every folded line twice. It keeps its note and position,
+    /// but NOT its completion: see the edit closure — a childless completed node is exactly
+    /// what `archive::collect` sweeps away.
+    /// A node's NOTE is not folded in: it is a second field rather than a line of the
+    /// outline, and the head's own note survives as a note, so folding the others' in would
+    /// put the same content in two different places depending on which member you swept
+    /// first.
+    ///
+    /// Style runs are carried across rather than dropped: each LINE of each node lands at a
+    /// known offset in the merged string, so its runs clip and shift by exactly that much
+    /// (`push_clipped_ranges`). A node's own multi-line text keeps its shape too — later
+    /// lines are indented to the bullet's TEXT column, so a wrapped thought stays visibly
+    /// part of its bullet instead of resetting to the left margin.
+    ///
+    /// Dividers are skipped for the same reason ⌘1/2/3 never converts one — they are inert to
+    /// kind operations — so a divider inside the range survives the merge at the top level,
+    /// while one nested inside a folded subtree simply contributes no line before going with
+    /// its parent.
     ///
     /// `new_node` names the HEAD: it is not newly created, but `MutationOut`'s contract for
     /// that field is "the node the calling window should focus", which is exactly what the
     /// caller wants next.
     pub fn merge_into_prompt(&mut self, ids: &[Uuid]) -> Result<(Delta, MutationOut), String> {
         const BULLET: &str = "- ";
+        const INDENT: &str = "  ";
+        /// What a continuation line hangs under: the bullet's width, spelled out rather
+        /// than measured, since `BULLET.len()` is BYTES — the unit this function is
+        /// otherwise at pains never to count in.
+        const CONT: &str = "  ";
         let block: Vec<Uuid> = self
             .normalized_block(ids)
             .into_iter()
             .filter(|x| self.nodes[x].kind != NodeKind::Line)
             .collect();
         // Below two members there is nothing to merge; the caller falls back to set_kind.
+        // Deliberately counts MEMBERS, not folded lines: ⌘3 on one node — with or without
+        // children — is the ordinary "make this a prompt" conversion, and must not silently
+        // eat its subtree.
         if block.len() < 2 {
             return Ok((self.empty_delta(), MutationOut::default()));
         }
         let head = block[0];
         // Composed BEFORE any mutation, so the whole text/run computation reads one
         // consistent tree and the transaction below is pure application.
+        let lines = self.fold_lines(&block);
         let mut text = String::new();
         let mut bold: Vec<i64> = Vec::new();
         let mut italic: Vec<i64> = Vec::new();
         let mut underline: Vec<i64> = Vec::new();
         // Where the NEXT character lands in the merged text, in UTF-16 units.
         let mut off: i64 = 0;
-        for (i, id) in block.iter().enumerate() {
+        for (i, (id, depth)) in lines.iter().enumerate() {
             if i > 0 {
                 text.push('\n');
                 off += 1;
             }
-            text.push_str(BULLET);
-            off += utf16_len(BULLET);
+            let pad = INDENT.repeat(*depth);
+            // A continuation line hangs under the bullet's TEXT, not under its dash.
+            let cont = format!("{pad}{CONT}");
             let rec = &self.nodes[id];
-            push_shifted_ranges(&mut bold, &rec.bold_ranges, off);
-            push_shifted_ranges(&mut italic, &rec.italic_ranges, off);
-            push_shifted_ranges(&mut underline, &rec.underline_ranges, off);
-            text.push_str(&rec.text);
-            off += utf16_len(&rec.text);
+            // Offset of the current line within `rec.text`, in the same UTF-16 units.
+            let mut src: i64 = 0;
+            for (j, line) in rec.text.split('\n').enumerate() {
+                if j > 0 {
+                    text.push('\n');
+                    off += 1;
+                    src += 1;
+                }
+                // An empty continuation line takes no prefix — indenting nothing would
+                // leave trailing whitespace on a blank line.
+                let prefix = if j == 0 {
+                    format!("{pad}{BULLET}")
+                } else if line.is_empty() {
+                    String::new()
+                } else {
+                    cont.clone()
+                };
+                text.push_str(&prefix);
+                off += utf16_len(&prefix);
+                let len = utf16_len(line);
+                push_clipped_ranges(&mut bold, &rec.bold_ranges, src, src + len, off);
+                push_clipped_ranges(&mut italic, &rec.italic_ranges, src, src + len, off);
+                push_clipped_ranges(&mut underline, &rec.underline_ranges, src, src + len, off);
+                text.push_str(line);
+                off += len;
+                src += len;
+            }
         }
         self.begin();
-        for id in &block[1..] {
-            self.delete_subtree(*id);
+        // Everything folded goes: the other members' subtrees, and the head's OWN children,
+        // which are in its text now. Resolved as one set first, with the head removed from
+        // it, so no subtree walk can take out the node the fold is becoming — `fold_lines`
+        // is cycle-guarded but `descendants` is only guarded per call, and `rebuild_index`
+        // files a self-parented row (a hand-corrupted store is the only way to get one)
+        // under its own id, which would put the head in its own child list.
+        let mut doomed: Vec<Uuid> = Vec::new();
+        let mut seen: HashSet<Uuid> = HashSet::from([head]);
+        for root in block[1..].iter().copied().chain(self.ordered_children(head)) {
+            for id in self.descendants(root) {
+                if seen.insert(id) {
+                    doomed.push(id);
+                }
+            }
+        }
+        for id in doomed {
+            self.touch(id);
+            self.drop_node(id);
         }
         self.edit(head, |r| {
             r.kind = NodeKind::PromptDraft;
@@ -1326,6 +1434,19 @@ impl Store {
             r.bold_ranges = bold;
             r.italic_ranges = italic;
             r.underline_ranges = underline;
+            // The head's own completion does NOT survive the fold — the one place this
+            // diverges from `set_kind`/`set_kind_block`, which leave the flag alone. A kind
+            // change keeps the node; a fold makes a NEW document out of many nodes, and
+            // "done" described the one that no longer exists in that form. It would also be
+            // arbitrary (whichever member was swept first decides) and can be false on its
+            // face, since the merged text holds every unfinished line in the block — and
+            // the caller focuses this panel to type in, which a struck-through dimmed row is
+            // a poor invitation to do. Ageing out into the auto-archive as a childless
+            // completed node is then one thing less that can happen to it; that state is
+            // reachable plenty of other ways (delete a completed parent's children by any
+            // means), so this is not a fix for the sweep, just one fewer way in.
+            r.is_completed = false;
+            r.completed_at = None;
             r.updated_at = now_ms();
         });
         let delta = self.commit(None)?;
@@ -1571,15 +1692,17 @@ mod tests {
         s.set_text(a, "one".into(), Some(vec![0, 3]), None, None).unwrap();
         s.set_text(b, "two".into(), Some(vec![1, 2]), None, None).unwrap();
         s.set_text(c, "three".into(), None, None, None).unwrap();
-        // b gets a child, to pin that a folded member takes its subtree with it.
+        // b gets a child, to pin that a folded member takes its subtree with it — as a
+        // nested bullet in the text, and as a deleted node.
         let (_, kid) = s.append_child(b, NodeKind::BulletPoint).unwrap();
         let kid = kid.new_node.unwrap();
+        s.set_text(kid, "kid".into(), None, None, None).unwrap();
 
         let (_, out) = s.merge_into_prompt(&[a, b, c]).unwrap();
         assert_eq!(out.new_node, Some(a));
         let head = s.get(a).unwrap();
         assert_eq!(head.kind, NodeKind::PromptDraft);
-        assert_eq!(head.text, "- one\n- two\n- three");
+        assert_eq!(head.text, "- one\n- two\n  - kid\n- three");
         // "- one" bold [2,3]; "- two" starts at 6, its "wo" run at 6+2+1 = 9.
         assert_eq!(head.bold_ranges, vec![2, 3, 9, 2]);
         assert!(s.get(b).is_none());
@@ -1592,6 +1715,194 @@ mod tests {
         assert_eq!(s.get(a).unwrap().kind, NodeKind::BulletPoint);
         assert_eq!(s.roots(), vec![a, b, c]);
         assert!(s.get(kid).is_some());
+    }
+
+    /// A selection is a sibling range with every member's SUBTREE tinted, so the block the
+    /// user sees spans levels — and the fold has to say so. Each descendant is its own
+    /// bullet, two spaces deeper per level, and the head's own children come along with the
+    /// rest (they are in the text now).
+    #[test]
+    fn merge_into_prompt_nests_descendants_by_depth() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, b) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let b = b.new_node.unwrap();
+        s.set_text(a, "Alpha".into(), None, None, None).unwrap();
+        s.set_text(b, "Beta".into(), None, None, None).unwrap();
+        // a ▸ a1 ▸ a1x, a ▸ a2 — the head's own subtree, two levels deep.
+        let (_, a1) = s.append_child(a, NodeKind::BulletPoint).unwrap();
+        let a1 = a1.new_node.unwrap();
+        let (_, a1x) = s.append_child(a1, NodeKind::Checkbox).unwrap();
+        let a1x = a1x.new_node.unwrap();
+        let (_, a2) = s.append_child(a, NodeKind::BulletPoint).unwrap();
+        let a2 = a2.new_node.unwrap();
+        let (_, b1) = s.append_child(b, NodeKind::BulletPoint).unwrap();
+        let b1 = b1.new_node.unwrap();
+        s.set_text(a1, "Child one".into(), None, None, None).unwrap();
+        s.set_text(a1x, "Grandchild".into(), Some(vec![0, 5]), None, None)
+            .unwrap();
+        s.set_text(a2, "Child two".into(), None, None, None).unwrap();
+        s.set_text(b1, "Beta's child".into(), None, None, None).unwrap();
+
+        let (_, out) = s.merge_into_prompt(&[a, b]).unwrap();
+        assert_eq!(out.new_node, Some(a));
+        let head = s.get(a).unwrap();
+        assert_eq!(head.kind, NodeKind::PromptDraft);
+        assert_eq!(
+            head.text,
+            "- Alpha\n  - Child one\n    - Grandchild\n  - Child two\n- Beta\n  - Beta's child"
+        );
+        // "Grandchild" starts after "- Alpha\n  - Child one\n    - " = 8+14+6 = 28.
+        assert_eq!(head.bold_ranges, vec![28, 5]);
+        // Everything folded is gone — the head's own children included, or every line
+        // would show twice (once as text, once as a child of the new prompt).
+        for id in [b, a1, a1x, a2, b1] {
+            assert!(s.get(id).is_none());
+        }
+        assert_eq!(s.roots(), vec![a]);
+        // Still ONE undo step, whole subtrees and all.
+        s.undo().unwrap();
+        assert_eq!(s.get(a).unwrap().text, "Alpha");
+        assert_eq!(s.ordered_children(a), vec![a1, a2]);
+        assert_eq!(s.ordered_children(a1), vec![a1x]);
+        assert_eq!(s.get(b1).unwrap().text, "Beta's child");
+    }
+
+    /// A node's own text can hold newlines (⇧Enter). Its later lines hang under the
+    /// bullet's TEXT column, so the list shape survives — and a run spanning the newline
+    /// clips into one run per line rather than sliding by the indent it never saw.
+    #[test]
+    fn merge_into_prompt_indents_a_members_own_newlines() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, b) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let b = b.new_node.unwrap();
+        s.set_text(a, "head".into(), None, None, None).unwrap();
+        let (_, kid) = s.append_child(a, NodeKind::BulletPoint).unwrap();
+        let kid = kid.new_node.unwrap();
+        // "one\ntwo" with a bold run covering both lines AND the newline between them.
+        s.set_text(kid, "one\ntwo".into(), Some(vec![0, 7]), None, None)
+            .unwrap();
+        s.set_text(b, "tail".into(), None, None, None).unwrap();
+
+        s.merge_into_prompt(&[a, b]).unwrap();
+        let head = s.get(a).unwrap();
+        assert_eq!(head.text, "- head\n  - one\n    two\n- tail");
+        // "one" at 11 (after "- head\n  - "), "two" at 4 further on: 11+3+1+4 = 19.
+        assert_eq!(head.bold_ranges, vec![11, 3, 19, 3]);
+
+        // A BLANK line inside a node takes no prefix — indenting nothing would leave
+        // trailing whitespace on an empty line, which is all a reader would see of it.
+        s.undo().unwrap();
+        s.set_text(kid, "one\n\ntwo".into(), None, None, None).unwrap();
+        s.merge_into_prompt(&[a, b]).unwrap();
+        assert_eq!(s.get(a).unwrap().text, "- head\n  - one\n\n    two\n- tail");
+    }
+
+    /// UTF-16 units, not bytes: the indent has to be measured in the same units the runs
+    /// are, or one non-ASCII bullet puts every later run past the end of the text.
+    #[test]
+    fn merge_into_prompt_counts_utf16_across_levels() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, b) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let b = b.new_node.unwrap();
+        s.set_text(a, "é😀".into(), None, None, None).unwrap();
+        let (_, kid) = s.append_child(a, NodeKind::BulletPoint).unwrap();
+        let kid = kid.new_node.unwrap();
+        s.set_text(kid, "xy".into(), Some(vec![1, 1]), None, None)
+            .unwrap();
+        s.set_text(b, "z".into(), None, None, None).unwrap();
+
+        s.merge_into_prompt(&[a, b]).unwrap();
+        let head = s.get(a).unwrap();
+        assert_eq!(head.text, "- é😀\n  - xy\n- z");
+        // "- é😀" is 5 UTF-16 units, + "\n" + "  - " = 10, so "y" is at 11.
+        assert_eq!(head.bold_ranges, vec![11, 1]);
+    }
+
+    /// The head comes out UNCOMPLETED however it went in. Deleting its children while
+    /// keeping it is unique to this mutation, and `archive::collect` qualifies a completed
+    /// node only when every child qualifies — so those unfinished children were the guard
+    /// keeping an old completed parent out of the auto-sweep. Leaving the stamp on the
+    /// childless result would let the sweep archive (and delete, un-undoably) the prompt the
+    /// user just built.
+    #[test]
+    fn merge_into_prompt_clears_the_heads_completion() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::Checkbox).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, b) = s.append_root(NodeKind::Checkbox).unwrap();
+        let b = b.new_node.unwrap();
+        s.set_text(a, "old parent".into(), None, None, None).unwrap();
+        s.set_text(b, "sibling".into(), None, None, None).unwrap();
+        let (_, kid) = s.append_child(a, NodeKind::Checkbox).unwrap();
+        let kid = kid.new_node.unwrap();
+        s.set_text(kid, "unfinished".into(), None, None, None).unwrap();
+        // Completed four days ago — past the archive sweep's three-day retention.
+        s.toggle_completed(a).unwrap();
+        let stale = now_ms() - 4 * 24 * 60 * 60 * 1000;
+        s.begin();
+        s.edit(a, |r| r.completed_at = Some(stale));
+        s.commit(None).unwrap();
+        // Its unfinished child is what keeps it out of the sweep today.
+        assert!(crate::archive::collect(&s, Some(now_ms() - crate::archive::RETENTION_MS)).is_empty());
+
+        s.merge_into_prompt(&[a, b]).unwrap();
+        let head = s.get(a).unwrap();
+        assert_eq!(head.text, "- old parent\n  - unfinished\n- sibling");
+        assert!(!head.is_completed);
+        assert_eq!(head.completed_at, None);
+        assert!(crate::archive::collect(&s, Some(now_ms() - crate::archive::RETENTION_MS)).is_empty());
+    }
+
+    /// Only a hand-corrupted store can put a parent cycle through the head, but the delete
+    /// pass must not be the thing that trips over one: a self-parented row lands in its own
+    /// child list, and a subtree walk from there would drop the very node the fold is
+    /// becoming — leaving the composed text nowhere to land and `new_node` naming a corpse.
+    #[test]
+    fn merge_into_prompt_survives_a_self_parented_head() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, b) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let b = b.new_node.unwrap();
+        s.set_text(a, "one".into(), None, None, None).unwrap();
+        s.set_text(b, "two".into(), None, None, None).unwrap();
+        // What loading a corrupted row looks like: the head is filed under itself.
+        s.children.entry(Some(a)).or_default().push(a);
+
+        let (_, out) = s.merge_into_prompt(&[a, b]).unwrap();
+        assert_eq!(out.new_node, Some(a));
+        let head = s.get(a).expect("the head must survive its own child list");
+        assert_eq!(head.kind, NodeKind::PromptDraft);
+        assert_eq!(head.text, "- one\n- two");
+    }
+
+    /// A divider nested inside a folded subtree renders no text, so it contributes no
+    /// bullet — but it still goes with its parent, exactly as `delete_block` takes it.
+    #[test]
+    fn merge_into_prompt_folds_over_a_nested_divider() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, b) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let b = b.new_node.unwrap();
+        s.set_text(a, "one".into(), None, None, None).unwrap();
+        s.set_text(b, "two".into(), None, None, None).unwrap();
+        let (_, rule) = s.append_child(a, NodeKind::Line).unwrap();
+        let rule = rule.new_node.unwrap();
+        let (_, after) = s.append_child(a, NodeKind::BulletPoint).unwrap();
+        let after = after.new_node.unwrap();
+        s.set_text(after, "after the rule".into(), None, None, None)
+            .unwrap();
+
+        s.merge_into_prompt(&[a, b]).unwrap();
+        assert_eq!(s.get(a).unwrap().text, "- one\n  - after the rule\n- two");
+        assert!(s.get(rule).is_none());
     }
 
     #[test]

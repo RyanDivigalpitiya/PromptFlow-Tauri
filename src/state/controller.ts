@@ -302,9 +302,16 @@ export async function deleteBlockAndFocus(ids: string[]) {
   else s.clearFocus();
 }
 
-/** ⌘3 over a block of non-prompt nodes: fold it into ONE prompt whose text is the members
- * as a "- " list. The store does the folding in a single transaction (see
- * `merge_into_prompt`), so this is only the focus half.
+/** ⌘3 over a block of non-prompt nodes: fold it into ONE prompt whose text is the whole
+ * selected block — members AND their subtrees — as an INDENTED "- " list, two spaces per
+ * level: the bullet-and-indent shape `subtreeLines` below already writes to the clipboard.
+ * The store does the folding in a single transaction (see `merge_into_prompt`, which is
+ * also where the two part ways — notes and a node's own newlines), so this is only the
+ * focus half.
+ *
+ * `ids` stays the MEMBER list: the store owns the tree and expands each member to its
+ * subtree itself, so the caller never has to mirror the walk (and a descendant that
+ * arrived from another window between the gesture and the invoke is still included).
  *
  * The selection is dropped and the caret goes into the resulting prompt — that panel is
  * what the user is about to type in, and a "selection" of the one surviving node would be

@@ -75,6 +75,7 @@ cd src-tauri && cargo test  # store tests (mutations, undo, archive round-trip)
 | Tab / ⇧Tab | Indent / outdent (node or selected block) |
 | ⌥↑ / ⌥↓ | Move node (or block) past the nearest visible sibling |
 | ⌘1 / ⌘2 / ⌘3 | Bullet / checkbox / prompt panel |
+| ⌘3 over a selected block | Fold it into ONE prompt: every selected node's TEXT — nested children included, indented to match — becomes a `- ` line, and the folded nodes are replaced by that prompt (one ⌘Z undoes it; dividers are left alone, and notes are not carried over) |
 | ⌘B | Bold the selected text (stored as bold runs) |
 | ⌘⇧F | Highlight (accent + focus-pane membership) |
 | ⌘⇧N | Edit the node's note |

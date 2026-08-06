@@ -109,12 +109,15 @@ function handleSelectionKey(e: KeyboardEvent): boolean {
   if (e.metaKey && (e.key === "1" || e.key === "2" || e.key === "3")) {
     const kind =
       e.key === "1" ? "bulletPoint" : e.key === "2" ? "checkbox" : "promptDraft";
-    // ⌘3 over two-or-more NON-prompt nodes FOLDS them into a single prompt — their texts
-    // become its "- " list and the rest are deleted (Store::merge_into_prompt) — rather
-    // than converting each into a prompt of its own. That is the "collect these lines
-    // into a prompt" gesture; a prompt already inside the range means the user is
-    // converting a mixed selection instead, so that falls through to the per-node form.
+    // ⌘3 over two-or-more NON-prompt nodes FOLDS them into a single prompt — the whole
+    // tinted block, members and their subtrees alike, becomes its INDENTED "- " list and
+    // every folded node is deleted (Store::merge_into_prompt) — rather than converting
+    // each into a prompt of its own. That is the "collect these lines into a prompt"
+    // gesture; a prompt already inside the range means the user is converting a mixed
+    // selection instead, so that falls through to the per-node form.
     // Dividers are inert to ⌘1/2/3, so they neither count toward the two nor block it.
+    // The prompt test is MEMBER-level, like the count: a draft nested somewhere inside a
+    // member's subtree is content being collected, not a sign the user meant to convert.
     const foldable = ids.filter((id) => {
       const k = mirror.get(id)?.kind;
       return k !== undefined && k !== "line";
