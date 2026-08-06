@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -6,6 +7,8 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { currentTaskChain } from "../lib/currentTask";
+import type { NodeRec } from "../lib/types";
 import { revealNode } from "../state/controller";
 import { useFocusPane } from "../state/focusPane";
 import {
@@ -23,44 +26,56 @@ import {
 } from "../state/windowState";
 
 /** The collapsible strip mirroring the highlighted (⌘⇧F) nodes — read-only rows:
- * ⠿ handle · numbered accent disc · bold accent title + ancestor breadcrumb.
- * Clicking a row REVEALS the node in the outline; the handle drag reorders the
- * device-local priority order and shows a drop marker while dragging. */
+ * ⠿ handle · numbered accent disc · bold accent title + the node's CURRENT TASK.
+ * Clicking a row REVEALS its current task in the outline (the pinned node itself when
+ * it has none); the handle drag reorders the device-local priority order and shows a
+ * drop marker while dragging. */
 
 /** Re-render whenever `id`'s node record changes (text/style/kind), so a focus row's
- * title and each breadcrumb crumb track live edits from THIS or any other window — the
- * pane's own structure subscription only fires on tree-shape changes, not text edits. */
+ * title tracks live edits from THIS or any other window — the pane's own structure
+ * subscription only fires on tree-shape changes, not text edits. */
 function useNodeRec(id: string) {
   const subscribe = useMemo(() => subscribeNode(id), [id]);
   useSyncExternalStore(subscribe, () => nodeVersion(id));
   return mirror.get(id);
 }
 
-function Crumb({ id, faint }: { id: string; faint: boolean }) {
-  const rec = useNodeRec(id);
-  return (
-    <span className={"crumb" + (faint ? " mid" : " top")}>
-      {rec?.text || "Untitled"}
-    </span>
+/** The pinned node's live Current Task — the first open leaf under it (`currentTask.ts`),
+ * or null when nothing is left to do there.
+ *
+ * The walk's result depends on exactly two things: the CHILD LISTS it scanned, and the
+ * `kind`/`isCompleted` of the children in them. A child list change and a completion flip
+ * are both STRUCTURAL, so the pane's own structure subscription re-runs this walk for
+ * those — but a `kind` flip is deliberately NOT structural (the flatten is unchanged), and
+ * neither is the task's own TEXT. So subscribe to every record the walk could have read:
+ * the children of the focused node and of each node it descended into. That set is a
+ * superset of what it examined and contains the task itself, which is what keeps the line
+ * tracking a live edit from this window or any other — the same two-grain rule the row
+ * title already follows, and the same one whose absence left mirrored titles stale. */
+function useCurrentTask(focusedId: string): NodeRec | null {
+  const chain = currentTaskChain(mirror, focusedId);
+  const watched = [focusedId, ...chain].flatMap((p) => mirror.childrenOf(p));
+  // Re-subscribe only when the watched SET changes; the closures below are recreated with
+  // it, so a stale `watched` can never outlive the key that describes it.
+  const key = watched.join("\u0000");
+  const subscribe = useMemo(
+    () => (cb: () => void) => {
+      const offs = watched.map((id) => subscribeNode(id)(cb));
+      return () => {
+        for (const off of offs) off();
+      };
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `key` describes `watched`
+    [key],
   );
-}
-
-/** Ancestor chain top→parent. Leftmost crumb is white, every deeper crumb grey; a lone
- * crumb stays white (never accent). Each crumb subscribes to its own node so a rename
- * anywhere in the chain updates live. */
-function Breadcrumb({ id }: { id: string }) {
-  const chain = mirror.ancestors(id);
-  if (chain.length === 0) return null;
-  return (
-    <span className="focus-breadcrumb">
-      {chain.map((a, i) => (
-        <span key={a}>
-          {i > 0 && <span className="crumb-sep"> ▸ </span>}
-          <Crumb id={a} faint={i !== 0} />
-        </span>
-      ))}
-    </span>
+  const version = useCallback(
+    () => watched.map(nodeVersion).join(","),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `key` describes `watched`
+    [key],
   );
+  useSyncExternalStore(subscribe, version);
+  const taskId = chain.length === 0 ? null : chain[chain.length - 1];
+  return taskId === null ? null : (mirror.get(taskId) ?? null);
 }
 
 function FocusRow({
@@ -75,7 +90,11 @@ function FocusRow({
   onHandleDown: (e: React.MouseEvent, index: number) => void;
 }) {
   const rec = useNodeRec(id);
+  const task = useCurrentTask(id);
   if (!rec) return null;
+  // The whole row navigates to the CURRENT TASK — that is the node the row is pointing
+  // at. With nothing left to do under it, it falls back to the pinned node itself.
+  const target = task?.id ?? id;
   return (
     <div className="focus-row">
       <span
@@ -87,15 +106,17 @@ function FocusRow({
       <span
         className="focus-index"
         style={{ ["--focus-accent" as string]: accent } as React.CSSProperties}
-        onClick={() => revealNode(id)}
+        onClick={() => revealNode(target)}
       >
         {index + 1}
       </span>
-      <span className="focus-content" onClick={() => revealNode(id)}>
+      <span className="focus-content" onClick={() => revealNode(target)}>
         <span className="focus-title" style={{ color: accent }}>
           {rec.text || "Untitled"}
         </span>
-        <Breadcrumb id={id} />
+        {task && (
+          <span className="focus-task">{task.text || "Untitled"}</span>
+        )}
       </span>
     </div>
   );

@@ -1876,26 +1876,17 @@ body {
   text-overflow: ellipsis;
 }
 
-.focus-breadcrumb {
-  font-size: 0.78em;
-  overflow-wrap: anywhere;
-}
-
-/* Just the crumb words shrink; the ▸ separators keep their size (0.78em of the row). */
-.crumb {
-  font-size: 0.9em;
-}
-
-.crumb.top {
+/* The pinned node's CURRENT TASK — the first open leaf under it. White against the
+   accent title above, so the row reads as goal ▸ next action; it ellipsizes on one line
+   exactly as the title does, so a row's height never depends on how long its task text
+   runs — which matters most in the narrow sidebar dock. Absent entirely when there is no
+   open work left (no element, not an empty one), so such a row is just its title. */
+.focus-task {
   color: var(--text);
-}
-
-.crumb.mid {
-  color: var(--text-faint);
-}
-
-.crumb-sep {
-  color: var(--text-faint);
+  font-size: 0.86em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Horizontal drop marker painted at the target row gap during a handle drag. */

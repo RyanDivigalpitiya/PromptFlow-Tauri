@@ -15,30 +15,54 @@
  * it is deliberately NOT a project dependency.
  */
 import { createRequire } from "node:module";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { execSync } from "node:child_process";
 
+/** Playwright is deliberately NOT a project dependency, so it is resolved from wherever
+ * it happens to live. The npx cache can hold SEVERAL copies of different versions, each
+ * pinned to a browser build that may or may not have been downloaded — so take the first
+ * candidate whose WebKit is actually ON DISK, not merely the first that imports. Picking
+ * blind (`find … | head -1`) made this script die with "Executable doesn't exist" or not,
+ * depending on `find`'s directory order, on a machine where both copies were present. */
 const require = createRequire(import.meta.url);
-let webkit;
-try {
-  ({ webkit } = require("playwright"));
-} catch {
-  const root = execSync("npm root -g").toString().trim();
+const candidates = [];
+const consider = (spec) => {
   try {
-    ({ webkit } = require(`${root}/playwright`));
+    candidates.push(require(spec));
   } catch {
-    const cached = execSync(
-      "find ~/.npm/_npx -maxdepth 3 -type d -name playwright | head -1",
-    )
-      .toString()
-      .trim();
-    if (!cached) {
-      console.error("playwright not found — run `npx playwright install webkit`");
-      process.exit(1);
-    }
-    ({ webkit } = require(cached));
+    // not installed there
   }
+};
+consider("playwright");
+try {
+  consider(`${execSync("npm root -g").toString().trim()}/playwright`);
+} catch {
+  // no global npm root
 }
+try {
+  const found = execSync("find ~/.npm/_npx -maxdepth 3 -type d -name playwright")
+    .toString()
+    .trim();
+  for (const p of found ? found.split("\n") : []) consider(p);
+} catch {
+  // no npx cache
+}
+const usable = candidates.find((pw) => {
+  try {
+    return existsSync(pw.webkit.executablePath());
+  } catch {
+    return false;
+  }
+});
+if (!usable) {
+  console.error(
+    candidates.length
+      ? "playwright found but its WebKit is not downloaded — run `npx playwright install webkit`"
+      : "playwright not found — run `npx playwright install webkit`",
+  );
+  process.exit(1);
+}
+const { webkit } = usable;
 
 const OUT = process.argv[2] ?? "/tmp/pf-qa";
 const URL_ = process.env.PF_QA_URL ?? "http://localhost:1420";
@@ -94,7 +118,11 @@ const SNAPSHOT = { rev: 1, nodes: NODES, canUndo: false, canRedo: false };
  * command does. The completion glyph is an ANIMATION between two store states, so there
  * is nothing to look at unless the second state actually arrives — and going through the
  * delta path means the mirror, the row's re-render and `markCompleting` all run for real
- * rather than being simulated. Still no store semantics: no spawn-a-sibling, no undo. */
+ * rather than being simulated. Still no store semantics: no spawn-a-sibling, no undo.
+ *
+ * `window.__PF_QA_DELTA` is the same escape hatch opened up for a harness to drive: a
+ * test hands it delta ops and they land on the tree and broadcast. Nothing in the app
+ * calls it, so no section pays for it that doesn't ask. */
 function tauriStub(snapshot) {
   const calls = [];
   window.__PF_QA_CALLS = calls;
@@ -165,6 +193,20 @@ function tauriStub(snapshot) {
   // The event plugin's unlisten path reaches for this global directly, not through
   // invoke — without it every `listen()` teardown throws an unhandled rejection.
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
+  /** Apply `ops` to the tree and broadcast them as a real `store://delta`. A LIVE-UPDATE
+   * requirement has nothing to show unless a SECOND store state actually reaches the
+   * mirror, and the commands that would produce one are recorded here, not applied — so
+   * this is how a section stages an edit the harness cannot otherwise perform. `origin`
+   * defaults to a PEER window, the stricter case: no echo guard drains it, and it is the
+   * path a change made in another window travels. `rev` advances by exactly 1 so the
+   * mirror adopts the ops instead of falling back to a full snapshot resync. */
+  window.__PF_QA_DELTA = (ops, origin = "w1") => {
+    for (const op of ops) {
+      if (op.type === "upsert") nodes.set(op.node.id, { ...op.node });
+      else nodes.delete(op.id);
+    }
+    emit("store://delta", { rev: ++rev, origin, ops, canUndo: true, canRedo: false });
+  };
 }
 
 const b = await webkit.launch();
@@ -811,12 +853,206 @@ const alpha = (c) => {
   return parts.length > 3 ? parts[3] : 1;
 };
 
+// ---- 7. Focus pane: a pinned node's CURRENT TASK -----------------------------
+// The pane used to print each pinned node's ANCESTOR breadcrumb under its title — which
+// says where the node lives, something the outline already shows. It now prints the
+// node's Current Task: the first open leaf under it, found by descending the child lists
+// and taking the first child that is neither completed nor a divider. `lib/currentTask.ts`
+// owns that rule and `currentTask.test.ts` pins it, so what is left for this section is
+// everything the pure walk cannot see — that the task reads WHITE against the accent
+// title, that a row with nothing left to do is title-only, that clicking the row
+// navigates to the TASK (expanding whatever was collapsed over it), and above all that
+// the line stays LIVE: through the app's own completion gesture, and through deltas
+// arriving from another window, which is what `__PF_QA_DELTA` exists to stage.
+//
+// Its own page and fixture — this is the screenshot's tree, whose whole point is that
+// `Example`'s task is `Child 1` and NOT its first child `Parent 1`.
+const FOCUS_NODES = [
+  node("fx1", null, 0, "Example", "checkbox", { isHighlighted: true }),
+  node("fx1a", "fx1", 0, "Parent 1", "checkbox"),
+  node("fx1a1", "fx1a", 0, "Child 1", "checkbox"),
+  node("fx1a2", "fx1a", 1024, "Parent 2", "checkbox"),
+  node("fx1a2a", "fx1a2", 0, "Child 2", "checkbox"),
+  node("fx1b", "fx1", 1024, "Parent 3", "checkbox"),
+  node("fx1b1", "fx1b", 0, "Parent 4", "checkbox"),
+  node("fx1b1a", "fx1b1", 0, "Child 3", "checkbox"),
+  // A pinned LEAF — nothing under it, so its row is title-only.
+  node("fx2", null, 1024, "A lone pinned node", "checkbox", { isHighlighted: true }),
+  // Pinned with a child that is already done: also title-only, since nothing is left.
+  node("fx3", null, 2048, "All done under here", "checkbox", { isHighlighted: true }),
+  node("fx3a", "fx3", 0, "the done child", "checkbox", {
+    isCompleted: true,
+    completedAt: T,
+  }),
+];
+
+const fp = await b.newPage({
+  viewport: { width: 720, height: 620 },
+  deviceScaleFactor: 2,
+  colorScheme: "dark",
+});
+fp.on("pageerror", (e) => errors.push(String(e)));
+fp.on("console", (m) => {
+  if (m.type() === "error") errors.push(m.text());
+});
+await fp.addInitScript(tauriStub, {
+  rev: 1,
+  nodes: FOCUS_NODES,
+  canUndo: false,
+  canRedo: false,
+});
+// The pane open, and BOTH ancestors of Child 1 collapsed, so a reveal has something to
+// open. `pf.focusOrder` is seeded too — the numbering is device-local, not derived.
+await fp.addInitScript(
+  (seed) => {
+    localStorage.setItem("pf.win.main", JSON.stringify(seed.win));
+    localStorage.setItem("pf.focusOrder", JSON.stringify(seed.order));
+  },
+  {
+    win: {
+      collapsed: ["fx1", "fx1a"],
+      hideCompleted: false,
+      fontSize: 16,
+      drill: null,
+      focusPaneExpanded: true,
+      focusPaneLayout: "top",
+      focusSidebarWidth: 260,
+      focusTopHeight: "auto",
+    },
+    order: ["fx1", "fx2", "fx3"],
+  },
+);
+await fp.goto(URL_, { waitUntil: "domcontentloaded" });
+await fp.waitForSelector(".focus-row", { timeout: 15000 });
+await fp.addStyleTag({ content: "html,body{background:#101014 !important}" });
+await fp.waitForTimeout(400); // past the pane's open animation
+
+/** Every focus row as the pane presents it: the pinned node's title and its Current Task
+ * line — ABSENT as an element, not empty, when there is nothing left to do — plus the two
+ * resolved colours that have to differ (accent title, white task). */
+const focusRows = () =>
+  fp.evaluate(() =>
+    [...document.querySelectorAll(".focus-row")].map((r) => {
+      const t = r.querySelector(".focus-title");
+      const k = r.querySelector(".focus-task");
+      return {
+        title: t?.textContent ?? null,
+        titleColor: t ? getComputedStyle(t).color : null,
+        task: k?.textContent ?? null,
+        taskColor: k ? getComputedStyle(k).color : null,
+      };
+    }),
+  );
+/** Just the task lines, which is what every live-update step below is watching. */
+const focusTasks = async () => (await focusRows()).map((r) => r.task);
+const fpFocusedRow = () =>
+  fp.evaluate(() => {
+    const row = document.activeElement?.closest?.(".node-row");
+    return row ? row.innerText.trim().split("\n")[0] : null;
+  });
+/** Stage a change as if another window had made it. */
+const fpDelta = async (ops) => {
+  await fp.evaluate((o) => window.__PF_QA_DELTA(o), ops);
+  await fp.waitForTimeout(120);
+};
+const fpRow = (text) => fp.locator(".node-row", { hasText: text }).first();
+
+const focusRest = await focusRows();
+const focusStrays = await fp.evaluate(
+  () => document.querySelectorAll(".focus-breadcrumb, .crumb, .crumb-sep").length,
+);
+await shot("focus-pane", fp.locator(".focus-pane-shell"));
+
+// Clicking the row navigates to the TASK, not to the pinned node — through two collapsed
+// ancestors, which `revealNode`'s expandMany has to open on the way.
+await fp.locator(".focus-row").first().locator(".focus-content").click();
+await fp.waitForTimeout(250);
+const afterReveal = {
+  focused: await fpFocusedRow(),
+  rowExists: (await fpRow("Child 1").count()) === 1,
+};
+
+// LIVE, through the app's own gesture: ticking Child 1 off in the outline advances the
+// task to the first open leaf under the next open branch. `toggle_completed` is the one
+// command the stub applies for real, so this runs the whole store→delta→mirror path.
+await fpRow("Child 1").locator(".glyph-slot").first().click();
+await fp.waitForTimeout(600); // past .just-completed
+const afterComplete = await focusTasks();
+await shot("focus-pane-advanced", fp.locator(".focus-pane-shell"));
+await fpRow("Child 1").locator(".glyph-slot").first().click();
+await fp.waitForTimeout(600);
+const afterUncomplete = await focusTasks();
+
+// LIVE, from another window: a text edit is not a structural delta, so the row's own
+// per-node subscription is the only thing that can repaint this — the exact grain whose
+// absence once left mirrored titles stale.
+await fpDelta([
+  { type: "upsert", node: node("fx1a1", "fx1a", 0, "Child 1, renamed", "checkbox") },
+]);
+const afterRename = await focusTasks();
+
+// LIVE, structural: a new FIRST child under Parent 1 takes over as the task, and removing
+// it hands the task back.
+await fpDelta([
+  { type: "upsert", node: node("fx1a0", "fx1a", -1024, "Brand new first child", "checkbox") },
+]);
+const afterInsert = await focusTasks();
+await fpDelta([{ type: "delete", id: "fx1a0" }]);
+const afterRemove = await focusTasks();
+
+// A completed node is skipped WHOLESALE, never descended into: ticking Parent 1 skips its
+// open Child 1 with it, so the task crosses to the next branch entirely.
+await fpDelta([
+  {
+    type: "upsert",
+    node: node("fx1a", "fx1", 0, "Parent 1", "checkbox", {
+      isCompleted: true,
+      completedAt: T,
+    }),
+  },
+]);
+const afterParentDone = await focusTasks();
+
+// The task line is now the row's PRIMARY content, so the narrow dock is where it is most
+// at risk: give it text no 260px sidebar can hold and check it ellipsizes on ONE line
+// rather than wrapping the row open. Dock through the app's own switcher.
+await fpDelta([
+  {
+    type: "upsert",
+    node: node("fx1b1a", "fx1b1", 0, "Child 3, whose text runs on well past anything a sidebar could hold", "checkbox"),
+  },
+]);
+await fp.locator('button[aria-label="Switch focus pane layout"]').click();
+await fp.waitForTimeout(450); // past --focus-pane-anim-dur
+const sidebarTask = await fp.evaluate(() => {
+  const k = document.querySelector(".focus-task");
+  const t = document.querySelector(".focus-title");
+  const line = parseFloat(getComputedStyle(k).fontSize) * 1.6; // a generous one-line box
+  return {
+    lines: +(k.getBoundingClientRect().height / line).toFixed(2),
+    // Overflowing is the GEOMETRY (it stayed on one line and didn't fit); how that
+    // overflow is PAINTED is a separate declaration, and `scrollWidth > clientWidth`
+    // would hold just the same with the text hard-clipped mid-glyph — so pin both.
+    clipped: k.scrollWidth > k.clientWidth,
+    ellipsis: getComputedStyle(k).textOverflow,
+    withinTitle: k.getBoundingClientRect().width <= t.getBoundingClientRect().width + 0.5,
+  };
+});
+await shot("focus-pane-sidebar", fp.locator(".app-body"));
+
 // ---- Report ------------------------------------------------------------------
 const eq = (a, b, tol = 0.6) => Math.abs(a - b) <= tol;
 const distinct = (xs) => new Set(xs.filter((v) => v != null)).size;
 // The tick's ink as a fraction of its own circle's diameter — the one number that says
 // "the same check mark" across two circle sizes.
 const inkRatio = (g) => (g.check ? +(g.check.w / (2 * g.r + 2)).toFixed(3) : null);
+/** Is a resolved colour white (whatever its alpha)? `--text` is white at 0.92. */
+const white = (c) => {
+  const m = /^rgba?\(([^)]+)\)$/.exec(c ?? "");
+  if (!m) return false;
+  const [r, g, bl] = m[1].split(",").map((s) => parseFloat(s));
+  return r === 255 && g === 255 && bl === 255;
+};
 const checks = [
   ["divider at rest: rule starts at the row's content edge", eq(rest.ruleLeft, rest.contentLeft)],
   ["divider at rest: actions clip is 0 wide", rest.clipW === 0],
@@ -889,6 +1125,24 @@ const checks = [
   ["parent glyph: an all-done CHECKBOX's pie is opaque", alpha(checkboxDone.wedge) === 1],
   ["parent glyph: the two all-done glyphs no longer paint the same fill", bulletDone.wedge !== checkboxDone.wedge],
   ["parent glyph: the bullet's last child is a pure HUE change (alpha unchanged)", alpha(bulletDone.wedge) === alpha(bulletHalf.wedge)],
+  // --- focus pane: the Current Task line ---
+  ["focus: the task is the first LEAF, not the first child", focusRest[0].task === "Child 1"],
+  ["focus: …under the pinned node's own accent title", focusRest[0].title === "Example"],
+  ["focus: the task is white, the title is not", white(focusRest[0].taskColor) && !white(focusRest[0].titleColor)],
+  ["focus: a pinned node with no children has NO task element", focusRest[1].task === null],
+  ["focus: …nor has one whose every child is done", focusRest[2].task === null],
+  ["focus: the ancestor breadcrumb is gone entirely", focusStrays === 0],
+  ["focus: clicking the row reveals the TASK through collapsed ancestors", afterReveal.focused === "Child 1" && afterReveal.rowExists],
+  ["focus: ticking the task off in the outline advances it, live", afterComplete[0] === "Child 2"],
+  ["focus: …and un-ticking it hands it back", afterUncomplete[0] === "Child 1"],
+  ["focus: a remote text edit repaints the task line", afterRename[0] === "Child 1, renamed"],
+  ["focus: a new first child takes over as the task", afterInsert[0] === "Brand new first child"],
+  ["focus: …and deleting it hands the task back", afterRemove[0] === "Child 1, renamed"],
+  ["focus: completing a parent skips its whole subtree", afterParentDone[0] === "Child 3"],
+  ["focus: the other rows never moved", JSON.stringify(afterParentDone.slice(1)) === "[null,null]"],
+  ["focus: an over-long task stays on ONE line in the sidebar dock, overflowing", sidebarTask.lines <= 1 && sidebarTask.clipped],
+  ["focus: …and that overflow is painted as an ellipsis, not a hard clip", sidebarTask.ellipsis === "ellipsis"],
+  ["focus: …without pushing the row wider than the title above it", sidebarTask.withinTitle],
   ["no page errors", errors.length === 0],
 ];
 console.log("\nrest    :", JSON.stringify(rest));
@@ -905,6 +1159,9 @@ console.log("  ratio :", "parent", inkRatio(restDoneParent), "leaf", inkRatio(re
 console.log("  pie   :", fullPie.map((f) => `${f.t}:${f.w}`).join(" "));
 console.log("  tick  :", fullPie.map((f) => `${f.t}:${f.c}`).join(" "));
 console.log("parents :", JSON.stringify({ bulletDone, bulletHalf, checkboxDone }));
+console.log("focus   :", JSON.stringify(focusRest));
+console.log("  live  :", JSON.stringify({ afterReveal, afterComplete, afterUncomplete, afterRename, afterInsert, afterRemove, afterParentDone }));
+console.log("  dock  :", JSON.stringify(sidebarTask));
 if (errors.length) console.log("errors  :", errors.slice(0, 5));
 console.log();
 let failed = 0;

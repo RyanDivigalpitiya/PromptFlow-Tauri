@@ -21,7 +21,7 @@ npm install                  # once
 scripts/dev.sh [store.sqlite]  # tauri dev against an ISOLATED store (default /tmp/promptflow-tauri-dev.sqlite)
 scripts/build.sh             # release bundle -> src-tauri/target/release/bundle/macos/PromptFlow.app
 scripts/verify.sh            # launch smoke test of the release build (throwaway store, polls for a window)
-npm test                     # vitest: 9 suites / 77 tests (resolveKey, wrap, bold, runs, caret, projectDrop, projectSelectionHead, rowBands, kindMorph)
+npm test                     # vitest: 10 suites / 89 tests (resolveKey, wrap, bold, runs, caret, projectDrop, projectSelectionHead, rowBands, kindMorph, currentTask)
 cd src-tauri && cargo test   # 19 tests (store mutations/undo, block bold + prompt merge, archive round-trip + collect)
 npx tsc --noEmit             # typecheck (strict; noUnusedLocals/Parameters)
 npm run dev & node scripts/qa.mjs [outDir]   # headless visual QA in WebKit (see below)
@@ -61,12 +61,15 @@ npm run dev & node scripts/qa.mjs [outDir]   # headless visual QA in WebKit (see
   exception is `toggle_completed`, which flips the local copy and broadcasts a real
   `store://delta` synchronously inside the invoke, as the Rust command does, because a
   completion ANIMATION has nothing to show unless the second state actually arrives
-  through the mirror), so the
+  through the mirror; `window.__PF_QA_DELTA(ops)` is that same escape hatch for a SECTION
+  to drive — it lands ops on the tree and broadcasts them as if a peer window had, which
+  is the only way to stage a live update the harness can't otherwise perform, and nothing
+  in the app calls it), so the
   components, stylesheet and layout constants under test are the shipping ones. Asserts
   geometry + per-frame transition values, writes PNGs, reaches `:hover`/`:focus`, real
   keys and real mouse drags (it is how the multi-select sweep is covered), touches no
   window. Sections that need their own tree open a SECOND page with its own fixture
-  (the completion section and the parent-glyph section each do) — the sweep tests anchor
+  (the completion, parent-glyph and focus-pane sections each do) — the sweep tests anchor
   on "the last row" and on the
   empty background under the list, so growing the main fixture breaks them. Where a check
   can only see the INVOKE a gesture fires (⌘B / ⌘3 over a block), that is what it asserts,
@@ -135,15 +138,32 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   first; they then receive its `auto-archive` delta).
 - **Focus pane** (`FocusPane.tsx` + `focusPane.ts`): the ⌘⇧F highlight SET lives on the
   nodes (shared store, synced by delta); only the numbered `pf.focusOrder` is per-device.
-  Two subscription grains, both load-bearing: (1) each `FocusRow`/`Crumb` subscribes to
-  ITS node via `subscribeNode` (`useNodeRec`) so a title/breadcrumb tracks a live text
+  **A row is `title ▸ CURRENT TASK`, not a breadcrumb** — the ancestor chain said where a
+  pinned node LIVES, which the outline already shows. The task (`lib/currentTask.ts`,
+  pinned by `currentTask.test.ts`) is the first OPEN LEAF under the node: descend the child
+  lists taking the first child that is neither completed nor a divider, and stop where
+  there is no such child. So `Example > Parent 1 > Child 1` reads as `Child 1`, NOT as its
+  first CHILD `Parent 1` — a parent is a container for work, not the work. A completed node
+  is skipped WHOLESALE and never descended into (ticking one means its subtree is done), so
+  the one case that stops on a non-leaf is a node whose children are ALL done while it is
+  not: nothing is left under it, so it IS what remains. No open descendant ⇒ no
+  `.focus-task` ELEMENT at all (not an empty one), and the row is just its accent title —
+  repeating the pinned node as its own task would say nothing. The whole row (disc,
+  title, task line) reveals the TASK, falling back to the pinned node when there is none.
+  `useCurrentTask` subscribes to every record the walk could have READ — the children of
+  the focused node and of each node it descended into — because the walk's result turns on
+  their `kind` and `isCompleted` and the display on the task's TEXT, and of those only
+  `isCompleted` is structural (a `kind` flip deliberately isn't: the flatten is unchanged).
+  The structure subscription alone would leave the line stale, exactly as it once did for
+  titles.
+  Two subscription grains, both load-bearing: (1) each `FocusRow` subscribes to ITS node
+  via `subscribeNode` (`useNodeRec`) so a title tracks a live text
   edit — a highlight flip is structural but a keystroke is NOT, so the pane's own
   structure subscription alone left mirrored titles stale (shipped bug, fixed); (2)
   `reconcile()` runs in a `useEffect` keyed on the structure version, NEVER during render
   — a `set()` during render is dropped when the ONLY re-render is the idle structural
   delta, so a node ⌘⇧F-pinned in one window never appeared in the others' panes (shipped
-  bug, fixed). Breadcrumb color is position-only: leftmost crumb `--text`, deeper crumbs
-  `--text-faint`, a lone crumb white (never accent). The handle drag paints a
+  bug, fixed). The handle drag paints a
   `.focus-drop-marker` at the nearest row gap (content-space y = `edge − paneTop +
   scrollTop`); `move()` operates on `order`, which `reconcile` keeps equal to the rendered
   members, so the member index and the order index coincide. ⌥⇧F opens/closes it as a
