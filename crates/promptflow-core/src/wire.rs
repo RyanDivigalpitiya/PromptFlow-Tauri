@@ -182,6 +182,86 @@ impl WireOp {
     }
 }
 
+/// Reorder a batch so a node is never applied before its parent, when both are in the
+/// batch.
+///
+/// **This is not a nicety — without it a first sync shreds the outline.** Tree validation
+/// repairs a node whose parent it cannot find by moving it to the ROOT, which is right
+/// when the parent is genuinely gone and catastrophic when the parent is merely three
+/// entries further down the same batch. Every producer of a batch has an order that is
+/// arbitrary with respect to the tree: the desktop outbox sorts by `(queued_at, node_id)`
+/// and a first-configuration seed stamps every row with ONE `queued_at`, so it degenerates
+/// to uuid order; the iPad pushes an unordered SwiftData fetch; and `/v1/snapshot` returns
+/// rows in whatever order SQLite hands back. Half a nested outline arriving child-first
+/// ends up flat, on the hub and — because the repair does not move the structure clock —
+/// on the device that sent it.
+///
+/// A stable partial sort, not a full topological one: an op moves only when something
+/// else in the batch must precede it, so ordinary batches come out untouched and the
+/// relative order of everything else (including deletes, and an upsert and delete of the
+/// same node) is preserved. A parent chain that loops — only reachable from corrupted data
+/// — falls out on the safety valve rather than spinning, and tree validation catches it.
+pub fn order_parents_first(ops: &mut Vec<WireOp>) {
+    use std::collections::{HashMap, HashSet};
+
+    // Only UPSERTS can depend on anything: a delete names a node whose parent is
+    // irrelevant to it.
+    let parents: HashMap<Uuid, Uuid> = ops
+        .iter()
+        .filter_map(|op| match op {
+            WireOp::Upsert { node } => node.parent.map(|p| (node.id, p)),
+            _ => None,
+        })
+        .collect();
+    let upserted: HashSet<Uuid> = ops
+        .iter()
+        .filter_map(|op| match op {
+            WireOp::Upsert { node } => Some(node.id),
+            _ => None,
+        })
+        .collect();
+    // Nothing in this batch waits on anything else in it — the common case, and worth
+    // detecting so an ordinary push does no work at all.
+    if !parents
+        .iter()
+        .any(|(child, parent)| child != parent && upserted.contains(parent))
+    {
+        return;
+    }
+
+    let mut emitted: HashSet<Uuid> = HashSet::new();
+    let mut out: Vec<WireOp> = Vec::with_capacity(ops.len());
+    let mut pending: Vec<WireOp> = std::mem::take(ops);
+    while !pending.is_empty() {
+        let mut deferred = Vec::new();
+        let mut progressed = false;
+        for op in pending {
+            let ready = match &op {
+                WireOp::Upsert { node } => match node.parent {
+                    Some(p) if p != node.id && upserted.contains(&p) => emitted.contains(&p),
+                    _ => true,
+                },
+                WireOp::Delete { .. } => true,
+            };
+            if ready {
+                emitted.insert(op.node_id());
+                out.push(op);
+                progressed = true;
+            } else {
+                deferred.push(op);
+            }
+        }
+        if !progressed {
+            // A cycle among the batch's own parents. Emit the rest in their original order
+            // and let tree validation deal with it — that is exactly what it is for.
+            out.extend(deferred);
+            break;
+        }
+        pending = deferred;
+    }
+    *ops = out;
+}
+
 // MARK: - Per-op results
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

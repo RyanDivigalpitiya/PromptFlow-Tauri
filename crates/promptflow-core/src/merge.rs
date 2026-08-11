@@ -219,6 +219,16 @@ fn merge_live<T: TreeLookup>(
         // nodes converge acyclic whichever push arrives second (T13).
         if would_cycle(tree, n.id, n.parent) {
             n.take_structure(stored);
+            // …but the stored group is kept at the INCOMING clock, and that is what makes
+            // the rejection adoptable. Every other losing group hands back a `current`
+            // whose clock is at least the pusher's, which is precisely why the pusher's
+            // `>=` can take it. A cycle rejection is the one path that would otherwise
+            // return the STORED clock — strictly older than the pusher's, since being
+            // newer is the precondition for getting here at all — so the pusher would
+            // weigh the repair against its own move, keep its move, and disagree with the
+            // hub about that node forever. The clock says "this group has been decided as
+            // of your own instant", which is exactly true.
+            n.structure_updated_at = incoming.structure_updated_at;
             structure_rejected = true;
         }
     }

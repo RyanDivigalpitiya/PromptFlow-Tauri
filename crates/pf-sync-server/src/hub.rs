@@ -16,8 +16,10 @@ use promptflow_core::merge::{
     MAX_FUTURE_SKEW_MS, WARN_SKEW_MS,
 };
 use promptflow_core::model::now_ms;
+use promptflow_core::model::GAP;
 use promptflow_core::wire::{
-    mass_delete_threshold, ChangesResponse, DeviceHealth, HealthResponse, OpResult,
+    mass_delete_threshold, order_parents_first, ChangesResponse, DeviceHealth, HealthResponse,
+    OpResult,
     Outcome, PushRequest, PushResponse, Reason, SeqOp, SnapshotResponse, TombstoneRef, WireNode,
     WireOp, PROTOCOL_VERSION, SERVER_DEVICE_ID,
 };
@@ -145,7 +147,17 @@ impl Hub {
             for r in rows {
                 out.push(serde_json::from_str::<WireNode>(&r?)?);
             }
-            out
+            // Parents first. A bootstrapping client applies these in one pass, and a child
+            // ahead of its parent would be "repaired" to the root permanently — nothing
+            // re-queues a node the client adopted from a snapshot.
+            let mut ops: Vec<WireOp> = out.into_iter().map(WireOp::upsert).collect();
+            order_parents_first(&mut ops);
+            ops.into_iter()
+                .filter_map(|op| match op {
+                    WireOp::Upsert { node } => Some(*node),
+                    _ => None,
+                })
+                .collect()
         };
         let latest_seq = latest_seq(&tx)?;
         tx.commit()?;
@@ -287,10 +299,28 @@ impl Hub {
         }
 
         let now = now_ms();
+        // Parents before children, ALWAYS. Every client's batch order is arbitrary with
+        // respect to the tree (a uuid-ordered outbox, an unordered SwiftData fetch), and a
+        // child applied first finds no parent, gets "repaired" to the root, and — because
+        // the repair does not move its structure clock — is adopted as flat by the very
+        // device that sent it. Ordering here fixes every client at once.
+        let mut ops = req.ops.clone();
+        order_parents_first(&mut ops);
+
         let tx = self.conn.transaction()?;
+        // Results are reported in the order the CLIENT sent them, not the order they were
+        // applied: a client matches them against its own outbox by id, and handing back a
+        // reshuffled list would be a gratuitous way to get that wrong.
+        let mut by_id: std::collections::HashMap<Uuid, OpResult> = std::collections::HashMap::new();
+        for op in &ops {
+            let r = apply_op(&tx, &req.device_id, op, now)?;
+            by_id.insert(r.id, r);
+        }
         let mut results = Vec::with_capacity(req.ops.len());
         for op in &req.ops {
-            results.push(apply_op(&tx, &req.device_id, op, now)?);
+            if let Some(r) = by_id.remove(&op.node_id()) {
+                results.push(r);
+            }
         }
         tx.execute(
             "INSERT INTO devices (device_id, last_push_at) VALUES (?1, ?2)
@@ -363,16 +393,45 @@ fn apply_delete(
             // about children another device created under this node. Each cascade
             // tombstone is its own oplog entry under `"server"` — which is exactly what
             // makes it reach the pusher, whose own ops its pull filters out (T3).
+            //
+            // Each child is WEIGHED, not simply asserted dead. A cascade stamps the
+            // PARENT's `deletedAt` onto clocks it never compared against, so a child
+            // edited after the delete was made would be tombstoned here and then REFUSED
+            // by every client's own merge — leaving it dead on the hub and alive on the
+            // devices, parented to a node that no longer exists, invisible in the outline
+            // and irrecoverable. A child that outlives the delete is re-rooted instead, so
+            // no live node is ever left under a tombstone.
             for child in live_descendants(tx, id)? {
-                let seq = append_oplog(
-                    tx,
-                    SERVER_DEVICE_ID,
-                    child,
-                    "delete",
-                    &tombstone_json(child, at)?,
-                    now,
-                )?;
-                put_tombstone(tx, child, at, seq)?;
+                let stored = read_stored(tx, child)?;
+                let decision = merge_delete(at, &stored, Side::Hub);
+                if decision.write_tombstone.is_some() {
+                    let seq = append_oplog(
+                        tx,
+                        SERVER_DEVICE_ID,
+                        child,
+                        "delete",
+                        &tombstone_json(child, at)?,
+                        now,
+                    )?;
+                    put_tombstone(tx, child, at, seq)?;
+                } else if let Stored::Live(live) = stored {
+                    let mut rescued = (*live).clone();
+                    rescued.parent = None;
+                    rescued.position = TxTree { tx }.max_root_position().map_or(0, |m| m + GAP);
+                    // The clock has to MOVE, or the rescue loses to the very replica it is
+                    // correcting: every device still holds this child under the dead
+                    // parent at exactly the clock the payload would carry.
+                    rescued.structure_updated_at = at.max(rescued.structure_updated_at) + 1;
+                    let seq = append_oplog(
+                        tx,
+                        SERVER_DEVICE_ID,
+                        child,
+                        "upsert",
+                        &serde_json::to_string(&rescued)?,
+                        now,
+                    )?;
+                    put_node(tx, &rescued, seq)?;
+                }
             }
         }
     }

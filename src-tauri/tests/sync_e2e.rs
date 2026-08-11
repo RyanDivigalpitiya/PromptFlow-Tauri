@@ -176,7 +176,7 @@ impl Device {
                 .iter().map(|r| format!("{:?}", r.op)).collect();
             eprintln!("[{} cycle] cursor={cursor} outbox={out:#?}", self.name);
         }
-        match run_cycle(&agent(), &self.store, &self.cfg, cursor, false) {
+        match run_cycle(&agent(), &self.store, &self.cfg, cursor, false).map_err(|(e, _)| e) {
             Ok(ds) => {
                 if std::env::var("PF_E2E_TRACE").is_ok() {
                     for d in &ds { eprintln!("[{} applied] {:?}", self.name, d.ops); }
@@ -195,7 +195,9 @@ impl Device {
 
     fn try_sync(&self) -> Result<(), CycleError> {
         let cursor = self.with(|s| s.sync_cursor().unwrap_or(0));
-        run_cycle(&agent(), &self.store, &self.cfg, cursor, false).map(|_| ())
+        run_cycle(&agent(), &self.store, &self.cfg, cursor, false)
+            .map(|_| ())
+            .map_err(|(e, _)| e)
     }
 
     fn text(&self, id: Uuid) -> Option<String> {
@@ -501,4 +503,99 @@ fn an_edit_newer_than_our_queued_delete_still_resurrects_it() {
     );
     studio.sync();
     assert_eq!(studio.text(x).as_deref(), Some("no, I still want this"));
+}
+
+/// The batch-ordering guarantee, end to end, on the path that actually fires it: the
+/// first-configuration seed stamps ONE `queued_at` on every row, so `outbox_batch`'s
+/// tiebreak degenerates to uuid order — arbitrary with respect to the tree. Tree
+/// validation repairs a node whose parent it cannot find by moving it to the ROOT, and the
+/// repair does not move the structure clock, so the sender adopts the flattening too.
+/// Half of a nested outline would end up at the top level, non-undoably, on the very first
+/// sync Ryan ever runs.
+#[test]
+fn a_first_sync_of_a_nested_outline_does_not_flatten_it() {
+    let hub = HubProcess::start();
+
+    let dir = tempdir::TempDir::new("pf-store-nested").unwrap();
+    let mut legacy = Store::open(&dir.path().join("promptflow.sqlite")).unwrap();
+    // Enough nodes that uuid order is very unlikely to happen to be parent-first: 12
+    // roots, each with a child and a grandchild.
+    let mut expected: Vec<(Uuid, Option<Uuid>)> = Vec::new();
+    for i in 0..12 {
+        let (_, r) = legacy.append_root(promptflow_core::NodeKind::BulletPoint).unwrap();
+        let root = r.new_node.unwrap();
+        legacy.set_text(root, format!("root {i}"), None, None, None).unwrap();
+        let (_, c) = legacy.append_child(root, promptflow_core::NodeKind::BulletPoint).unwrap();
+        let child = c.new_node.unwrap();
+        let (_, g) = legacy.append_child(child, promptflow_core::NodeKind::BulletPoint).unwrap();
+        let grandchild = g.new_node.unwrap();
+        expected.push((root, None));
+        expected.push((child, Some(root)));
+        expected.push((grandchild, Some(child)));
+    }
+    legacy.set_sync_enabled(true).unwrap();
+    let device_id = legacy.device_id().unwrap();
+
+    let mac = Device {
+        name: "mac",
+        cfg: SyncConfig {
+            url: hub.url.clone(),
+            device_id,
+            bearer: BEARER.into(),
+            access_client_id: String::new(),
+            access_client_secret: String::new(),
+        },
+        store: Mutex::new(legacy),
+        _dir: dir,
+    };
+    mac.sync();
+
+    // The hub holds the tree, not a pile of roots...
+    for (id, parent) in &expected {
+        assert_eq!(
+            mac.node(*id).unwrap().parent,
+            *parent,
+            "the sender must not adopt a repair it caused by its own batch order"
+        );
+    }
+
+    // ...and a device bootstrapping from the snapshot gets the tree too, which is a
+    // separate ordering (SQLite's row order, one-pass applied).
+    let fresh = Device::new("fresh", &hub);
+    fresh.sync();
+    assert_eq!(fresh.count(), 36);
+    for (id, parent) in &expected {
+        assert_eq!(fresh.node(*id).map(|n| n.parent), Some(*parent));
+    }
+}
+
+/// Turning sync OFF and back ON must re-offer everything written in between. While it is
+/// off nothing is queued at all, and the outbox — a queue of pending work, not a log —
+/// cannot say afterwards what it missed. Without a re-seed the panel reports a healthy
+/// "last synced, 0 pending" over an outline the hub stopped hearing about.
+#[test]
+fn turning_sync_off_and_on_again_re_offers_what_was_missed() {
+    let hub = HubProcess::start();
+    let mac = Device::new("mac", &hub);
+    let peer = Device::new("peer", &hub);
+
+    let a = typed(&mac, "before the toggle");
+    mac.sync();
+    peer.sync();
+
+    mac.with(|s| s.set_sync_enabled(false).unwrap());
+    let b = mac.with(|s| {
+        let (_, out) = s.append_root(promptflow_core::NodeKind::BulletPoint).unwrap();
+        let id = out.new_node.unwrap();
+        s.set_text(id, "written while sync was off".into(), None, None, None).unwrap();
+        s.set_text(a, "edited while sync was off".into(), None, None, None).unwrap();
+        id
+    });
+    assert_eq!(mac.with(|s| s.outbox_count()), 0, "nothing queues while it is off");
+
+    mac.with(|s| s.set_sync_enabled(true).unwrap());
+    mac.sync();
+    peer.sync();
+    assert_eq!(peer.text(b).as_deref(), Some("written while sync was off"));
+    assert_eq!(peer.text(a).as_deref(), Some("edited while sync was off"));
 }

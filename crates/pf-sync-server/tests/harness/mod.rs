@@ -318,6 +318,23 @@ impl Device {
         texts.iter().map(|t| self.create(t)).collect()
     }
 
+    /// Stage the worst batch order a real client can produce. The desktop outbox sorts by
+    /// `(queued_at, node_id)` and a first-configuration seed stamps ONE `queued_at` on
+    /// every row, so the tiebreak degenerates to uuid order — arbitrary with respect to
+    /// the tree, and children-before-parents about half the time.
+    pub fn reverse_outbox(&mut self) {
+        let rows: Vec<(u64, (Uuid, WireOp))> =
+            self.outbox.iter().map(|(k, v)| (*k, v.clone())).collect();
+        let n = rows.len() as u64;
+        self.outbox.clear();
+        self.outbox_index.clear();
+        for (i, (_, (id, op))) in rows.into_iter().enumerate() {
+            let key = n - i as u64;
+            self.outbox.insert(key, (id, op));
+            self.outbox_index.insert(id, key);
+        }
+    }
+
     /// First-configuration seeding: everything live goes into the outbox at once. This
     /// is how the hub gets an outline that predates sync (T16).
     pub fn enqueue_everything(&mut self) {

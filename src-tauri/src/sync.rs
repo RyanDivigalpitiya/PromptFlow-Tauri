@@ -13,8 +13,8 @@
 use crate::commands::StoreState;
 use crate::store::Store;
 use promptflow_core::wire::{
-    ChangesResponse, Current, ErrorResponse, PushRequest, PushResponse, SnapshotResponse, WireOp,
-    CONFIRM_MASS_DELETE_HEADER, PROTOCOL_VERSION,
+    ChangesResponse, Current, ErrorResponse, Outcome, PushRequest, PushResponse, Reason,
+    SnapshotResponse, WireOp, CONFIRM_MASS_DELETE_HEADER, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -282,12 +282,21 @@ fn cycle(app: &AppHandle, agent: &ureq::Agent, confirm_mass_delete: bool) {
         s.syncing = true;
     });
 
-    match run_cycle(agent, state.inner(), &cfg, cursor, confirm_mass_delete) {
-        Ok(deltas) => {
-            for d in deltas {
-                emit(app, d);
-            }
-        }
+    // A cycle that PULLED successfully and then failed to push has already committed the
+    // remote changes to SQLite and bumped `rev`. Dropping the deltas on the error path
+    // would leave every window rendering an outline that no longer exists — and a
+    // keystroke there sends the stale text back with a fresh clock, which wins. The 428
+    // path makes this permanent, because it repeats every cycle until the user confirms.
+    let (outcome, deltas) = match run_cycle(agent, state.inner(), &cfg, cursor, confirm_mass_delete)
+    {
+        Ok(deltas) => (Ok(()), deltas),
+        Err((e, deltas)) => (Err(e), deltas),
+    };
+    for d in deltas {
+        emit(app, d);
+    }
+    match outcome {
+        Ok(()) => {}
         Err(CycleError::MassDelete) => {
             let pending_deletes = state.lock().unwrap().outbox_delete_count();
             publish(app, |s| {
@@ -344,7 +353,7 @@ pub fn run_cycle(
     cfg: &SyncConfig,
     cursor: i64,
     confirm_mass_delete: bool,
-) -> Result<Vec<crate::store::Delta>, CycleError> {
+) -> Result<Vec<crate::store::Delta>, (CycleError, Vec<crate::store::Delta>)> {
     let mut deltas = Vec::new();
     // (2) PULL — no lock held.
     let pulled = match get_changes(agent, cfg, cursor) {
@@ -353,16 +362,30 @@ pub fn run_cycle(
             // The hub cannot serve our cursor (v1: only reachable if it was restored
             // from a backup). Re-bootstrap from the snapshot, merged through the SAME
             // apply path — a snapshot is just a very large pull.
-            let snap = get_snapshot(agent, cfg).map_err(CycleError::Failed)?;
+            let snap = match get_snapshot(agent, cfg) {
+                Ok(s) => s,
+                Err(e) => return Err((CycleError::Failed(e), deltas)),
+            };
             let ops: Vec<WireOp> = snap.nodes.into_iter().map(WireOp::upsert).collect();
-            let mut store = state.lock().unwrap();
-            let delta = store
-                .apply_remote(&ops, Some(snap.latest_seq), &[])
-                .map_err(CycleError::Failed)?;
-            deltas.push(delta);
+            {
+                let mut store = state.lock().unwrap();
+                match store.apply_remote(&ops, Some(snap.latest_seq), &[]) {
+                    Ok(delta) => deltas.push(delta),
+                    Err(e) => return Err((CycleError::Failed(e), deltas)),
+                }
+                // A snapshot re-bootstrap can only ADD. `apply_remote` correctly keeps every
+                // locally-newer row, but it enqueues nothing, and the outbox is empty by
+                // construction (everything was acked before the hub lost its database). So
+                // without this, a day of work that exists only on this Mac is never offered
+                // to the hub again — and the first time any device touches one of those
+                // nodes, its older copy wins and the newer text is gone. Both ends show a
+                // healthy "last synced" throughout.
+                store.enqueue_all_live().map_err(|e| (CycleError::Failed(e), Vec::new()))?;
+            }
+            nudge(Nudge::Now);
             return Ok(deltas);
         }
-        Err(e) => return Err(CycleError::Failed(e.to_string())),
+        Err(e) => return Err((CycleError::Failed(e.to_string()), deltas)),
     };
 
     // (3) APPLY — one lock, one SQLite transaction covering the ops AND the cursor.
@@ -370,9 +393,10 @@ pub fn run_cycle(
         let ops: Vec<WireOp> = pulled.ops.into_iter().map(|e| e.op).collect();
         let delta = {
             let mut store = state.lock().unwrap();
-            store
-                .apply_remote(&ops, Some(pulled.latest_seq), &[])
-                .map_err(CycleError::Failed)?
+            match store.apply_remote(&ops, Some(pulled.latest_seq), &[]) {
+                Ok(d) => d,
+                Err(e) => return Err((CycleError::Failed(e), deltas)),
+            }
         };
         deltas.push(delta);
     }
@@ -380,7 +404,10 @@ pub fn run_cycle(
     // (4) Snapshot the outbox under the lock, release, PUSH.
     let batch = {
         let store = state.lock().unwrap();
-        store.outbox_batch(PUSH_BATCH).map_err(CycleError::Failed)?
+        match store.outbox_batch(PUSH_BATCH) {
+            Ok(b) => b,
+            Err(e) => return Err((CycleError::Failed(e), deltas)),
+        }
     };
     if batch.is_empty() {
         return Ok(deltas);
@@ -390,8 +417,8 @@ pub fn run_cycle(
         Ok(r) => r,
         // NEVER retried automatically. The UI surfaces the count and offers a
         // confirm-once action, which is the only thing that sets the header.
-        Err(SyncError::MassDelete) => return Err(CycleError::MassDelete),
-        Err(e) => return Err(CycleError::Failed(e.to_string())),
+        Err(SyncError::MassDelete) => return Err((CycleError::MassDelete, deltas)),
+        Err(e) => return Err((CycleError::Failed(e.to_string()), deltas)),
     };
 
     // (5) Re-take the lock: every named op leaves the outbox (unless re-queued since —
@@ -403,7 +430,14 @@ pub fn run_cycle(
     let mut clear: Vec<(Uuid, i64)> = Vec::new();
     let mut repairs: Vec<WireOp> = Vec::new();
     for r in &response.results {
-        if let Some(at) = by_id.get(&r.id) {
+        // Every named op leaves the outbox — EXCEPT a clock-skew rejection, which is the
+        // one outcome in the whole protocol that carries no `current`. Every other
+        // rejection hands back the winning state, which is what makes dropping the queued
+        // op safe; drop this one and the edit is deleted from the queue having reached
+        // nobody, while the push still returns 200 and the panel reports a clean sync.
+        let unrepairable =
+            r.outcome == Outcome::Rejected && r.reason == Some(Reason::ClockSkew);
+        if let (Some(at), false) = (by_id.get(&r.id), unrepairable) {
             clear.push((r.id, *at));
         }
         match &r.current {
@@ -417,9 +451,10 @@ pub fn run_cycle(
     }
     let delta = {
         let mut store = state.lock().unwrap();
-        store
-            .apply_remote(&repairs, None, &clear)
-            .map_err(CycleError::Failed)?
+        match store.apply_remote(&repairs, None, &clear) {
+            Ok(d) => d,
+            Err(e) => return Err((CycleError::Failed(e), deltas)),
+        }
     };
     deltas.push(delta);
 

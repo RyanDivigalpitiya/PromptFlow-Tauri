@@ -401,6 +401,92 @@ async fn t13_a_mutual_move_converges_acyclic() {
     }
     assert_eq!(hub.node(n1).await.unwrap().parent, Some(n2));
     assert_eq!(hub.node(n2).await.unwrap().parent, None);
+    // Acyclic is not the same as CONVERGED, and the difference is the whole bug: the
+    // losing device has to be able to ADOPT the rejection. Every other losing group comes
+    // back at a clock at least as new as the pusher's, so its own `>=` takes it; a cycle
+    // rejection returning the stored clock would be strictly older than the move being
+    // rejected, and B would keep its own parent forever while the hub said otherwise.
+    for dev in [&a, &b] {
+        assert_eq!(dev.parent_of(n1), Some(n2), "{}: n1 agrees with the hub", dev.id);
+        assert_eq!(dev.parent_of(n2), None, "{}: n2 agrees with the hub", dev.id);
+    }
+}
+
+/// The batch-ordering guarantee, which is not a nicety: tree validation repairs a node
+/// whose parent it cannot find by moving it to the ROOT, and every client's batch order is
+/// arbitrary with respect to the tree. A nested outline pushed child-first would arrive
+/// flat — on the hub AND, because the repair does not move the structure clock, on the
+/// device that sent it.
+#[tokio::test]
+async fn a_batch_that_names_a_child_before_its_parent_still_nests() {
+    let hub = Hub::new().await;
+    let mut a = Device::new("mac");
+
+    // Three levels, pushed in the WORST possible order.
+    let grandparent = a.create("grandparent");
+    let parent = a.create_child("parent", grandparent, 2_000);
+    let child = a.create_child("child", parent, 2_000);
+    a.reverse_outbox();
+
+    a.push(&hub).await;
+    assert_eq!(hub.node(child).await.unwrap().parent, Some(parent));
+    assert_eq!(hub.node(parent).await.unwrap().parent, Some(grandparent));
+    assert_eq!(hub.node(grandparent).await.unwrap().parent, None);
+
+    // And the sender is not flattened by the repairs it would otherwise get back.
+    assert_eq!(a.parent_of(child), Some(parent));
+    assert_eq!(a.parent_of(parent), Some(grandparent));
+
+    // A device bootstrapping from the snapshot gets it nested too — it applies in one
+    // pass and nothing ever re-queues a node it adopted from there.
+    let mut b = Device::new("ipad");
+    b.bootstrap(&hub).await;
+    assert_eq!(b.parent_of(child), Some(parent));
+    assert_eq!(b.parent_of(parent), Some(grandparent));
+}
+
+/// A cascade stamps the PARENT's `deletedAt` onto children whose clocks the hub never
+/// compared against. A child edited after the delete was made must not be tombstoned by
+/// it: every client would refuse that tombstone through its own merge, leaving the node
+/// dead on the hub and alive on the devices under a parent that no longer exists —
+/// invisible in the outline and unreachable by any later op.
+#[tokio::test]
+async fn a_cascade_never_kills_a_child_that_outlived_the_delete() {
+    let hub = Hub::new().await;
+    let mut a = Device::new("mac");
+    let mut b = Device::new("ipad");
+
+    let p = a.create("parent");
+    let c = a.create_child("child", p, 1_000);
+    a.sync(&hub).await;
+    b.sync(&hub).await;
+
+    // B deletes the parent at 5000, offline. A keeps working on the child afterwards.
+    b.delete_subtree(p, 5_000);
+    a.edit_text(c, "still being written at 9000", 9_000);
+    a.sync(&hub).await;
+
+    let results = b.push(&hub).await;
+    // The explicit delete of the child loses on its own merits...
+    let child_result = results.iter().find(|r| r.id == c).unwrap();
+    assert_eq!(child_result.outcome, Outcome::Rejected);
+    assert_eq!(child_result.reason, Some(Reason::Stale));
+    // ...and the parent's cascade must NOT go behind its back and kill it anyway.
+    let stored = hub.node(c).await.expect("the child outlived the delete");
+    assert_eq!(stored.text, "still being written at 9000");
+    assert_eq!(stored.parent, None, "and it was re-rooted, not left under a corpse");
+
+    b.pull(&hub).await;
+    a.sync(&hub).await;
+    for dev in [&a, &b] {
+        assert_eq!(
+            dev.text(c),
+            "still being written at 9000",
+            "{}: every replica agrees the child is alive",
+            dev.id
+        );
+        assert_eq!(dev.parent_of(c), None, "{}: and reachable from the root", dev.id);
+    }
 }
 
 /// T15 — the mass-delete tripwire refuses the batch outright, and the confirm header

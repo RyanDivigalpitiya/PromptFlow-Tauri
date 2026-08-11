@@ -1663,11 +1663,29 @@ impl Store {
         self.sync_enabled
     }
 
-    /// Turn queueing on or off. Turning it ON for the first time also SEEDS the outbox
-    /// with every live node — see `sync::first_configuration`.
+    /// Turn queueing on or off.
+    ///
+    /// Turning it ON always re-queues every live node, not only the first time. While it
+    /// was off nothing was queued at all, so an afternoon of edits and deletes exists
+    /// nowhere but here — and the outbox, being a queue of pending work rather than a log,
+    /// cannot say what was missed. Re-offering the whole store is the only thing that can:
+    /// it is idempotent by construction (the hub writes nothing where a merged result
+    /// equals what it holds, so a converged re-push costs no oplog entry and no sequence),
+    /// and without it the panel reports a healthy "last synced, 0 pending" over an outline
+    /// the hub stopped hearing about.
+    ///
+    /// DELETES made while it was off are the part this cannot recover — a queue of what
+    /// exists cannot express what stopped existing — so they are re-learned the other way:
+    /// the next pull brings those nodes back from the hub, which is wrong but VISIBLE,
+    /// where a silent divergence is not.
     pub fn set_sync_enabled(&mut self, on: bool) -> Result<(), String> {
+        let was = self.sync_enabled;
         self.sync_enabled = on;
-        self.set_setting(crate::sync::ENABLED_KEY, if on { "1" } else { "0" })
+        self.set_setting(crate::sync::ENABLED_KEY, if on { "1" } else { "0" })?;
+        if on && !was {
+            self.enqueue_all_live()?;
+        }
+        Ok(())
     }
 
     /// This store's device id, minted once and never regenerated. Echo exclusion on the
@@ -1743,6 +1761,14 @@ impl Store {
         // an incoming edit older than our delete loses, a newer one resurrects, and a
         // just-deleted subtree does not flicker back into the outline for a poll cycle.
         let pending_deletes = persist::pending_deletes(&self.db)?;
+
+        // Parents before children. Tree validation repairs a node whose parent it cannot
+        // find by moving it to the ROOT, so a batch that names a child first would flatten
+        // a subtree the hub is perfectly happy with. The hub orders what it sends, but a
+        // client that depends on that is one restored backup away from a shredded outline.
+        let mut ops = ops.to_vec();
+        promptflow_core::wire::order_parents_first(&mut ops);
+        let ops = &ops[..];
 
         let mut order: Vec<Uuid> = Vec::new();
         let mut before: HashMap<Uuid, Option<NodeRec>> = HashMap::new();
