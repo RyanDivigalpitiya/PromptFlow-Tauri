@@ -1,3 +1,9 @@
+# Deliberately NOT a member of the root workspace (which `exclude`s this directory):
+# the tauri CLI, scripts/build.sh and scripts/verify.sh all hardcode
+# `src-tauri/target/...`, and joining the workspace would relocate that directory.
+# An empty `[workspace]` table is what makes cargo stop looking upwards.
+[workspace]
+
 [package]
 name = "promptflow-tauri"
 version = "0.1.0"
@@ -18,6 +24,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# The node model, the sync wire format and the merge rules — shared verbatim with the
+# hub so the two can never disagree about what a node is.
+promptflow-core = { path = "../crates/promptflow-core" }
 tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }

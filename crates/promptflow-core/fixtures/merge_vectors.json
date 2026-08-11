@@ -1,0 +1,2031 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "insert into an empty hub",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "missing"
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "applied",
+        "reason": null,
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": null,
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "insert whose parent was never seen falls to root",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": 2048
+      },
+      "stored": {
+        "kind": "missing"
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": "99999999-9999-4999-8999-999999999999",
+          "position": 77,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "partial",
+        "reason": null,
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 3072,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 3072,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "repaired": true,
+        "cascade": false
+      }
+    },
+    {
+      "name": "insert whose parent is tombstoned falls to root",
+      "side": "hub",
+      "tree": {
+        "nodes": {
+          "dddddddd-dddd-4ddd-8ddd-dddddddddddd": {
+            "state": "deleted",
+            "parent": null
+          }
+        },
+        "maxRootPosition": 4096
+      },
+      "stored": {
+        "kind": "missing"
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "position": 77,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "partial",
+        "reason": null,
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 5120,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 5120,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "repaired": true,
+        "cascade": false
+      }
+    },
+    {
+      "name": "insert with no roots yet and a dead parent lands at position 0",
+      "side": "hub",
+      "tree": {
+        "nodes": {
+          "dddddddd-dddd-4ddd-8ddd-dddddddddddd": {
+            "state": "deleted",
+            "parent": null
+          }
+        },
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "missing"
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "position": 77,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "partial",
+        "reason": null,
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "repaired": true,
+        "cascade": false
+      }
+    },
+    {
+      "name": "a self-parented insert is malformed, not a conflict",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": 1024
+      },
+      "stored": {
+        "kind": "missing"
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": "11111111-1111-4111-8111-111111111111",
+          "position": 5,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "partial",
+        "reason": "invalid",
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 2048,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 2048,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "repaired": true,
+        "cascade": false
+      }
+    },
+    {
+      "name": "identical re-push writes nothing and burns no sequence",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "applied",
+        "reason": null,
+        "write": null,
+        "writeTombstone": null,
+        "current": null,
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "newer content replaces text, note and style runs",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "old",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "new",
+          "note": "added",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [
+            0,
+            3
+          ],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "applied",
+        "reason": null,
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "new",
+          "note": "added",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [
+            0,
+            3
+          ],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": null,
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "newer structure moves the node without touching its text",
+      "side": "hub",
+      "tree": {
+        "nodes": {
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": {
+            "state": "live",
+            "parent": null
+          }
+        },
+        "maxRootPosition": 1024
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "typed here",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 3000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "position": 512,
+          "text": "stale copy",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 2000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "partial",
+        "reason": "stale",
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "position": 512,
+          "text": "typed here",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 3000,
+          "structureUpdatedAt": 2000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "position": 512,
+          "text": "typed here",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 3000,
+          "structureUpdatedAt": 2000,
+          "completedAt": null
+        },
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "T7: a renumber (structure) and typing (content) both survive",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "typed by B",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 4096,
+          "text": "pre-typing text",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 3000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "partial",
+        "reason": "stale",
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 4096,
+          "text": "typed by B",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "structureUpdatedAt": 3000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 4096,
+          "text": "typed by B",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "structureUpdatedAt": 3000,
+          "completedAt": null
+        },
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "both groups newer: the whole node is taken",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "old",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "new",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": true,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 5000,
+          "structureUpdatedAt": 5000,
+          "completedAt": 5000
+        }
+      },
+      "expected": {
+        "outcome": "applied",
+        "reason": null,
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "new",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": true,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 5000,
+          "structureUpdatedAt": 5000,
+          "completedAt": 5000
+        },
+        "writeTombstone": null,
+        "current": null,
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "T12: an exact tie leaves hub state standing",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "hub copy",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "device copy",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "rejected",
+        "reason": "tie",
+        "write": null,
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "hub copy",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "T12 mirror: on a client the same tie adopts the hub value",
+      "side": "client",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "local copy",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "hub copy",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "applied",
+        "reason": null,
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "hub copy",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": null,
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "content ties while structure is newer: partial",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "hub text",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 3072,
+          "text": "device text",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 2000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "partial",
+        "reason": "tie",
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 3072,
+          "text": "hub text",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 2000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 3072,
+          "text": "hub text",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 2000,
+          "completedAt": null
+        },
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "an all-stale push is rejected and repaired from `current`",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "hub text",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 5000,
+          "structureUpdatedAt": 5000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "device text",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "rejected",
+        "reason": "stale",
+        "write": null,
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "hub text",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 5000,
+          "structureUpdatedAt": 5000,
+          "completedAt": null
+        },
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "a standing tombstone outlives an older edit",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "tombstone",
+        "deletedAt": 3000
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "rejected",
+        "reason": "tombstone",
+        "write": null,
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "deletedAt": 3000
+        },
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "an edit made after the delete resurrects the node",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "tombstone",
+        "deletedAt": 3000
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "still wanted",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 4000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "applied",
+        "reason": null,
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "still wanted",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 4000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": null,
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "a MOVE made after the delete resurrects it too (newest clock, not content)",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "tombstone",
+        "deletedAt": 3000
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 4000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "applied",
+        "reason": null,
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 4000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": null,
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "T2: a resurrected node whose parent died lands at root",
+      "side": "hub",
+      "tree": {
+        "nodes": {
+          "dddddddd-dddd-4ddd-8ddd-dddddddddddd": {
+            "state": "deleted",
+            "parent": null
+          }
+        },
+        "maxRootPosition": 8192
+      },
+      "stored": {
+        "kind": "tombstone",
+        "deletedAt": 3000
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "position": 99,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 4000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "partial",
+        "reason": null,
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 9216,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 4000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 9216,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 4000,
+          "completedAt": null
+        },
+        "repaired": true,
+        "cascade": false
+      }
+    },
+    {
+      "name": "T13: a cycle rejects the structure group wholesale, content still merges",
+      "side": "hub",
+      "tree": {
+        "nodes": {
+          "22222222-2222-4222-8222-222222222222": {
+            "state": "live",
+            "parent": "11111111-1111-4111-8111-111111111111"
+          }
+        },
+        "maxRootPosition": 1024
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "old",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": "22222222-2222-4222-8222-222222222222",
+          "position": 64,
+          "text": "new",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "structureUpdatedAt": 2000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "partial",
+        "reason": "invalid",
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "new",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "new",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "a cycle with nothing else to take is a plain rejection",
+      "side": "hub",
+      "tree": {
+        "nodes": {
+          "22222222-2222-4222-8222-222222222222": {
+            "state": "live",
+            "parent": "11111111-1111-4111-8111-111111111111"
+          }
+        },
+        "maxRootPosition": 1024
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "same",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": "22222222-2222-4222-8222-222222222222",
+          "position": 64,
+          "text": "same",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 2000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "rejected",
+        "reason": "invalid",
+        "write": null,
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "same",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "a newer move under a parent that has since died is accepted, then repaired",
+      "side": "hub",
+      "tree": {
+        "nodes": {
+          "dddddddd-dddd-4ddd-8ddd-dddddddddddd": {
+            "state": "deleted",
+            "parent": null
+          }
+        },
+        "maxRootPosition": 2048
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "position": 512,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 2000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "partial",
+        "reason": "tie",
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 3072,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 2000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 3072,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 2000,
+          "completedAt": null
+        },
+        "repaired": true,
+        "cascade": false
+      }
+    },
+    {
+      "name": "delete beats a node nobody has touched since",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "delete",
+        "id": "11111111-1111-4111-8111-111111111111",
+        "deletedAt": 2000
+      },
+      "expected": {
+        "outcome": "applied",
+        "reason": null,
+        "write": null,
+        "writeTombstone": 2000,
+        "current": null,
+        "repaired": false,
+        "cascade": true
+      }
+    },
+    {
+      "name": "T5: delete loses to a newer edit and hands back the live node",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "edited after the delete",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 5000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "delete",
+        "id": "11111111-1111-4111-8111-111111111111",
+        "deletedAt": 3000
+      },
+      "expected": {
+        "outcome": "rejected",
+        "reason": "stale",
+        "write": null,
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "edited after the delete",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 5000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "delete loses on an exact clock tie (strict >, on both sides)",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 3000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "delete",
+        "id": "11111111-1111-4111-8111-111111111111",
+        "deletedAt": 3000
+      },
+      "expected": {
+        "outcome": "rejected",
+        "reason": "stale",
+        "write": null,
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 3000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "re-deleting a tombstone is a no-op and does not move its clock",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "tombstone",
+        "deletedAt": 2000
+      },
+      "incoming": {
+        "kind": "delete",
+        "id": "11111111-1111-4111-8111-111111111111",
+        "deletedAt": 5000
+      },
+      "expected": {
+        "outcome": "applied",
+        "reason": null,
+        "write": null,
+        "writeTombstone": null,
+        "current": null,
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "a delete may arrive before the node it kills",
+      "side": "hub",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "missing"
+      },
+      "incoming": {
+        "kind": "delete",
+        "id": "11111111-1111-4111-8111-111111111111",
+        "deletedAt": 2000
+      },
+      "expected": {
+        "outcome": "applied",
+        "reason": null,
+        "write": null,
+        "writeTombstone": 2000,
+        "current": null,
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "client pulling a newer hub node adopts it",
+      "side": "client",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "local",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "from hub",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "applied",
+        "reason": null,
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "from hub",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": null,
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "client keeps its own strictly-newer local edit (T1)",
+      "side": "client",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "unpushed local edit",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 5000,
+          "structureUpdatedAt": 5000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "from hub",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "structureUpdatedAt": 2000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "rejected",
+        "reason": "stale",
+        "write": null,
+        "writeTombstone": null,
+        "current": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "unpushed local edit",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 5000,
+          "structureUpdatedAt": 5000,
+          "completedAt": null
+        },
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "client applying a push response's `current` after losing one group",
+      "side": "client",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 4096,
+          "text": "device text",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 3000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "upsert",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 4096,
+          "text": "hub text",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "structureUpdatedAt": 3000,
+          "completedAt": null
+        }
+      },
+      "expected": {
+        "outcome": "applied",
+        "reason": null,
+        "write": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 4096,
+          "text": "hub text",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "structureUpdatedAt": 3000,
+          "completedAt": null
+        },
+        "writeTombstone": null,
+        "current": null,
+        "repaired": false,
+        "cascade": false
+      }
+    },
+    {
+      "name": "client honours a hub delete of a node it has not touched",
+      "side": "client",
+      "tree": {
+        "nodes": {},
+        "maxRootPosition": null
+      },
+      "stored": {
+        "kind": "live",
+        "node": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "parent": null,
+          "position": 0,
+          "text": "alpha",
+          "note": "",
+          "kind": "bulletPoint",
+          "isCompleted": false,
+          "isHighlighted": false,
+          "boldRanges": [],
+          "italicRanges": [],
+          "underlineRanges": [],
+          "createdAt": 1000,
+          "updatedAt": 1000,
+          "structureUpdatedAt": 1000,
+          "completedAt": null
+        }
+      },
+      "incoming": {
+        "kind": "delete",
+        "id": "11111111-1111-4111-8111-111111111111",
+        "deletedAt": 2000
+      },
+      "expected": {
+        "outcome": "applied",
+        "reason": null,
+        "write": null,
+        "writeTombstone": 2000,
+        "current": null,
+        "repaired": false,
+        "cascade": true
+      }
+    }
+  ]
+}

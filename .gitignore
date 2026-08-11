@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Sync-server workspace build output (src-tauri keeps its own target/)
+/target
+
+# Defensive: sync credentials never belong in git (they live in Keychain and on the mini)
+**/sync-secrets*

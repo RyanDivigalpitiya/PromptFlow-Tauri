@@ -1,13 +1,61 @@
-use crate::model::{now_ms, sibling_order, NodeKind, NodeRec};
+use crate::model::{now_ms, sibling_order, utf16_len, NodeKind, NodeRec};
 use crate::persist;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-/// Sibling spacing. New nodes are inserted at the midpoint of a gap so a single edit is
-/// O(1); a sibling list is only renumbered when its gap is exhausted (same as the SwiftUI app).
-pub const GAP: i64 = 1024;
+/// Sibling spacing (re-exported from `promptflow-core`, where the hub reads the same
+/// constant when it repairs an orphan to the root list).
+pub use crate::model::GAP;
+
+/// Stamp the CONTENT clock: text, note, and the three style-range arrays. Nothing else
+/// may touch it — a move or a completion carrying a fresh content clock would let stale
+/// text beat concurrent typing on another device (that race is test T7).
+fn stamp_content(r: &mut NodeRec) {
+    r.updated_at = now_ms();
+}
+
+/// Stamp the STRUCTURE clock: parent, position, kind, is_completed, completed_at,
+/// is_highlighted.
+fn stamp_structure(r: &mut NodeRec) {
+    r.structure_updated_at = now_ms();
+}
+
+/// Creation stamps both — a new node's content and structure are equally new.
+fn stamp_both(r: &mut NodeRec) {
+    let now = now_ms();
+    r.updated_at = now;
+    r.structure_updated_at = now;
+}
+
+/// Undo and redo restore whole node IMAGES verbatim, so without this a restored node
+/// would arrive carrying its PRE-EDIT clocks — older than the state every other device
+/// already holds, which makes it lose the very next merge and the undo silently
+/// un-undoes itself (test T8). Stamp BOTH clocks: an undo is a fresh assertion about the
+/// whole node, whichever fields it happens to move. `created_at` is identity rather than
+/// a clock and is left alone.
+///
+/// The undo ENTRY's own images are not touched — each application re-stamps at its own
+/// instant, so undo → redo → undo works, and a step still sitting on the stack keeps the
+/// clocks it was recorded with.
+fn restamped(
+    images: impl Iterator<Item = (Uuid, Option<NodeRec>)>,
+) -> Vec<(Uuid, Option<NodeRec>)> {
+    let now = now_ms();
+    images
+        .map(|(id, img)| {
+            (
+                id,
+                img.map(|mut r| {
+                    r.updated_at = now;
+                    r.structure_updated_at = now;
+                    r
+                }),
+            )
+        })
+        .collect()
+}
 
 /// Cap on the undo stack (the SwiftUI app relied on NSUndoManager's default; we bound ours).
 const UNDO_CAP: usize = 500;
@@ -89,13 +137,10 @@ struct TxData {
 
 /// Split flat `[loc, len, …]` style pairs at `at`: head keeps runs before the split
 /// (clipped), tail keeps runs after it, rebased to 0. Runs straddling `at` split.
-/// Style-run offsets are UTF-16 code units — the units the SwiftUI app's `NSRange`s use
-/// and the units the frontend's `String` indices use. NEVER `text.len()`, which is BYTES:
-/// any non-ASCII character would put every run after it at the wrong offset.
-fn utf16_len(s: &str) -> i64 {
-    s.encode_utf16().count() as i64
-}
-
+/// Style-run offsets are UTF-16 code units (`utf16_len`, from the shared crate) — the
+/// units the SwiftUI app's `NSRange`s use and the units the frontend's `String` indices
+/// use. NEVER `text.len()`, which is BYTES: any non-ASCII character would put every run
+/// after it at the wrong offset.
 /// Append the part of `ranges` covering source `[lo, hi)` onto `out`, rebased so `lo`
 /// lands at `dst` — the merge's counterpart to `split_ranges`: where a split rebases runs
 /// to a new zero, this rebases them onto a position inside a longer text.
@@ -429,20 +474,19 @@ impl Store {
         let Some(entry) = self.undo_stack.pop() else {
             return Ok(self.empty_delta());
         };
+        let images = restamped(entry.changes.iter().map(|c| (c.id, c.before.clone())));
         // Persist BEFORE touching memory, so a failed write leaves the store exactly as
         // it was. Mutating first would strand the popped entry (never pushed to redo)
         // AND move the tree without bumping `rev` or emitting a delta — a silent,
         // permanent divergence between the store and every window.
-        if let Err(e) = persist::apply(
-            &mut self.db,
-            entry.changes.iter().map(|c| (c.id, c.before.as_ref())),
-        ) {
+        if let Err(e) = persist::apply(&mut self.db, images.iter().map(|(id, r)| (*id, r.as_ref())))
+        {
             self.undo_stack.push(entry); // nothing happened — put the step back
             return Err(e);
         }
         let mut ops = Vec::new();
-        for ch in &entry.changes {
-            self.apply_image(ch.id, ch.before.clone(), &mut ops);
+        for (id, img) in images {
+            self.apply_image(id, img, &mut ops);
         }
         self.redo_stack.push(entry);
         self.rev += 1;
@@ -459,17 +503,16 @@ impl Store {
         let Some(entry) = self.redo_stack.pop() else {
             return Ok(self.empty_delta());
         };
+        let images = restamped(entry.changes.iter().map(|c| (c.id, c.after.clone())));
         // Persist before mutating — see the note in `undo`.
-        if let Err(e) = persist::apply(
-            &mut self.db,
-            entry.changes.iter().map(|c| (c.id, c.after.as_ref())),
-        ) {
+        if let Err(e) = persist::apply(&mut self.db, images.iter().map(|(id, r)| (*id, r.as_ref())))
+        {
             self.redo_stack.push(entry); // nothing happened — put the step back
             return Err(e);
         }
         let mut ops = Vec::new();
-        for ch in &entry.changes {
-            self.apply_image(ch.id, ch.after.clone(), &mut ops);
+        for (id, img) in images {
+            self.apply_image(id, img, &mut ops);
         }
         self.undo_stack.push(entry);
         self.rev += 1;
@@ -506,6 +549,12 @@ impl Store {
 
     /// A position that places a new node immediately after `ref` among ref's siblings.
     /// Compacts the sibling list (renumber to 0, gap, 2·gap, …) if the gap is exhausted.
+    ///
+    /// A renumber stamps the STRUCTURE clock on every row it moves and deliberately
+    /// leaves the content clock alone. Both halves matter for sync: unstamped, the new
+    /// positions would lose every merge and the sibling list would silently disagree
+    /// across devices; stamped as content, a renumber sweeping a whole list would beat
+    /// concurrent typing on any of those rows (test T7).
     fn position_after(&mut self, ref_id: Uuid) -> i64 {
         let ref_pos = self.nodes[&ref_id].position;
         let sibs = self.sibling_ids(ref_id);
@@ -520,7 +569,10 @@ impl Store {
         };
         if upper - lower < 2 {
             for (i, s) in sibs.iter().enumerate() {
-                self.edit(*s, |r| r.position = (i as i64) * GAP);
+                self.edit(*s, |r| {
+                    r.position = (i as i64) * GAP;
+                    stamp_structure(r);
+                });
             }
             let sibs2 = self.sibling_ids(ref_id);
             let i2 = sibs2.iter().position(|x| *x == ref_id).unwrap_or(idx);
@@ -543,7 +595,10 @@ impl Store {
             return first_pos / 2;
         }
         for (i, k) in kids.iter().enumerate() {
-            self.edit(*k, |r| r.position = ((i as i64) + 1) * GAP);
+            self.edit(*k, |r| {
+                r.position = ((i as i64) + 1) * GAP;
+                stamp_structure(r);
+            });
         }
         0
     }
@@ -556,7 +611,10 @@ impl Store {
             return first_pos / 2;
         }
         for (i, r) in rs.iter().enumerate() {
-            self.edit(*r, |rec| rec.position = ((i as i64) + 1) * GAP);
+            self.edit(*r, |rec| {
+                rec.position = ((i as i64) + 1) * GAP;
+                stamp_structure(rec);
+            });
         }
         0
     }
@@ -605,7 +663,7 @@ impl Store {
             r.bold_ranges = bold_head;
             r.italic_ranges = italic_head;
             r.underline_ranges = under_head;
-            r.updated_at = now_ms();
+            stamp_content(r);
         });
         let mut new_rec = if expanded_in_window && self.has_children(node) {
             let kind = self.top_child_kind(node, hide_completed);
@@ -772,7 +830,7 @@ impl Store {
         self.edit(node, |r| {
             r.parent = Some(new_parent);
             r.position = last_child_pos + GAP;
-            r.updated_at = now_ms();
+            stamp_structure(r);
         });
         let delta = self.commit(None)?;
         Ok((
@@ -809,7 +867,7 @@ impl Store {
         self.edit(node, |r| {
             r.parent = grandparent;
             r.position = target;
-            r.updated_at = now_ms();
+            stamp_structure(r);
         });
     }
 
@@ -846,7 +904,7 @@ impl Store {
             if self.nodes[s].position != new_pos {
                 self.edit(*s, |r| {
                     r.position = new_pos;
-                    r.updated_at = now_ms();
+                    stamp_structure(r);
                 });
             }
         }
@@ -900,7 +958,7 @@ impl Store {
         self.edit(node, |rec| {
             rec.parent = new_parent;
             rec.position = new_position;
-            rec.updated_at = now_ms();
+            stamp_structure(rec);
         });
         let delta = self.commit(None)?;
         Ok((
@@ -931,7 +989,7 @@ impl Store {
                 r.is_highlighted = false; // a done item shouldn't stay accented
             }
             r.completed_at = if r.is_completed { Some(now_ms()) } else { None };
-            r.updated_at = now_ms();
+            stamp_structure(r);
         });
         let delta = self.commit(None)?;
         Ok((delta, MutationOut::default()))
@@ -960,7 +1018,7 @@ impl Store {
             if let Some(u) = underline_ranges {
                 r.underline_ranges = u;
             }
-            r.updated_at = now_ms();
+            stamp_content(r);
         });
         let delta = self.commit(Some(CoalesceKey::Text(node)))?;
         Ok((delta, MutationOut::default()))
@@ -971,7 +1029,7 @@ impl Store {
         self.begin();
         self.edit(node, |r| {
             r.note = note;
-            r.updated_at = now_ms();
+            stamp_content(r);
         });
         let delta = self.commit(Some(CoalesceKey::Note(node)))?;
         Ok((delta, MutationOut::default()))
@@ -982,7 +1040,7 @@ impl Store {
         self.begin();
         self.edit(node, |r| {
             r.kind = kind;
-            r.updated_at = now_ms();
+            stamp_structure(r);
         });
         let delta = self.commit(None)?;
         Ok((delta, MutationOut::default()))
@@ -1000,7 +1058,7 @@ impl Store {
         self.begin();
         self.edit(node, |r| {
             r.is_highlighted = on;
-            r.updated_at = now_ms();
+            stamp_structure(r);
         });
         let delta = self.commit(None)?;
         Ok((delta, MutationOut::default()))
@@ -1067,7 +1125,7 @@ impl Store {
             self.edit(*node, |r| {
                 r.parent = Some(new_parent);
                 r.position = pos;
-                r.updated_at = now_ms();
+                stamp_structure(r);
             });
         }
         let delta = self.commit(None)?;
@@ -1165,7 +1223,7 @@ impl Store {
             if self.nodes[s].position != new_pos {
                 self.edit(*s, |r| {
                     r.position = new_pos;
-                    r.updated_at = now_ms();
+                    stamp_structure(r);
                 });
             }
         }
@@ -1206,7 +1264,7 @@ impl Store {
                     r.is_highlighted = false;
                 }
                 r.completed_at = if mark_complete { Some(now_ms()) } else { None };
-                r.updated_at = now_ms();
+                stamp_structure(r);
             });
         }
         let delta = self.commit(None)?;
@@ -1231,7 +1289,7 @@ impl Store {
         for node in changing {
             self.edit(node, |r| {
                 r.kind = kind;
-                r.updated_at = now_ms();
+                stamp_structure(r);
             });
         }
         let delta = self.commit(None)?;
@@ -1266,7 +1324,7 @@ impl Store {
             };
             self.edit(node, |r| {
                 r.bold_ranges = run;
-                r.updated_at = now_ms();
+                stamp_content(r);
             });
         }
         let delta = self.commit(None)?;
@@ -1447,7 +1505,9 @@ impl Store {
             // means), so this is not a fix for the sweep, just one fewer way in.
             r.is_completed = false;
             r.completed_at = None;
-            r.updated_at = now_ms();
+            // A fold rewrites BOTH groups: the text and its runs are new, and so are the
+            // kind and the cleared completion.
+            stamp_both(r);
         });
         let delta = self.commit(None)?;
         Ok((
@@ -1519,7 +1579,7 @@ impl Store {
             self.edit(node, |rec| {
                 rec.parent = new_parent;
                 rec.position = pos;
-                rec.updated_at = now_ms();
+                stamp_structure(rec);
             });
             anchor = Some(node);
         }
@@ -2067,6 +2127,351 @@ mod tests {
         let (delta2, _) = s.move_block_to(&[b], None, Some(ghost)).unwrap();
         assert!(delta2.ops.is_empty());
         assert_eq!(s.roots(), vec![a, b]);
+    }
+
+    // MARK: Two-clock stamping (the sync contract, §3.4)
+    //
+    // Which clock a mutation moves IS the protocol. Getting it wrong is invisible
+    // locally — the app never reads these — and shows up only as another device
+    // silently losing an edit, so every mutation class is pinned here.
+
+    /// Rewind both clocks far enough into the past that any fresh stamp is unmistakable,
+    /// WITHOUT going through a mutation (which would stamp).
+    fn age(s: &mut Store, ids: &[Uuid]) -> i64 {
+        let old = now_ms() - 60_000;
+        for id in ids {
+            let mut rec = s.get(*id).unwrap().clone();
+            rec.updated_at = old;
+            rec.structure_updated_at = old;
+            s.nodes.insert(*id, rec);
+        }
+        old
+    }
+
+    fn clocks(s: &Store, id: Uuid) -> (i64, i64) {
+        let r = s.get(id).unwrap();
+        (r.updated_at, r.structure_updated_at)
+    }
+
+    #[test]
+    fn content_mutations_move_only_the_content_clock() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+
+        for (label, apply) in [
+            (
+                "set_text",
+                Box::new(|s: &mut Store, a: Uuid| {
+                    s.set_text(a, "typed".into(), None, None, None).unwrap();
+                }) as Box<dyn Fn(&mut Store, Uuid)>,
+            ),
+            (
+                "set_note",
+                Box::new(|s: &mut Store, a: Uuid| {
+                    s.set_note(a, "a note".into()).unwrap();
+                }),
+            ),
+            (
+                "toggle_bold_block",
+                Box::new(|s: &mut Store, a: Uuid| {
+                    s.toggle_bold_block(&[a]).unwrap();
+                }),
+            ),
+        ] {
+            let old = age(&mut s, &[a]);
+            apply(&mut s, a);
+            let (content, structure) = clocks(&s, a);
+            assert!(content > old, "{label} must stamp the content clock");
+            assert_eq!(
+                structure, old,
+                "{label} must NOT stamp the structure clock — a text edit that moved it \
+                 would beat a concurrent move from another device"
+            );
+        }
+    }
+
+    #[test]
+    fn structure_mutations_move_only_the_structure_clock() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, b) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let b = b.new_node.unwrap();
+        s.set_text(a, "alpha".into(), None, None, None).unwrap();
+        s.set_text(b, "beta".into(), None, None, None).unwrap();
+
+        type Step = Box<dyn Fn(&mut Store, Uuid, Uuid)>;
+        /// Some steps only do anything from a particular shape (you cannot outdent a
+        /// root). The prep runs BEFORE the clocks are aged, so it never pollutes the
+        /// measurement.
+        let nest: Step = Box::new(|s, _a, b| {
+            s.indent(b, false).unwrap();
+        });
+        let noop: Step = Box::new(|_, _, _| {});
+        let steps: Vec<(&str, Step, &Step)> = vec![
+            (
+                "indent",
+                Box::new(|s, _a, b| {
+                    s.indent(b, false).unwrap();
+                }),
+                &noop,
+            ),
+            (
+                "outdent",
+                Box::new(|s, _a, b| {
+                    s.outdent(b).unwrap();
+                }),
+                &nest,
+            ),
+            (
+                "move_by",
+                Box::new(|s, _a, b| {
+                    s.move_by(b, -1, false).unwrap();
+                }),
+                &noop,
+            ),
+            (
+                "move_to",
+                Box::new(|s, a, b| {
+                    s.move_to(b, Some(a), None).unwrap();
+                }),
+                &noop,
+            ),
+            (
+                "toggle_completed",
+                Box::new(|s, _a, b| {
+                    s.toggle_completed(b).unwrap();
+                }),
+                &noop,
+            ),
+            (
+                "set_kind",
+                Box::new(|s, _a, b| {
+                    s.set_kind(b, NodeKind::Checkbox).unwrap();
+                }),
+                &noop,
+            ),
+            (
+                "set_highlighted",
+                Box::new(|s, _a, b| {
+                    // The setter is a no-op when the flag already matches, so clear it
+                    // first — an unchanged node stamps nothing, by design.
+                    s.set_highlighted(b, false).unwrap();
+                    s.set_highlighted(b, true).unwrap();
+                }),
+                &noop,
+            ),
+            (
+                "indent_block",
+                Box::new(|s, _a, b| {
+                    s.indent_block(&[b], false).unwrap();
+                }),
+                &noop,
+            ),
+            (
+                "outdent_block",
+                Box::new(|s, _a, b| {
+                    s.outdent_block(&[b]).unwrap();
+                }),
+                &nest,
+            ),
+            (
+                "move_block_by",
+                Box::new(|s, _a, b| {
+                    s.move_block_by(&[b], -1, false).unwrap();
+                }),
+                &noop,
+            ),
+            (
+                "move_block_to",
+                Box::new(|s, a, b| {
+                    s.move_block_to(&[b], Some(a), None).unwrap();
+                }),
+                &noop,
+            ),
+            (
+                "toggle_completed_block",
+                Box::new(|s, _a, b| {
+                    s.toggle_completed_block(&[b]).unwrap();
+                }),
+                &noop,
+            ),
+            (
+                "set_kind_block",
+                Box::new(|s, _a, b| {
+                    s.set_kind_block(&[b], NodeKind::PromptDraft).unwrap();
+                }),
+                &noop,
+            ),
+        ];
+
+        for (label, step, prep) in steps {
+            // Put b back beside a so every step starts from the same shape, then let the
+            // step's own prep move it where it needs to be.
+            s.move_to(b, None, Some(a)).unwrap();
+            s.set_kind(b, NodeKind::BulletPoint).unwrap();
+            prep(&mut s, a, b);
+            let old = age(&mut s, &[a, b]);
+            step(&mut s, a, b);
+            let (content, structure) = clocks(&s, b);
+            assert!(structure > old, "{label} must stamp the structure clock");
+            assert_eq!(
+                content, old,
+                "{label} must NOT stamp the content clock — a move that moved it would \
+                 carry stale text over concurrent typing on another device"
+            );
+        }
+    }
+
+    /// T7's local half: a gap-exhaustion renumber sweeps a whole sibling list, and every
+    /// row it touches must carry the new position forward (unstamped, the other device
+    /// keeps its own positions and the two lists silently disagree) WITHOUT claiming to
+    /// have retyped any of them.
+    #[test]
+    fn a_renumber_stamps_structure_on_every_row_it_touches() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let first = a.new_node.unwrap();
+        for _ in 0..3 {
+            s.append_root(NodeKind::BulletPoint).unwrap();
+        }
+        let roots = s.roots();
+        assert_eq!(roots.len(), 4);
+        // Squeeze the gap after `first` shut, so the next insert HAS to renumber. Poked
+        // through `put` rather than the nodes map directly, so the sibling index stays
+        // sorted (the house rule every mutation follows).
+        for (i, r) in roots.iter().enumerate() {
+            let mut rec = s.get(*r).unwrap().clone();
+            rec.position = i as i64;
+            s.put(rec);
+        }
+        let old = age(&mut s, &roots);
+        s.insert_sibling_after(first, NodeKind::BulletPoint).unwrap();
+
+        for r in &roots {
+            assert!(
+                clocks(&s, *r).1 > old,
+                "every renumbered row must carry a fresh structure clock, or the other \
+                 device keeps its own positions and the two lists silently disagree"
+            );
+        }
+        for r in roots {
+            let (content, _) = clocks(&s, r);
+            assert_eq!(content, old, "a renumber never touches the content clock");
+        }
+    }
+
+    /// T8: an undo restores a PRE-EDIT image, so without a fresh stamp the restored node
+    /// arrives older than the state the hub already holds, loses the next merge, and the
+    /// undo un-undoes itself.
+    #[test]
+    fn undo_and_redo_restamp_both_clocks() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        s.set_text(a, "first".into(), None, None, None).unwrap();
+        // A second, non-coalescing step so there is something to undo back to.
+        s.set_kind(a, NodeKind::Checkbox).unwrap();
+
+        let old = age(&mut s, &[a]);
+        s.undo().unwrap();
+        let (content, structure) = clocks(&s, a);
+        assert_eq!(s.get(a).unwrap().kind, NodeKind::BulletPoint);
+        assert!(content > old, "undo must restamp the content clock");
+        assert!(structure > old, "undo must restamp the structure clock");
+
+        let old2 = age(&mut s, &[a]);
+        s.redo().unwrap();
+        let (content2, structure2) = clocks(&s, a);
+        assert_eq!(s.get(a).unwrap().kind, NodeKind::Checkbox);
+        assert!(content2 > old2, "redo must restamp the content clock");
+        assert!(structure2 > old2, "redo must restamp the structure clock");
+    }
+
+    /// An undo that RE-CREATES a deleted node is the case the restamp exists for: the
+    /// hub only resurrects a tombstoned node when the incoming clock beats the instant
+    /// it died, so the restored image must be newer than the delete that killed it.
+    #[test]
+    fn undoing_a_delete_restores_the_node_with_fresh_clocks() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, kid) = s.append_child(a, NodeKind::BulletPoint).unwrap();
+        let kid = kid.new_node.unwrap();
+        let before_delete = now_ms();
+        s.delete(a).unwrap();
+        assert_eq!(s.node_count(), 0);
+
+        s.undo().unwrap();
+        for id in [a, kid] {
+            let (content, structure) = clocks(&s, id);
+            assert!(
+                content >= before_delete && structure >= before_delete,
+                "a resurrected node must be newer than the delete that killed it"
+            );
+        }
+    }
+
+    /// A creation stamps both clocks, and the two agree — the protocol's "creation sets
+    /// both = createdAt".
+    #[test]
+    fn creation_stamps_both_clocks_together() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let rec = s.get(a).unwrap();
+        assert_eq!(rec.updated_at, rec.created_at);
+        assert_eq!(rec.structure_updated_at, rec.created_at);
+
+        // An Enter split: the source keeps its structure clock (it did not move) and the
+        // new node gets both.
+        let old = age(&mut s, &[a]);
+        let (_, out) = s
+            .commit_new_node(a, "left".into(), "right".into(), false, false)
+            .unwrap();
+        let b = out.new_node.unwrap();
+        let (content, structure) = clocks(&s, a);
+        assert!(content > old, "the split rewrote the source's text");
+        assert_eq!(structure, old, "the source did not move");
+        let nb = s.get(b).unwrap();
+        assert_eq!(nb.updated_at, nb.structure_updated_at);
+    }
+
+    /// A fold rewrites the head's text AND its kind, so it is the one mutation that
+    /// legitimately stamps both.
+    #[test]
+    fn merge_into_prompt_stamps_both_clocks() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, b) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let b = b.new_node.unwrap();
+        s.set_text(a, "one".into(), None, None, None).unwrap();
+        s.set_text(b, "two".into(), None, None, None).unwrap();
+        let old = age(&mut s, &[a, b]);
+        s.merge_into_prompt(&[a, b]).unwrap();
+        let (content, structure) = clocks(&s, a);
+        assert!(content > old && structure > old);
+    }
+
+    /// The migration's read path: a row written before the structure clock existed comes
+    /// back carrying its content clock, never a 1970 timestamp that would lose every
+    /// merge it ever takes part in.
+    #[test]
+    fn a_pre_migration_row_inherits_its_content_clock() {
+        let db = persist::open_in_memory().unwrap();
+        db.execute(
+            "INSERT INTO nodes (id, parent, position, text, note, kind, is_completed,
+               is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges,
+               created_at, updated_at, completed_at, structure_updated_at)
+             VALUES (?1, NULL, 0, 'old row', '', 'bulletPoint', 0, 0, 0, '[]', '[]', '[]',
+               1000, 7777, NULL, 0)",
+            [Uuid::nil().to_string()],
+        )
+        .unwrap();
+        let loaded = persist::load_all(&db).unwrap();
+        assert_eq!(loaded[&Uuid::nil()].structure_updated_at, 7777);
     }
 
     #[test]

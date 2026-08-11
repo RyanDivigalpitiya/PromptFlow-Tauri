@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   underline_ranges TEXT NOT NULL DEFAULT '[]',
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL,
+  structure_updated_at INTEGER NOT NULL DEFAULT 0,
   completed_at  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent);
@@ -57,12 +58,25 @@ fn init(db: &Connection) -> Result<(), String> {
             [],
         );
     }
+    // Same idempotent-ALTER shape for the sync structure clock. Rows written before the
+    // two-clock split have only one history, so they inherit it: the backfill runs once
+    // (its WHERE clause makes a second run a no-op) and `load_all` normalizes any 0 it
+    // still reads back, so a row can never present a 1970 structure clock and lose every
+    // merge it takes part in.
+    let _ = db.execute(
+        "ALTER TABLE nodes ADD COLUMN structure_updated_at INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = db.execute(
+        "UPDATE nodes SET structure_updated_at = updated_at WHERE structure_updated_at = 0",
+        [],
+    );
     Ok(())
 }
 
 pub fn load_all(db: &Connection) -> Result<HashMap<Uuid, NodeRec>, String> {
     let mut stmt = db
-        .prepare("SELECT id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges, created_at, updated_at, completed_at FROM nodes")
+        .prepare("SELECT id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges, created_at, updated_at, completed_at, structure_updated_at FROM nodes")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
@@ -71,6 +85,13 @@ pub fn load_all(db: &Connection) -> Result<HashMap<Uuid, NodeRec>, String> {
             let bold_json: String = row.get(9)?;
             let italic_json: String = row.get(10)?;
             let underline_json: String = row.get(11)?;
+            let updated_at: i64 = row.get(13)?;
+            // A 0 here is a row the backfill never reached (a store restored from a
+            // pre-migration backup, say). The content clock is the only history it has.
+            let structure_updated_at = match row.get::<_, i64>(15)? {
+                0 => updated_at,
+                s => s,
+            };
             Ok(NodeRec {
                 id: Uuid::parse_str(&id).unwrap_or_default(),
                 parent: parent.and_then(|p| Uuid::parse_str(&p).ok()),
@@ -85,7 +106,8 @@ pub fn load_all(db: &Connection) -> Result<HashMap<Uuid, NodeRec>, String> {
                 italic_ranges: serde_json::from_str(&italic_json).unwrap_or_default(),
                 underline_ranges: serde_json::from_str(&underline_json).unwrap_or_default(),
                 created_at: row.get(12)?,
-                updated_at: row.get(13)?,
+                updated_at,
+                structure_updated_at,
                 completed_at: row.get(14)?,
             })
         })
@@ -108,15 +130,16 @@ pub fn apply<'a>(
     {
         let mut upsert = tx
             .prepare_cached(
-                "INSERT INTO nodes (id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges, created_at, updated_at, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                "INSERT INTO nodes (id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges, created_at, updated_at, completed_at, structure_updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                  ON CONFLICT(id) DO UPDATE SET
                    parent=excluded.parent, position=excluded.position, text=excluded.text,
                    note=excluded.note, kind=excluded.kind, is_completed=excluded.is_completed,
                    is_highlighted=excluded.is_highlighted, is_collapsed=excluded.is_collapsed,
                    bold_ranges=excluded.bold_ranges, italic_ranges=excluded.italic_ranges,
                    underline_ranges=excluded.underline_ranges, created_at=excluded.created_at,
-                   updated_at=excluded.updated_at, completed_at=excluded.completed_at",
+                   updated_at=excluded.updated_at, completed_at=excluded.completed_at,
+                   structure_updated_at=excluded.structure_updated_at",
             )
             .map_err(|e| e.to_string())?;
         let mut delete = tx
@@ -142,6 +165,7 @@ pub fn apply<'a>(
                             r.created_at,
                             r.updated_at,
                             r.completed_at,
+                            r.structure_updated_at,
                         ])
                         .map_err(|e| e.to_string())?;
                 }

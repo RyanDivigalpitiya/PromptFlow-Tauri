@@ -1,0 +1,10 @@
+[package]
+name = "promptflow-core"
+version.workspace = true
+edition.workspace = true
+description = "Shared node model, sync wire format and merge rules for PromptFlow"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }

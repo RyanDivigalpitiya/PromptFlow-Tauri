@@ -2612,12 +2612,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "promptflow-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "promptflow-tauri"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "objc2",
  "objc2-foundation",
+ "promptflow-core",
  "rusqlite",
  "serde",
  "serde_json",
