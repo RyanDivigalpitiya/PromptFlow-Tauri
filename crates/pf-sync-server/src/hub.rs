@@ -352,7 +352,7 @@ fn apply_delete(
         return Ok(res);
     }
     let stored = read_stored(tx, id)?;
-    let m = merge_delete(deleted_at, &stored);
+    let m = merge_delete(deleted_at, &stored, Side::Hub);
 
     if let Some(at) = m.write_tombstone {
         let seq = append_oplog(tx, device, id, "delete", &tombstone_json(id, at)?, now)?;

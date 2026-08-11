@@ -1,11 +1,12 @@
 mod archive;
-mod commands;
+pub mod commands;
 #[cfg(target_os = "macos")]
 mod macos_defaults;
 mod model;
 mod persist;
 mod seed;
-mod store;
+pub mod store;
+pub mod sync;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -192,7 +193,14 @@ pub fn run() {
         .setup(|app| {
             let path = store_path(app.handle());
             let mut store = Store::open(&path).map_err(std::io::Error::other)?;
-            if store.is_empty() && std::env::var("PROMPTFLOW_NO_SEED").is_err() {
+            // The welcome seed is SKIPPED when sync is configured: an empty store with a
+            // hub behind it is a device waiting to be filled, not a first launch, and
+            // seeding it would push a second copy of the welcome outline at everyone.
+            // The first sync cycle bootstraps it instead.
+            if store.is_empty()
+                && !store.sync_enabled()
+                && std::env::var("PROMPTFLOW_NO_SEED").is_err()
+            {
                 let _ = store.insert_tree(seed::welcome_tree());
                 store.clear_history(); // the seed is not an undoable user action
             }
@@ -230,6 +238,10 @@ pub fn run() {
                     }
                 }
             });
+
+            // The sync loop: its own thread, its own 3 s grace before the first cycle,
+            // and — the rule that matters — no network I/O ever under the store mutex.
+            sync::spawn(app.handle().clone());
 
             let (menu, window_menu) = build_menu(app.handle())?;
             app.set_menu(menu)?;
@@ -343,6 +355,11 @@ pub fn run() {
             commands::get_setting,
             commands::set_setting,
             commands::popup_row_menu,
+            commands::sync_get_config,
+            commands::sync_set_config,
+            commands::sync_status,
+            commands::sync_now,
+            commands::sync_confirm_mass_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,4 +1,5 @@
-use crate::model::{NodeKind, NodeRec};
+use crate::model::{now_ms, NodeKind, NodeRec};
+use promptflow_core::wire::{TombstoneRef, WireNode, WireOp};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -26,6 +27,18 @@ CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent);
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+-- The sync outbox. It lives in the SAME database as the nodes precisely so a row can be
+-- queued inside the very transaction that persists the change it describes: split across
+-- two files, a crash between them would either lose an edit's sync forever or queue one
+-- that never happened. Coalesced per node by the primary key — the latest image wins, and
+-- a delete replaces a queued upsert (and an upsert a queued delete, which is what an
+-- undone deletion is).
+CREATE TABLE IF NOT EXISTS outbox (
+  node_id   TEXT PRIMARY KEY,
+  op        TEXT NOT NULL,    -- 'upsert' | 'delete'
+  payload   TEXT NOT NULL,    -- WireNode JSON, or {id, deletedAt}
+  queued_at INTEGER NOT NULL  -- guards the clear: a row re-queued since we read it stays
 );
 ";
 
@@ -120,12 +133,42 @@ pub fn load_all(db: &Connection) -> Result<HashMap<Uuid, NodeRec>, String> {
     Ok(out)
 }
 
-/// Apply a mutation's changed rows in ONE SQLite transaction: `Some(rec)` upserts,
-/// `None` deletes.
-pub fn apply<'a>(
-    db: &mut Connection,
-    changes: impl Iterator<Item = (Uuid, Option<&'a NodeRec>)>,
-) -> Result<(), String> {
+/// Everything one store commit writes, so it can all land in ONE SQLite transaction.
+///
+/// The point is the outbox: a local edit and the sync row describing it MUST commit
+/// together. Written afterwards, a crash in between loses the edit's sync silently and
+/// forever (nothing later re-derives it); written first, a failed node write leaves a
+/// queued op for a change that never happened.
+pub struct ApplyPlan<'a> {
+    /// `Some(rec)` upserts, `None` deletes.
+    pub changes: Vec<(Uuid, Option<&'a NodeRec>)>,
+    /// Queue these changes for the hub. LOCAL mutations do; a remote apply does not —
+    /// echoing back what the hub just told us is the definition of a sync loop.
+    pub enqueue: bool,
+    /// Settings written in the same transaction. The sync CURSOR is the one that
+    /// matters: advanced separately from the ops it covers, a crash between them either
+    /// replays ops (harmless — they merge idempotently) or SKIPS them (silent data
+    /// loss). Only the first of those is acceptable, so the cursor moves with the apply.
+    pub settings: Vec<(String, String)>,
+    /// Outbox rows to clear, each guarded by the `queued_at` it carried when the pusher
+    /// read it: a row the user re-queued mid-flight is left alone rather than dropped.
+    pub clear_outbox: Vec<(Uuid, i64)>,
+}
+
+impl<'a> ApplyPlan<'a> {
+    /// The ordinary local-mutation plan.
+    pub fn local(changes: Vec<(Uuid, Option<&'a NodeRec>)>, enqueue: bool) -> Self {
+        ApplyPlan {
+            changes,
+            enqueue,
+            settings: Vec::new(),
+            clear_outbox: Vec::new(),
+        }
+    }
+}
+
+pub fn apply_plan(db: &mut Connection, plan: ApplyPlan<'_>) -> Result<(), String> {
+    let queued_at = now_ms();
     let tx = db.transaction().map_err(|e| e.to_string())?;
     {
         let mut upsert = tx
@@ -145,7 +188,15 @@ pub fn apply<'a>(
         let mut delete = tx
             .prepare_cached("DELETE FROM nodes WHERE id = ?1")
             .map_err(|e| e.to_string())?;
-        for (id, rec) in changes {
+        let mut enqueue = tx
+            .prepare_cached(
+                "INSERT INTO outbox (node_id, op, payload, queued_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(node_id) DO UPDATE SET
+                   op=excluded.op, payload=excluded.payload, queued_at=excluded.queued_at",
+            )
+            .map_err(|e| e.to_string())?;
+        for (id, rec) in &plan.changes {
+            let (id, rec) = (*id, *rec);
             match rec {
                 Some(r) => {
                     upsert
@@ -175,7 +226,161 @@ pub fn apply<'a>(
                         .map_err(|e| e.to_string())?;
                 }
             }
+            if plan.enqueue {
+                let (op, payload) = match rec {
+                    Some(r) => (
+                        "upsert",
+                        serde_json::to_string(&WireNode::from(r)).map_err(|e| e.to_string())?,
+                    ),
+                    // `deletedAt` is stamped at ENQUEUE, not at push: the instant the
+                    // user deleted is what the hub weighs against a concurrent edit, and
+                    // an offline device might not push for hours.
+                    None => (
+                        "delete",
+                        serde_json::to_string(&TombstoneRef {
+                            id,
+                            deleted_at: queued_at,
+                        })
+                        .map_err(|e| e.to_string())?,
+                    ),
+                };
+                enqueue
+                    .execute(params![id.to_string(), op, payload, queued_at])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        let mut setting = tx
+            .prepare_cached(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .map_err(|e| e.to_string())?;
+        for (k, v) in &plan.settings {
+            setting
+                .execute(params![k, v])
+                .map_err(|e| e.to_string())?;
+        }
+
+        let mut clear = tx
+            .prepare_cached("DELETE FROM outbox WHERE node_id = ?1 AND queued_at <= ?2")
+            .map_err(|e| e.to_string())?;
+        for (id, at) in &plan.clear_outbox {
+            clear
+                .execute(params![id.to_string(), at])
+                .map_err(|e| e.to_string())?;
         }
     }
     tx.commit().map_err(|e| e.to_string())
+}
+
+/// One queued op, as the sync loop reads it.
+pub struct OutboxRow {
+    pub node_id: Uuid,
+    pub op: WireOp,
+    pub queued_at: i64,
+}
+
+pub fn outbox_batch(db: &Connection, limit: usize) -> Result<Vec<OutboxRow>, String> {
+    let mut stmt = db
+        .prepare("SELECT node_id, op, payload, queued_at FROM outbox ORDER BY queued_at, node_id LIMIT ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![limit as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, kind, payload, queued_at) = row.map_err(|e| e.to_string())?;
+        let node_id = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+        let op = if kind == "delete" {
+            let t: TombstoneRef = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+            WireOp::Delete {
+                id: t.id,
+                deleted_at: t.deleted_at,
+            }
+        } else {
+            WireOp::upsert(serde_json::from_str(&payload).map_err(|e| e.to_string())?)
+        };
+        out.push(OutboxRow {
+            node_id,
+            op,
+            queued_at,
+        });
+    }
+    Ok(out)
+}
+
+/// Nodes this device has deleted but not yet pushed, and when.
+///
+/// The outbox IS the desktop client's tombstone record — it keeps no others. A pull runs
+/// BEFORE the push in every cycle, so without this a pulled upsert re-inserts a node the
+/// user just deleted, and it sits there visibly alive until the next cycle brings the
+/// hub's own tombstone back. Reading these as local tombstones lets the ordinary merge
+/// rule decide instead: an incoming edit older than the delete loses, a newer one
+/// legitimately resurrects.
+pub fn pending_deletes(db: &Connection) -> Result<HashMap<Uuid, i64>, String> {
+    let mut stmt = db
+        .prepare("SELECT node_id, payload FROM outbox WHERE op = 'delete'")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    let mut out = HashMap::new();
+    for row in rows {
+        let (id, payload) = row.map_err(|e| e.to_string())?;
+        if let (Ok(id), Ok(t)) = (
+            Uuid::parse_str(&id),
+            serde_json::from_str::<TombstoneRef>(&payload),
+        ) {
+            out.insert(id, t.deleted_at);
+        }
+    }
+    Ok(out)
+}
+
+pub fn outbox_count(db: &Connection) -> i64 {
+    db.query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get(0))
+        .unwrap_or(0)
+}
+
+/// How many DELETES are pending — what the mass-delete confirmation has to state.
+pub fn outbox_delete_count(db: &Connection) -> i64 {
+    db.query_row(
+        "SELECT COUNT(*) FROM outbox WHERE op = 'delete'",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+/// First-configuration seeding: queue EVERY live node in one transaction. Without it
+/// the outbox would only ever carry post-configuration edits, and the hub would start
+/// empty forever while the Mac believed it was syncing (test T16).
+pub fn enqueue_all_live(db: &mut Connection, nodes: &HashMap<Uuid, NodeRec>) -> Result<usize, String> {
+    let queued_at = now_ms();
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    {
+        let mut stmt = tx
+            .prepare_cached(
+                "INSERT INTO outbox (node_id, op, payload, queued_at) VALUES (?1, 'upsert', ?2, ?3)
+                 ON CONFLICT(node_id) DO UPDATE SET
+                   op='upsert', payload=excluded.payload, queued_at=excluded.queued_at",
+            )
+            .map_err(|e| e.to_string())?;
+        for rec in nodes.values() {
+            let payload =
+                serde_json::to_string(&WireNode::from(rec)).map_err(|e| e.to_string())?;
+            stmt.execute(params![rec.id.to_string(), payload, queued_at])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(nodes.len())
 }

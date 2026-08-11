@@ -1663,6 +1663,86 @@ body {
   font-size: 0.85em;
 }
 
+/* ---------- Sync ---------- */
+
+/* A URL and two tokens are far too long to sit beside their label on one line, so these
+   rows stack instead of the panel's usual label-left/control-right split. */
+.settings-row-stack {
+  display: block;
+  padding: 0.23em 0;
+}
+
+.settings-row-stack > span {
+  display: block;
+  margin-bottom: 0.23em;
+}
+
+/* "· set" beside a secret's label: the ONLY thing the panel ever learns about a stored
+   credential. The values themselves never leave the Keychain for the webview. */
+.settings-row-stack em {
+  font-style: normal;
+  color: var(--complete);
+}
+
+.settings-row-stack input[type="text"],
+.settings-row-stack input[type="password"] {
+  appearance: none;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 0.46em;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font-size: 0.92em;
+  font-family: inherit;
+  padding: 0.33em 0.55em;
+}
+
+.settings-row-stack input:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.34);
+}
+
+.sync-state {
+  margin-top: 0.46em;
+  padding: 0.46em 0.62em;
+  border-radius: 0.46em;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-dim);
+  font-size: 0.92em;
+}
+
+.sync-state-error {
+  background: rgba(255, 92, 92, 0.1);
+}
+
+.sync-error {
+  margin-top: 0.23em;
+  color: #ff8f8f;
+}
+
+/* The mass-delete confirmation. Amber rather than red: nothing is wrong — the hub is
+   holding a large deletion until a human says it was meant, and the button is the ONLY
+   thing in either client that ever sets the confirm header. */
+.sync-confirm {
+  margin-top: 0.46em;
+  padding: 0.55em 0.62em;
+  border-radius: 0.46em;
+  background: rgba(255, 186, 74, 0.12);
+  color: var(--text-dim);
+  font-size: 0.92em;
+}
+
+.sync-confirm .mini-btn {
+  margin-top: 0.46em;
+}
+
+/* Shown only for the persistent-failure state (see SyncIndicator) — an icon that appears
+   during every ordinary cycle is an icon nobody reads. */
+.sync-indicator {
+  color: #ff8f8f;
+}
+
 /* ---------- Focus pane ---------- */
 
 /* Drawer: ⌥⇧F slides the strip open/closed by animating the grid track 0fr↔1fr, the

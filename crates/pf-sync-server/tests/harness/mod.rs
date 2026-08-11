@@ -468,7 +468,7 @@ impl Device {
                     Some(n) => Stored::live(n.clone()),
                     None => Stored::Missing,
                 };
-                let m = merge_delete(*deleted_at, &stored);
+                let m = merge_delete(*deleted_at, &stored, Side::Client);
                 if m.write_tombstone.is_some() {
                     // A client keeps no tombstones of its own: the hub holds the
                     // authoritative one, and a local row that is simply absent loses

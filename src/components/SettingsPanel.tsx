@@ -6,6 +6,7 @@ import { OutlineLayout, Theme } from "../lib/layout";
 import { setHideCompleted } from "../state/controller";
 import { mirror } from "../state/mirror";
 import { useSettings } from "../state/settings";
+import { agoLabel, useSync } from "../state/sync";
 import { useWindowState } from "../state/windowState";
 
 function todayStamp(): string {
@@ -14,8 +15,138 @@ function todayStamp(): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-/** Settings — appearance (highlight color, indent guides, background tint) and Data
- * (export/import, Clear Completed, archive). A modal sheet, per window. */
+/** Sync configuration and state.
+ *
+ * The two SECRETS are write-only from here: the backend reports only whether each one is
+ * present in the login Keychain, and an empty field on save means "leave it alone" — so
+ * opening the panel and pressing Save never wipes a working credential.
+ *
+ * The error line is deliberately verbose. Everything this feature can do wrong looks
+ * identical from the outline ("my iPad doesn't have it"), so the one place that knows the
+ * difference between a wrong token, a sleeping office and a paused mass delete has to
+ * say which. */
+function SyncSection() {
+  const { status, config, save, syncNow, confirmMassDelete } = useSync();
+  const [url, setUrl] = useState<string | null>(null);
+  const [clientId, setClientId] = useState<string | null>(null);
+  const [bearer, setBearer] = useState("");
+  const [secret, setSecret] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  if (!config) return <div className="settings-footnote">Loading…</div>;
+
+  // The inputs are uncontrolled until first touched, so a status event arriving
+  // mid-typing cannot yank the field out from under the cursor.
+  const urlValue = url ?? config.url;
+  const idValue = clientId ?? config.accessClientId;
+
+  const commit = async (enabled: boolean) => {
+    await save({
+      url: urlValue,
+      accessClientId: idValue,
+      bearer,
+      accessClientSecret: secret,
+      enabled,
+    });
+    setBearer("");
+    setSecret("");
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  return (
+    <>
+      <label className="settings-row">
+        <span>Sync with the hub</span>
+        <input
+          type="checkbox"
+          checked={config.enabled}
+          onChange={(e) => void commit(e.target.checked)}
+        />
+      </label>
+      <label className="settings-row settings-row-stack">
+        <span>Server URL</span>
+        <input
+          type="text"
+          placeholder="https://pf-sync.example.com"
+          value={urlValue}
+          onChange={(e) => setUrl(e.target.value)}
+        />
+      </label>
+      <label className="settings-row settings-row-stack">
+        <span>Access client ID</span>
+        <input
+          type="text"
+          placeholder="leave empty for a local server"
+          value={idValue}
+          onChange={(e) => setClientId(e.target.value)}
+        />
+      </label>
+      <label className="settings-row settings-row-stack">
+        <span>Bearer token {config.hasBearer && <em>· set</em>}</span>
+        <input
+          type="password"
+          placeholder={config.hasBearer ? "unchanged" : "required"}
+          value={bearer}
+          onChange={(e) => setBearer(e.target.value)}
+        />
+      </label>
+      <label className="settings-row settings-row-stack">
+        <span>Access client secret {config.hasAccessSecret && <em>· set</em>}</span>
+        <input
+          type="password"
+          placeholder={config.hasAccessSecret ? "unchanged" : "leave empty for a local server"}
+          value={secret}
+          onChange={(e) => setSecret(e.target.value)}
+        />
+      </label>
+      <div className="settings-actions">
+        <button className="mini-btn" onClick={() => void commit(config.enabled)}>
+          {saved ? "Saved" : "Save Sync Settings"}
+        </button>
+        <button className="mini-btn" disabled={!config.enabled} onClick={syncNow}>
+          Sync Now
+        </button>
+      </div>
+
+      <div className={`sync-state${status.error ? " sync-state-error" : ""}`}>
+        {!config.enabled ? (
+          "Sync is off. This Mac keeps working exactly as before."
+        ) : (
+          <>
+            <div>
+              {status.syncing
+                ? "Syncing…"
+                : `Last synced ${agoLabel(status.lastSyncedAt)}`}
+              {status.pending > 0 && ` · ${status.pending} waiting to send`}
+            </div>
+            {status.error && <div className="sync-error">{status.error}</div>}
+          </>
+        )}
+      </div>
+
+      {status.blockedDeletes != null && status.blockedDeletes > 0 && (
+        <div className="sync-confirm">
+          <div>
+            {status.blockedDeletes} deletion
+            {status.blockedDeletes === 1 ? "" : "s"} are waiting. The server holds back an
+            unusually large delete until you say so, in case another device is about to
+            lose work it still wants.
+          </div>
+          <button className="mini-btn" onClick={confirmMassDelete}>
+            Send the deletions
+          </button>
+        </div>
+      )}
+      <div className="settings-footnote">
+        this device: {config.deviceId.slice(0, 8)}
+      </div>
+    </>
+  );
+}
+
+/** Settings — appearance (highlight color, indent guides, background tint), Data
+ * (export/import, Clear Completed, archive) and Sync. A modal sheet, per window. */
 export function SettingsPanel() {
   const s = useSettings();
   const [notice, setNotice] = useState<string | null>(null);
@@ -25,7 +156,10 @@ export function SettingsPanel() {
   const ss = Math.min(Math.max(OutlineLayout.scale(fontSize), 0.9), 2.2);
 
   useEffect(() => {
-    if (s.settingsOpen) void s.loadBackend();
+    if (s.settingsOpen) {
+      void s.loadBackend();
+      void useSync.getState().loadConfig();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s.settingsOpen]);
 
@@ -173,6 +307,9 @@ export function SettingsPanel() {
             Reveal Archive in Finder
           </button>
         </div>
+        <div className="settings-section">Sync</div>
+        <SyncSection />
+
         {notice && <div className="settings-notice">{notice}</div>}
         <div className="settings-footnote">
           {mirror.nodeCount()} nodes in the outline

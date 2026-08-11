@@ -304,14 +304,20 @@ pub struct DeleteMerge {
 
 /// Merge an incoming delete against stored state.
 ///
-/// Strict `>` on both sides, deliberately NOT the tie policy: the oplog only ever
-/// carries deletes the hub ALREADY applied, so a pulled delete whose instant exactly
-/// equals a client's clock is unreachable — the client's copy is by definition the one
-/// the hub deleted.
-pub fn merge_delete(deleted_at: i64, stored: &Stored) -> DeleteMerge {
+/// The SAME tie policy as the upsert merge, and for a reason worth stating: it is
+/// tempting to think a client can use strict `>` here because the oplog only carries
+/// deletes the hub already applied, so a pulled delete whose instant exactly equals a
+/// client's clock should be unreachable. That is false for CASCADE tombstones. The hub
+/// mints those itself, stamping every live descendant with the PARENT's `deletedAt` —
+/// clocks it never compared against those children at all. A child edited at exactly
+/// that millisecond would then be dead on the hub and alive on every device, with
+/// nothing in the protocol able to correct it: the tombstone's instant never moves and
+/// neither does the child's clock. (Found by the end-to-end test, which runs fast enough
+/// to hit the same millisecond routinely.)
+pub fn merge_delete(deleted_at: i64, stored: &Stored, side: Side) -> DeleteMerge {
     match stored {
         Stored::Live(s) => {
-            if deleted_at > s.newest_clock() {
+            if side.beats(deleted_at, s.newest_clock()) {
                 DeleteMerge {
                     outcome: Outcome::Applied,
                     reason: None,
@@ -546,7 +552,7 @@ mod tests {
     #[test]
     fn delete_loses_to_a_newer_edit() {
         let live = node(Uuid::new_v4(), "edited after the delete", 500, 100);
-        let r = merge_delete(300, &Stored::live(live.clone()));
+        let r = merge_delete(300, &Stored::live(live.clone()), Side::Hub);
         assert_eq!(r.outcome, Outcome::Rejected);
         assert_eq!(r.reason, Some(Reason::Stale));
         assert_eq!(r.write_tombstone, None);
@@ -555,7 +561,7 @@ mod tests {
             _ => panic!(),
         }
 
-        let r2 = merge_delete(600, &Stored::live(live));
+        let r2 = merge_delete(600, &Stored::live(live), Side::Hub);
         assert_eq!(r2.outcome, Outcome::Applied);
         assert_eq!(r2.write_tombstone, Some(600));
         assert!(r2.cascade);
@@ -563,13 +569,29 @@ mod tests {
 
     #[test]
     fn delete_is_idempotent_and_may_precede_its_node() {
-        let dead = merge_delete(500, &Stored::Tombstone { deleted_at: 400 });
+        let dead = merge_delete(500, &Stored::Tombstone { deleted_at: 400 }, Side::Hub);
         assert_eq!(dead.outcome, Outcome::Applied);
         assert_eq!(dead.write_tombstone, None, "a retry must not move the clock");
 
-        let early = merge_delete(500, &Stored::Missing);
+        let early = merge_delete(500, &Stored::Missing, Side::Hub);
         assert_eq!(early.write_tombstone, Some(500));
         assert!(!early.cascade);
+    }
+
+    /// The hole the end-to-end test found: a hub cascade stamps a child with its
+    /// PARENT's deletedAt, so an exact tie against that child's own clock is reachable —
+    /// and on a client it must resolve the hub's way, or the node is dead there and alive
+    /// here forever.
+    #[test]
+    fn a_delete_that_ties_loses_on_the_hub_and_wins_on_a_client() {
+        let live = node(Uuid::new_v4(), "edited in the same millisecond", 3_000, 1_000);
+        let hub = merge_delete(3_000, &Stored::live(live.clone()), Side::Hub);
+        assert_eq!(hub.outcome, Outcome::Rejected);
+        assert_eq!(hub.write_tombstone, None);
+
+        let client = merge_delete(3_000, &Stored::live(live), Side::Client);
+        assert_eq!(client.outcome, Outcome::Applied);
+        assert_eq!(client.write_tombstone, Some(3_000));
     }
 
     #[test]

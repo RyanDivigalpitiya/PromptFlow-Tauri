@@ -200,7 +200,7 @@ pub fn run_merge_case(case: &MergeCase) -> FixtureExpected {
             }
         }
         FixtureIncoming::Delete { deleted_at, .. } => {
-            let r = crate::merge::merge_delete(*deleted_at, &stored);
+            let r = crate::merge::merge_delete(*deleted_at, &stored, case.side.into());
             FixtureExpected {
                 outcome: r.outcome,
                 reason: r.reason,

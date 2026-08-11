@@ -3,6 +3,7 @@ import { OutlineLayout } from "../lib/layout";
 import { setHideCompleted } from "../state/controller";
 import { mirror, nodeVersion, subscribeNode } from "../state/mirror";
 import { useSettings } from "../state/settings";
+import { useSync } from "../state/sync";
 import { useWindowState } from "../state/windowState";
 
 /** Toolbar icons ride ⌘+/⌘− but CAPPED so the buttons never outgrow the fixed
@@ -17,6 +18,41 @@ function DrillTitle({ id }: { id: string }) {
   useSyncExternalStore(subscribe, () => nodeVersion(id));
   const rec = mirror.get(id);
   return <span className="topbar-title">{rec?.text || "Untitled"}</span>;
+}
+
+/** A cloud with a slash, shown ONLY while sync has failed repeatedly or is holding back
+ * a large delete.
+ *
+ * Deliberately absent the rest of the time — including during an ordinary cycle. A
+ * spinner that blinks on every keystroke's debounce would train the eye to ignore this
+ * corner, which is exactly the wrong reflex for the one state that matters: the outline
+ * silently no longer reaching the other device. A single failure is a dropped request on
+ * a train; two in a row is a problem worth a glance. */
+function SyncIndicator({ scale }: { scale: number }) {
+  const status = useSync((s) => s.status);
+  const blocked = (status.blockedDeletes ?? 0) > 0;
+  if (!status.configured || (status.failures < 2 && !blocked)) return null;
+  return (
+    <button
+      className="bar-btn sync-indicator"
+      onClick={() => useSettings.getState().openSettings(true)}
+      title={status.error ?? "Sync needs attention"}
+      aria-label="Sync needs attention"
+    >
+      <svg
+        width={14 * scale}
+        height={14 * scale}
+        viewBox="0 0 14 14"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+      >
+        <path d="M4 10.4 A2.4 2.4 0 0 1 4.2 5.7 A3.1 3.1 0 0 1 10.1 5.2 A2.6 2.6 0 0 1 10.2 10.4 Z" />
+        <line x1="2.4" y1="12.2" x2="11.6" y2="2.4" strokeWidth="1.3" />
+      </svg>
+    </button>
+  );
 }
 
 /** The window chrome strip: nav back/forward/home, the drill title, hide-completed.
@@ -163,6 +199,7 @@ export function TopBar() {
             )}
           </svg>
         </button>
+        <SyncIndicator scale={ts} />
         <button
           className="bar-btn"
           onClick={() => useSettings.getState().openSettings(true)}

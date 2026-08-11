@@ -14,6 +14,11 @@ fn emit_delta(app: &AppHandle, mut delta: Delta, origin: &str) {
     }
     delta.origin = origin.to_string();
     let _ = app.emit("store://delta", &delta);
+    // Every LOCAL mutation nudges the sync loop, which debounces 2 s so a typing burst
+    // is one push. A remote apply emits its own delta with origin "sync" and never
+    // reaches here — nudging on that would be the shape of a sync loop even though its
+    // outbox is empty by construction.
+    crate::sync::nudge(crate::sync::Nudge::Commit);
 }
 
 fn run_mutation(
@@ -501,6 +506,91 @@ pub fn archive_dir_path(paths: State<AppPaths>) -> Result<String, String> {
     let dir = crate::archive::archive_dir(&paths.0);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.to_string_lossy().into_owned())
+}
+
+// MARK: Sync configuration
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncConfigOut {
+    pub url: String,
+    pub access_client_id: String,
+    pub enabled: bool,
+    /// Whether each secret is PRESENT in the login Keychain. The values themselves never
+    /// cross into the webview: a renderer process has no business holding them, and the
+    /// panel only needs to know whether to show "set" or "not set".
+    pub has_bearer: bool,
+    pub has_access_secret: bool,
+    pub device_id: String,
+}
+
+#[tauri::command]
+pub fn sync_get_config(state: State<StoreState>) -> Result<SyncConfigOut, String> {
+    let mut store = state.lock().unwrap();
+    let device_id = store.device_id()?;
+    Ok(SyncConfigOut {
+        url: store.get_setting(crate::sync::URL_KEY).unwrap_or_default(),
+        access_client_id: store
+            .get_setting(crate::sync::CLIENT_ID_KEY)
+            .unwrap_or_default(),
+        enabled: store.sync_enabled(),
+        has_bearer: crate::sync::keychain::read(crate::sync::keychain::BEARER).is_some(),
+        has_access_secret: crate::sync::keychain::read(crate::sync::keychain::ACCESS_SECRET)
+            .is_some(),
+        device_id,
+    })
+}
+
+/// Save the configuration. Secrets go to the login Keychain; an EMPTY secret means
+/// "leave what is already there alone", so the panel can show a blank field without
+/// wiping a working credential every time it is saved.
+#[tauri::command]
+pub fn sync_set_config(
+    app: AppHandle,
+    state: State<StoreState>,
+    url: String,
+    access_client_id: String,
+    bearer: Option<String>,
+    access_client_secret: Option<String>,
+    enabled: bool,
+) -> Result<(), String> {
+    {
+        let mut store = state.lock().unwrap();
+        store.set_setting(crate::sync::URL_KEY, url.trim())?;
+        store.set_setting(crate::sync::CLIENT_ID_KEY, access_client_id.trim())?;
+        if let Some(b) = bearer.filter(|b| !b.is_empty()) {
+            crate::sync::keychain::write(crate::sync::keychain::BEARER, b.trim())?;
+        }
+        if let Some(s) = access_client_secret.filter(|s| !s.is_empty()) {
+            crate::sync::keychain::write(crate::sync::keychain::ACCESS_SECRET, s.trim())?;
+        }
+        store.set_sync_enabled(enabled)?;
+    }
+    // Seeding runs OUTSIDE the lock above (it takes its own) and before the first cycle,
+    // so a store that predates sync hands its whole outline to the hub.
+    crate::sync::first_configuration(&app);
+    crate::sync::nudge(crate::sync::Nudge::Now);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn sync_status(state: State<StoreState>) -> Result<crate::sync::SyncStatus, String> {
+    let store = state.lock().unwrap();
+    let mut s = crate::sync::status();
+    s.pending = store.outbox_count();
+    Ok(s)
+}
+
+#[tauri::command]
+pub fn sync_now() {
+    crate::sync::nudge(crate::sync::Nudge::Now);
+}
+
+/// The confirm-once affordance for the hub's mass-delete tripwire. Only ever reached
+/// from an explicit button; the client never sets that header on its own.
+#[tauri::command]
+pub fn sync_confirm_mass_delete() {
+    crate::sync::nudge(crate::sync::Nudge::ConfirmMassDelete);
 }
 
 #[tauri::command]

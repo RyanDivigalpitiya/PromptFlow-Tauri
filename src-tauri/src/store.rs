@@ -201,6 +201,10 @@ pub struct Store {
     redo_stack: Vec<UndoEntry>,
     tx: Option<TxData>,
     db: Connection,
+    /// Whether every commit also queues its changes for the hub. Read from the
+    /// `settings` table at open and updated when the user configures sync — one flag so
+    /// no mutation has to know sync exists.
+    sync_enabled: bool,
 }
 
 impl Store {
@@ -215,8 +219,10 @@ impl Store {
             redo_stack: Vec::new(),
             tx: None,
             db,
+            sync_enabled: false,
         };
         store.rebuild_index();
+        store.sync_enabled = store.get_setting(crate::sync::ENABLED_KEY).as_deref() == Some("1");
         Ok(store)
     }
 
@@ -407,8 +413,13 @@ impl Store {
         // applied to `nodes`, but on error we bump no `rev` and emit no delta — so a
         // store that kept the change would diverge from every window permanently, with
         // nothing to tell them about it. Roll back to the before-images instead.
-        if let Err(e) = persist::apply(&mut self.db, changes.iter().map(|c| (c.id, c.after.as_ref())))
-        {
+        if let Err(e) = persist::apply_plan(
+            &mut self.db,
+            persist::ApplyPlan::local(
+                changes.iter().map(|c| (c.id, c.after.as_ref())).collect(),
+                self.sync_enabled,
+            ),
+        ) {
             let mut discard = Vec::new();
             for ch in &changes {
                 self.apply_image(ch.id, ch.before.clone(), &mut discard);
@@ -479,8 +490,13 @@ impl Store {
         // it was. Mutating first would strand the popped entry (never pushed to redo)
         // AND move the tree without bumping `rev` or emitting a delta — a silent,
         // permanent divergence between the store and every window.
-        if let Err(e) = persist::apply(&mut self.db, images.iter().map(|(id, r)| (*id, r.as_ref())))
-        {
+        if let Err(e) = persist::apply_plan(
+            &mut self.db,
+            persist::ApplyPlan::local(
+                images.iter().map(|(id, r)| (*id, r.as_ref())).collect(),
+                self.sync_enabled,
+            ),
+        ) {
             self.undo_stack.push(entry); // nothing happened — put the step back
             return Err(e);
         }
@@ -505,8 +521,13 @@ impl Store {
         };
         let images = restamped(entry.changes.iter().map(|c| (c.id, c.after.clone())));
         // Persist before mutating — see the note in `undo`.
-        if let Err(e) = persist::apply(&mut self.db, images.iter().map(|(id, r)| (*id, r.as_ref())))
-        {
+        if let Err(e) = persist::apply_plan(
+            &mut self.db,
+            persist::ApplyPlan::local(
+                images.iter().map(|(id, r)| (*id, r.as_ref())).collect(),
+                self.sync_enabled,
+            ),
+        ) {
             self.redo_stack.push(entry); // nothing happened — put the step back
             return Err(e);
         }
@@ -1636,6 +1657,203 @@ impl Store {
         Ok(delta)
     }
 
+    // MARK: Sync (see `sync.rs` for the loop that drives all of this)
+
+    pub fn sync_enabled(&self) -> bool {
+        self.sync_enabled
+    }
+
+    /// Turn queueing on or off. Turning it ON for the first time also SEEDS the outbox
+    /// with every live node — see `sync::first_configuration`.
+    pub fn set_sync_enabled(&mut self, on: bool) -> Result<(), String> {
+        self.sync_enabled = on;
+        self.set_setting(crate::sync::ENABLED_KEY, if on { "1" } else { "0" })
+    }
+
+    /// This store's device id, minted once and never regenerated. Echo exclusion on the
+    /// hub is keyed on it: a device that re-minted its id on every launch would pull
+    /// back every op it had just pushed.
+    pub fn device_id(&mut self) -> Result<String, String> {
+        if let Some(id) = self.get_setting(crate::sync::DEVICE_KEY) {
+            if !id.is_empty() {
+                return Ok(id);
+            }
+        }
+        let id = Uuid::new_v4().to_string();
+        self.set_setting(crate::sync::DEVICE_KEY, &id)?;
+        Ok(id)
+    }
+
+    /// `None` = never synced. The distinction matters: it is what tells a first
+    /// configuration (seed the outbox from the whole store) from an ordinary one.
+    pub fn sync_cursor(&self) -> Option<i64> {
+        self.get_setting(crate::sync::CURSOR_KEY)
+            .and_then(|v| v.parse().ok())
+    }
+
+    /// Queue every live node. One transaction; not undoable and not a delta — nothing
+    /// about the outline changes, only what the hub is owed.
+    pub fn enqueue_all_live(&mut self) -> Result<usize, String> {
+        let nodes = std::mem::take(&mut self.nodes);
+        let out = persist::enqueue_all_live(&mut self.db, &nodes);
+        self.nodes = nodes;
+        out
+    }
+
+    pub fn outbox_batch(&self, limit: usize) -> Result<Vec<persist::OutboxRow>, String> {
+        persist::outbox_batch(&self.db, limit)
+    }
+
+    pub fn outbox_count(&self) -> i64 {
+        persist::outbox_count(&self.db)
+    }
+
+    pub fn outbox_delete_count(&self) -> i64 {
+        persist::outbox_delete_count(&self.db)
+    }
+
+    /// Merge ops that came from the hub — a pull's `ops`, or a push response's
+    /// `current` repairs, which take exactly the same path.
+    ///
+    /// Three things make this different from every other mutation here:
+    ///
+    /// 1. It NEVER pushes an undo entry. A remote change is not something the user did,
+    ///    and ⌘Z must not walk backwards through another device's edits.
+    /// 2. It DROPS local undo and redo entries touching any node it changed. Entries are
+    ///    whole node IMAGES, so undoing across a remote change would revert fields the
+    ///    local edit never touched — and then propagate the reversion as a fresh edit.
+    /// 3. It never queues anything: echoing the hub's own ops back to it is the
+    ///    definition of a sync loop.
+    ///
+    /// The cursor and the outbox clears ride the SAME SQLite transaction as the node
+    /// writes. A crash between applying ops and advancing the cursor replays them, which
+    /// merges idempotently; a crash the other way round would skip them forever.
+    pub fn apply_remote(
+        &mut self,
+        ops: &[promptflow_core::wire::WireOp],
+        cursor: Option<i64>,
+        clear_outbox: &[(Uuid, i64)],
+    ) -> Result<Delta, String> {
+        use promptflow_core::merge::{merge_delete, merge_upsert, Side, Stored};
+        use promptflow_core::wire::{apply_wire_to_rec, WireNode, WireOp};
+
+        // A cycle PULLS before it pushes, so the hub still believes anything we deleted
+        // a moment ago is alive and will send it right back. The outbox is this client's
+        // only tombstone record; read as such, the ordinary merge rule handles it —
+        // an incoming edit older than our delete loses, a newer one resurrects, and a
+        // just-deleted subtree does not flicker back into the outline for a poll cycle.
+        let pending_deletes = persist::pending_deletes(&self.db)?;
+
+        let mut order: Vec<Uuid> = Vec::new();
+        let mut before: HashMap<Uuid, Option<NodeRec>> = HashMap::new();
+        let touch = |id: Uuid,
+                         nodes: &HashMap<Uuid, NodeRec>,
+                         order: &mut Vec<Uuid>,
+                         before: &mut HashMap<Uuid, Option<NodeRec>>| {
+            if !before.contains_key(&id) {
+                order.push(id);
+                before.insert(id, nodes.get(&id).cloned());
+            }
+        };
+
+        for op in ops {
+            let id = op.node_id();
+            match op {
+                WireOp::Upsert { node } => {
+                    // The merge borrows the tree immutably and returns owned values, so
+                    // the borrow is over before anything is written — which is also what
+                    // lets a repair inside this batch see the one before it.
+                    let decision = {
+                        let stored = local_state(&self.nodes, &pending_deletes, id);
+                        let tree = StoreTree {
+                            nodes: &self.nodes,
+                            pending_deletes: &pending_deletes,
+                        };
+                        merge_upsert(node, &stored, &tree, Side::Client)
+                    };
+                    if let Some(w) = decision.write {
+                        touch(id, &self.nodes, &mut order, &mut before);
+                        let rec = apply_wire_to_rec(&w, self.nodes.get(&id));
+                        self.put(rec);
+                    }
+                }
+                WireOp::Delete { deleted_at, .. } => {
+                    let decision = {
+                        let stored = local_state(&self.nodes, &pending_deletes, id);
+                        merge_delete(*deleted_at, &stored, Side::Client)
+                    };
+                    // A client keeps no tombstones of its own: the hub holds the
+                    // authoritative one, and it cascades explicitly, so "gone from the
+                    // map" is the whole of a local delete.
+                    if decision.write_tombstone.is_some() && self.nodes.contains_key(&id) {
+                        touch(id, &self.nodes, &mut order, &mut before);
+                        self.drop_node(id);
+                    }
+                }
+            }
+        }
+
+        let mut changes: Vec<Change> = Vec::new();
+        for id in order {
+            let b = before.get(&id).cloned().flatten();
+            let a = self.nodes.get(&id).cloned();
+            if b != a {
+                changes.push(Change {
+                    id,
+                    before: b,
+                    after: a,
+                });
+            }
+        }
+
+        let plan = persist::ApplyPlan {
+            changes: changes.iter().map(|c| (c.id, c.after.as_ref())).collect(),
+            enqueue: false,
+            settings: cursor
+                .map(|c| (crate::sync::CURSOR_KEY.to_string(), c.to_string()))
+                .into_iter()
+                .collect(),
+            clear_outbox: clear_outbox.to_vec(),
+        };
+        if let Err(e) = persist::apply_plan(&mut self.db, plan) {
+            // Same discipline as `commit`: a failed write must leave NO trace in memory,
+            // because nothing would ever tell the windows about it.
+            let mut discard = Vec::new();
+            for ch in &changes {
+                self.apply_image(ch.id, ch.before.clone(), &mut discard);
+            }
+            return Err(e);
+        }
+
+        if !changes.is_empty() {
+            let touched: HashSet<Uuid> = changes.iter().map(|c| c.id).collect();
+            self.drop_history_touching(&touched);
+            self.rev += 1;
+        }
+        Ok(Delta {
+            rev: self.rev,
+            origin: "sync".into(),
+            ops: changes
+                .into_iter()
+                .map(|c| match c.after {
+                    Some(node) => DeltaOp::Upsert { node },
+                    None => DeltaOp::Delete { id: c.id },
+                })
+                .collect(),
+            can_undo: !self.undo_stack.is_empty(),
+            can_redo: !self.redo_stack.is_empty(),
+        })
+    }
+
+    /// Forget every undo/redo step that touches one of these nodes. An entry is a set of
+    /// whole node images, so a step that mentions a remotely-changed node can no longer
+    /// be applied honestly — it would restore fields the remote edit owns.
+    fn drop_history_touching(&mut self, ids: &HashSet<Uuid>) {
+        let keeps = |e: &UndoEntry| !e.changes.iter().any(|c| ids.contains(&c.id));
+        self.undo_stack.retain(keeps);
+        self.redo_stack.retain(keeps);
+    }
+
     // MARK: App settings (device-local key/value, e.g. the auto-archive toggle)
 
     pub fn get_setting(&self, key: &str) -> Option<String> {
@@ -1668,6 +1886,57 @@ impl Store {
     }
 }
 
+/// What this device currently holds for a node, as the shared merge sees it.
+///
+/// A desktop client keeps no tombstone TABLE — the hub holds the authoritative ones and
+/// cascades them explicitly — but a delete still sitting in the outbox is exactly a
+/// tombstone this device has not told anyone about yet, and it has to be weighed as one
+/// or the pull that precedes every push undoes it.
+fn local_state(
+    nodes: &HashMap<Uuid, NodeRec>,
+    pending_deletes: &HashMap<Uuid, i64>,
+    id: Uuid,
+) -> promptflow_core::merge::Stored {
+    use promptflow_core::merge::Stored;
+    use promptflow_core::wire::WireNode;
+    match nodes.get(&id) {
+        Some(rec) => Stored::live(WireNode::from(rec)),
+        None => match pending_deletes.get(&id) {
+            Some(at) => Stored::Tombstone { deleted_at: *at },
+            None => Stored::Missing,
+        },
+    }
+}
+
+/// The tree, as the shared merge sees it: a node whose parent is gone — or on its way to
+/// being gone — is repaired to the root exactly as it would be on the hub.
+struct StoreTree<'a> {
+    nodes: &'a HashMap<Uuid, NodeRec>,
+    pending_deletes: &'a HashMap<Uuid, i64>,
+}
+
+impl promptflow_core::merge::TreeLookup for StoreTree<'_> {
+    fn state(&self, id: Uuid) -> promptflow_core::merge::NodeState {
+        use promptflow_core::merge::NodeState;
+        match self.nodes.get(&id) {
+            Some(n) => NodeState::Live { parent: n.parent },
+            // A parent whose delete is queued is dead as far as this device is
+            // concerned, so an incoming child lands at the root rather than under a
+            // node that is about to stop existing everywhere.
+            None if self.pending_deletes.contains_key(&id) => NodeState::Deleted,
+            None => NodeState::Missing,
+        }
+    }
+
+    fn max_root_position(&self) -> Option<i64> {
+        self.nodes
+            .values()
+            .filter(|n| n.parent.is_none())
+            .map(|n| n.position)
+            .max()
+    }
+}
+
 #[cfg(test)]
 impl Store {
     pub fn open_in_memory_for_tests() -> Store {
@@ -1679,6 +1948,7 @@ impl Store {
             redo_stack: Vec::new(),
             tx: None,
             db: persist::open_in_memory().unwrap(),
+            sync_enabled: false,
         }
     }
 }
@@ -2472,6 +2742,235 @@ mod tests {
         .unwrap();
         let loaded = persist::load_all(&db).unwrap();
         assert_eq!(loaded[&Uuid::nil()].structure_updated_at, 7777);
+    }
+
+    // MARK: Sync client (the outbox, and the remote-apply path)
+    //
+    // The wire-level scenarios live in the server crate's matrix; these pin the parts
+    // that only exist on THIS side — that a local edit queues and a remote one does not,
+    // and that a remote apply cannot corrupt the undo stack.
+
+    use promptflow_core::wire::{WireNode, WireOp};
+
+    fn sync_store() -> Store {
+        let mut s = mem_store();
+        s.set_sync_enabled(true).unwrap();
+        s
+    }
+
+    fn queued(s: &Store) -> Vec<(Uuid, bool)> {
+        s.outbox_batch(100)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.node_id, r.op.is_delete()))
+            .collect()
+    }
+
+    #[test]
+    fn local_mutations_queue_and_coalesce_per_node() {
+        let mut s = sync_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        // A typing burst is many commits but ONE queued row — the outbox holds images,
+        // not a change log.
+        s.set_text(a, "h".into(), None, None, None).unwrap();
+        s.set_text(a, "he".into(), None, None, None).unwrap();
+        s.set_text(a, "hello".into(), None, None, None).unwrap();
+        assert_eq!(queued(&s), vec![(a, false)]);
+        match &s.outbox_batch(10).unwrap()[0].op {
+            WireOp::Upsert { node } => assert_eq!(node.text, "hello", "the LATEST image wins"),
+            _ => panic!("expected an upsert"),
+        }
+
+        // A delete replaces the queued upsert.
+        s.delete(a).unwrap();
+        assert_eq!(queued(&s), vec![(a, true)]);
+
+        // ...and undoing the delete replaces the queued delete right back, because the
+        // node is alive again.
+        s.undo().unwrap();
+        assert_eq!(queued(&s), vec![(a, false)]);
+    }
+
+    #[test]
+    fn nothing_queues_while_sync_is_off() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        s.set_text(a.new_node.unwrap(), "typed".into(), None, None, None)
+            .unwrap();
+        assert!(queued(&s).is_empty());
+    }
+
+    /// T16's local half: the outbox only ever collects post-configuration edits, so a
+    /// store that predates sync must be swept into it explicitly or the hub starts empty
+    /// forever while the Mac reports a healthy sync.
+    #[test]
+    fn first_configuration_queues_the_whole_existing_store() {
+        let mut s = mem_store(); // sync OFF: these are pre-configuration edits
+        for _ in 0..7 {
+            s.append_root(NodeKind::BulletPoint).unwrap();
+        }
+        assert!(queued(&s).is_empty());
+        assert_eq!(s.sync_cursor(), None, "never synced");
+
+        s.set_sync_enabled(true).unwrap();
+        assert_eq!(s.enqueue_all_live().unwrap(), 7);
+        assert_eq!(queued(&s).len(), 7);
+        assert!(queued(&s).iter().all(|(_, is_delete)| !is_delete));
+    }
+
+    #[test]
+    fn a_device_id_is_minted_once_and_never_again() {
+        let mut s = mem_store();
+        let first = s.device_id().unwrap();
+        assert_eq!(s.device_id().unwrap(), first, "re-minting breaks echo exclusion");
+        assert!(Uuid::parse_str(&first).is_ok());
+    }
+
+    #[test]
+    fn apply_remote_merges_without_queueing_or_undo() {
+        let mut s = sync_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        s.set_text(a, "local".into(), None, None, None).unwrap();
+        // Clear what the local edits queued, so what follows is unambiguous.
+        let pending: Vec<(Uuid, i64)> = s
+            .outbox_batch(100)
+            .unwrap()
+            .iter()
+            .map(|r| (r.node_id, r.queued_at))
+            .collect();
+        s.apply_remote(&[], None, &pending).unwrap();
+        assert!(queued(&s).is_empty());
+
+        let undo_depth = s.undo_stack.len();
+        let mut incoming = WireNode::from(s.get(a).unwrap());
+        incoming.text = "from another device".into();
+        incoming.updated_at = now_ms() + 10_000;
+
+        let delta = s.apply_remote(&[WireOp::upsert(incoming)], Some(42), &[]).unwrap();
+        assert_eq!(s.get(a).unwrap().text, "from another device");
+        assert_eq!(delta.origin, "sync");
+        assert_eq!(delta.ops.len(), 1);
+        assert!(
+            queued(&s).is_empty(),
+            "echoing the hub's own op back to it is the definition of a sync loop"
+        );
+        assert!(
+            s.undo_stack.len() < undo_depth || undo_depth == 0,
+            "a remote change must not become an undo step, and must drop the ones it invalidates"
+        );
+        assert_eq!(s.sync_cursor(), Some(42), "the cursor moves with the apply");
+    }
+
+    /// The undo stack holds whole node IMAGES, so a step that mentions a remotely-changed
+    /// node can no longer be applied honestly: ⌘Z would restore fields the remote edit
+    /// owns and then propagate the reversion as a fresh local edit.
+    #[test]
+    fn a_remote_change_drops_only_the_history_that_touches_it() {
+        let mut s = sync_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, b) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let b = b.new_node.unwrap();
+        s.set_text(a, "a text".into(), None, None, None).unwrap();
+        s.set_kind(b, NodeKind::Checkbox).unwrap();
+        let before = s.undo_stack.len();
+
+        let mut incoming = WireNode::from(s.get(b).unwrap());
+        incoming.is_highlighted = true;
+        incoming.structure_updated_at = now_ms() + 10_000;
+        s.apply_remote(&[WireOp::upsert(incoming)], None, &[]).unwrap();
+
+        assert!(s.undo_stack.len() < before, "b's steps are gone");
+        assert!(
+            s.undo_stack.iter().any(|e| e.changes.iter().any(|c| c.id == a)),
+            "a's history is untouched — the remote change never mentioned it"
+        );
+        // And the surviving step still works.
+        s.undo().unwrap();
+        assert_eq!(s.get(a).unwrap().text, "");
+        assert!(s.get(b).unwrap().is_highlighted, "the remote change stands");
+    }
+
+    /// A remote delete of a node this device edited more recently must LOSE — the same
+    /// rule the hub applies, from the same code.
+    #[test]
+    fn a_remote_delete_loses_to_a_newer_local_edit() {
+        let mut s = sync_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        s.set_text(a, "still being worked on".into(), None, None, None)
+            .unwrap();
+        let clock = s.get(a).unwrap().updated_at;
+
+        s.apply_remote(
+            &[WireOp::Delete {
+                id: a,
+                deleted_at: clock - 1_000,
+            }],
+            None,
+            &[],
+        )
+        .unwrap();
+        assert!(s.get(a).is_some(), "an older delete cannot take a newer edit");
+
+        s.apply_remote(
+            &[WireOp::Delete {
+                id: a,
+                deleted_at: clock + 1_000,
+            }],
+            None,
+            &[],
+        )
+        .unwrap();
+        assert!(s.get(a).is_none());
+    }
+
+    /// An incoming node whose parent this device has never seen lands at the root rather
+    /// than becoming invisible — the same deterministic repair the hub performs.
+    #[test]
+    fn a_remote_orphan_is_repaired_to_the_root() {
+        let mut s = sync_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        let mut orphan = WireNode::from(s.get(a).unwrap());
+        orphan.id = Uuid::new_v4();
+        orphan.parent = Some(Uuid::new_v4()); // a parent that does not exist here
+        orphan.text = "from a device that knows more than we do".into();
+
+        s.apply_remote(&[WireOp::upsert(orphan.clone())], None, &[]).unwrap();
+        let landed = s.get(orphan.id).expect("the node must exist somewhere");
+        assert_eq!(landed.parent, None);
+        assert_eq!(landed.text, "from a device that knows more than we do");
+    }
+
+    /// The `queued_at` guard: a row the user re-queued while the push was in flight must
+    /// survive the clear, or that edit is lost with nothing to re-derive it.
+    #[test]
+    fn clearing_the_outbox_spares_a_row_requeued_mid_flight() {
+        let mut s = sync_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        s.set_text(a, "sent".into(), None, None, None).unwrap();
+        let snapshot: Vec<(Uuid, i64)> = s
+            .outbox_batch(10)
+            .unwrap()
+            .iter()
+            .map(|r| (r.node_id, r.queued_at))
+            .collect();
+
+        // The user keeps typing while the request is in flight.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        s.set_text(a, "sent, then typed some more".into(), None, None, None)
+            .unwrap();
+
+        s.apply_remote(&[], None, &snapshot).unwrap();
+        assert_eq!(queued(&s).len(), 1, "the newer image is still owed to the hub");
+        match &s.outbox_batch(10).unwrap()[0].op {
+            WireOp::Upsert { node } => assert_eq!(node.text, "sent, then typed some more"),
+            _ => panic!("expected an upsert"),
+        }
     }
 
     #[test]
