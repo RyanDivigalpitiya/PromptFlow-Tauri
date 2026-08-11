@@ -755,6 +755,98 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
 - After UI-affecting changes, verify in the running app (scripts above + screenshots),
   and re-run `npm test` + `cargo test`; both suites are fast.
 
+## Sync (the hub, the wire, and this app's client)
+
+The outline converges across devices through a hub Ryan runs himself — **no CloudKit,
+no iCloud, no LAN discovery**. One URL (`https://pf-sync.ryan-div.com`, a Cloudflare
+Named Tunnel to the office Mac Mini) works identically from the office, from home and
+from cellular, which is precisely why there is no Bonjour, no `.local`, no ATS exception
+and no Local Network permission anywhere in either app. The full design lives in
+`sync-server-plan.md`; what follows is where it landed in the code.
+
+```
+  Mac (this app)                                              iPad (../PromptFlow)
+  outbox table  ──push──┐                            ┌──push── full state + delete journal
+  cursor        ◄─pull──┤   promptflow-sync (hub)    ├──pull──► cursor
+                        └── canonical replica ───────┘
+                            + append-only oplog
+```
+
+- **`crates/promptflow-core`** is the shared crate: `NodeRec`, the `WireNode` wire
+  format, and THE merge. `src-tauri` and the hub both depend on it, so they cannot
+  disagree; the Swift client hand-mirrors it and is pinned to it by the JSON fixtures in
+  `crates/promptflow-core/fixtures/`, which `cargo test` and `PromptFlowTests` BOTH run.
+  A protocol change edits the fixtures first, in one commit with both suites. The root
+  `Cargo.toml` workspace holds core + the hub and **excludes `src-tauri`**, which keeps
+  its own empty `[workspace]` table: the tauri CLI, `build.sh` and `verify.sh` all
+  hardcode `src-tauri/target/...`, and folding it in would move that directory.
+- **TWO merge clocks per node**, and which one a mutation moves IS the protocol.
+  `updated_at` is CONTENT (text, note, the three style-range arrays); `structure_updated_at`
+  is STRUCTURE (parent, position, kind, is_completed, completed_at, is_highlighted);
+  creation stamps both. Use `stamp_content`/`stamp_structure`/`stamp_both` in `store.rs`
+  rather than assigning `now_ms()`, and note that **the gap-exhaustion renumber paths
+  stamp STRUCTURE** — unstamped, a renumbered sibling list loses every merge and the two
+  devices silently disagree about order; stamped as content, a renumber sweeping a list
+  would beat concurrent typing on any row in it (test T7). Getting the class wrong is
+  invisible locally and shows up only as another device losing an edit, so
+  `store.rs`'s stamping tests enumerate every mutation.
+- **Undo/redo restamp both clocks on every restored image.** They restore whole node
+  images verbatim, so without it an undone node arrives carrying PRE-EDIT clocks, loses
+  the next merge, and the undo un-undoes itself (T8) — and an undone DELETE could never
+  out-clock the tombstone that killed it.
+- **Tie policy: the hub is canonical.** Equal clock ⇒ stored wins on the hub, incoming
+  wins on a client. A pusher that loses learns the winner from `results[].current` in the
+  same round trip, so there is no tie-break state to persist anywhere. This applies to
+  DELETES too, which is not obvious: a hub CASCADE tombstone stamps every live descendant
+  with the PARENT's `deletedAt`, clocks it never compared against those children, so an
+  exact tie is reachable and a strict `>` on the client left a node dead on the hub and
+  alive on every device permanently.
+- **The outbox** (`outbox` table, same SQLite file as the nodes) is written INSIDE the
+  same transaction as the change it describes — `persist::ApplyPlan` carries the node
+  writes, the outbox rows, the sync cursor and the outbox clears in one `BEGIN`. Split
+  across two files, a crash between them either loses an edit's sync forever or queues one
+  for a change that never happened. It is coalesced per node (latest image wins; a delete
+  replaces a queued upsert, and an upsert replaces a queued delete, which is what an
+  undone deletion is).
+- **`Store::apply_remote`** is the whole remote side: merges with `Side::Client`, pushes
+  NO undo entry, DROPS local undo/redo steps touching anything it changed (a step is a
+  whole node image, so undoing across a remote change would restore fields that edit owns
+  and then propagate the reversion), and queues nothing. It also reads the outbox's
+  pending deletes as LOCAL TOMBSTONES — every cycle pulls before it pushes, so the hub
+  still believes a just-deleted subtree is alive and sends it straight back; without that
+  the rows reappear in the outline until a later cycle brings the tombstones round.
+- **The loop** (`src-tauri/src/sync.rs`) is a `std::thread` on the auto-archive precedent,
+  debounced 2 s after the last commit and polling 30 s idle. **Its load-bearing rule: no
+  network I/O ever under the store mutex** — that mutex is what every keystroke's
+  `set_text` waits on, so one hung request beneath it would freeze typing in every window
+  for the timeout. Each cycle takes the lock three times and does its HTTP between them.
+  `run_cycle` deliberately takes no `AppHandle`, which is what lets
+  `src-tauri/tests/sync_e2e.rs` drive two real stores against the real `promptflow-sync`
+  binary.
+- **First-configuration seeding** queues every live node, guarded on the CURSOR's absence
+  (not on the outbox being empty): the outbox only ever collects post-configuration edits,
+  so without it the hub starts empty forever while the Mac reports a healthy "last synced".
+  The welcome seed is SKIPPED when sync is configured — an empty store with a hub behind
+  it is a device waiting to be filled, not a first launch.
+- **Secrets never touch the repo or the sqlite file.** The bearer token and the Cloudflare
+  Access client secret live in the login Keychain (`pf-sync-bearer`,
+  `pf-sync-access-client-secret`), read through the `security` CLI — the same items
+  `scripts/sync-status.sh` reads, so there is one home for them on this Mac. The URL and
+  the Access client ID (not secret) live in the `settings` table.
+- **Testing, three layers, deliberately.** `crates/pf-sync-server/tests/scenarios.rs`
+  drives the real router in-process through the T1–T18 matrix with fake devices;
+  `src-tauri/src/store.rs` covers what only exists on this side (outbox coalescing, undo
+  dropping, clock classes); `src-tauri/tests/sync_e2e.rs` is the seam — real stores, real
+  binary, real HTTP. The e2e suite is what found both merge bugs listed above, so treat a
+  new sync behaviour as untested until it has a test THERE.
+- **Deploying the hub**: `scripts/sync-deploy.sh` (`--install` first time, `--status` to
+  look). It builds here and ships the binary because the mini has no rust toolchain, and
+  it scps to a TEMP name then `mv`s — never over the running binary, which on Apple
+  Silicon kills the process on text-page invalidation. `scripts/sync-status.sh` asks
+  through the tunnel, so a green answer proves the whole chain rather than just a live
+  process. **The mini is shared production hardware running SPARC**: nothing in any of
+  this may go near ports 9000–9010, Postgres, or `com.calumix.sparc.*`.
+
 ## Git
 
 Default branch `main`, remote `git@github.com:RyanDivigalpitiya/PromptFlow-Tauri.git`;

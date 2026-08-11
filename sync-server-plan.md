@@ -1,5 +1,7 @@
 # PromptFlow Sync — end-to-end development plan
 
+> **IMPLEMENTATION STATUS, 2026-08-11.** Phases 0–5 are **built and green**. What is left is entirely **[RYAN]**: deploy the hub to the mini, point the Mac at it, and bootstrap the iPad. See §10 at the bottom for the handover checklist and for the six places the implementation deviated from this document (each with its reason).
+
 Handoff document for the implementing agent (Opus 5). Written 2026-08-06 after a full recon of both codebases, an adversarial design review, verification of the Cloudflare/domain/office-network prerequisites, and a three-way review of this document itself (repo-anchor verification, implementer dry-run, critique-register audit — all findings folded in). Decisions in this document are **made** — do not reopen them without flagging to Ryan. Steps tagged **[RYAN]** need the human (browser logins, GoDaddy/Cloudflare dashboards, sudo passwords, device testing, secrets). Everything else is implementable autonomously.
 
 ## 0. Goal, topology, non-goals
@@ -234,3 +236,76 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 | Auth | CF Access service token + origin JWT verification + app bearer; plaintext-at-Cloudflare accepted by Ryan |
 | Deploy | Build on dev Mac, scp-to-temp + mv + kickstart; LaunchAgent + auto-login (cloudflared is a LaunchDaemon); newsyslog rotation; nightly `VACUUM INTO` backups |
 | Out of scope v1 | CRDTs, E2E encryption, WS push, compaction, iPhone target, Forge hostname |
+
+## 10. Implementation status and handover (2026-08-11)
+
+### 10.1 What was built
+
+| Phase | State | Where it lives |
+|---|---|---|
+| 0 — Cloudflare front door | **done** (2026-08-11, pre-existing) | Access app `pf-sync`, tunnel `promptflow-sync` |
+| 1 — `promptflow-core`, two clocks, stamping | **done** | `crates/promptflow-core/`, `src-tauri/src/{model,persist,store}.rs`, `PromptFlow/Model/` |
+| 2 — the hub | **done** | `crates/pf-sync-server/`, `deploy/`, `scripts/sync-deploy.sh` |
+| 3 — Tauri client | **done** | `src-tauri/src/sync.rs`, the `outbox` table, `src/state/sync.ts`, the Settings panel |
+| 4 — iPad: CloudKit out, client in | **done** | `PromptFlow/Sync/`, `PromptFlowTests/` |
+| 5 — cutover + docs | **done** except the [RYAN] steps | `scripts/sync-status.sh`, both `CLAUDE.md`s |
+
+Test coverage, all green:
+
+- `cargo test` (workspace): **23** in `promptflow-core` (merge, splice, the three fixture files), **26** in `pf-sync-server` (the T1–T18 matrix against the real router, plus auth, the 410 path, snapshot atomicity, orphan repair and the reserved device id).
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **42** unit + **6** end-to-end, the latter driving two real `Store`s against the real `promptflow-sync` binary over real HTTP.
+- `npm test` 97, `npx tsc --noEmit` clean, `scripts/qa.mjs` green with **zero** changes — as §7.3 predicted, sync adds no animation surface.
+- `xcodebuild test` in `../PromptFlow`: **23**, including the 32 shared merge vectors. iOS and macOS both build clean.
+
+The suites are non-vacuous: inverting the hub's tie policy by one character fails 6 tests across two crates.
+
+### 10.2 Deviations from this document, and why
+
+1. **`merge_delete` takes the tie policy** (§3.4 said strict `>` on both sides). The stated reasoning — "the oplog only carries deletes the hub already applied, so a client tie is unreachable" — is false for CASCADE tombstones: the hub mints those itself, stamping every live descendant with the PARENT's `deletedAt`, clocks it never compared against those children. A child edited in that exact millisecond ended up dead on the hub and alive on every device permanently, with nothing able to correct it. Found by the Phase 3 end-to-end test; pinned by two new fixture vectors.
+2. **`apply_remote` reads the outbox's pending deletes as local tombstones.** §Phase 3 step (3) asked for this ("including rows still pending in the outbox") and the first implementation missed it. Every cycle pulls before it pushes, so the hub sends a just-deleted subtree straight back; the rows reappeared in the outline and stayed until a later cycle brought the tombstones round — at a 30 s poll, half a minute of a deletion visibly undoing itself. Same fix on the iPad, via the `DeletedNode` journal.
+3. **The hub's `nodes` table materializes `position`** as well as `parent` (§4's schema listed only `parent`). A repair needs `max(root positions)`, and reading it back out of the JSON payload on every orphan is both slower and dependent on SQLite's JSON1 being compiled in.
+4. **`/v1/changes` applies its LIMIT to the raw sequence range**, before the caller's own ops are filtered out, so the returned `latestSeq` always names a sequence the caller has definitely considered. Filtering first would let a long run of the caller's own ops produce an empty page whose cursor could not safely advance past them.
+5. **The iPad's splice adjuster derives its splice from the before/after STRINGS**, not from `shouldChangeTextIn` (§Phase 4 suggested the latter). Recon found that two of the four editor surfaces have no such delegate method at all, and that on the two that do, the wrap/unwrap gesture deliberately vetoes the delegate change and edits the text storage directly — so a range taken from there would miss exactly the edits most likely to move a run. The commit points always hold both strings, and the same code then handles IME and the two-splice wrap gesture for free.
+6. **`SyncState`/`DeletedNode` join `NodeSchemaV1.models`** rather than getting a V2. `NodeMigration.swift`'s checksum warning is about a second `VersionedSchema` describing the same shape; a whole new entity is additive in exactly the sense a new column is.
+
+Two open questions in the recon were answered by choosing, not by discovering: the iPad's seed gates are re-gated on `SyncState.isConfigured` rather than made unconditional (an empty store with a hub behind it is a device waiting to be filled, not a first launch), and `insertExported` keeps restoring the file's `updatedAt` while minting fresh uuids — an imported node is new to the hub either way, so its content age is the more useful fact.
+
+### 10.3 What is left, all [RYAN]
+
+**A. Deploy the hub** (~10 minutes, needs one sudo):
+
+```sh
+scripts/sync-deploy.sh --install      # builds here, ships the binary, writes config, bootstraps the agents
+```
+
+It prints the generated bearer token ONCE. Put it in three places — this Mac's login Keychain (`security add-generic-password -U -s pf-sync-bearer -a "$USER" -w '<token>'`), your password manager, and later the iPad's settings screen — then clear the scrollback. Two follow-ups it will remind you about: the `newsyslog` rule (one `sudo install`, ideally in the same session as the cloudflared install), and the Access `iss` claim, which Phase 0 never recorded. For the second: make one authenticated request, then
+
+```sh
+ssh server "grep 'NOT pinned' /opt/homebrew/var/log/promptflow-sync.log"
+```
+
+put that `https://<team>.cloudflareaccess.com` value into `~/PromptFlow-Sync/config.toml` as `access_team_domain`, and re-run `scripts/sync-deploy.sh`. **Do not consider Phase 2 gated until `iss` is pinned** — until then the hub verifies signature, `aud` and `common_name` but accepts any issuer.
+
+Then `scripts/sync-status.sh` should print a healthy hub. It asks through the tunnel, so a green answer proves DNS, the Cloudflare edge, Access, the connector, the LaunchAgent and the database all at once.
+
+**B. Point this Mac at it.** Settings ▸ Sync: server `https://pf-sync.ryan-div.com`, Access client ID `00e0de7f97b61a6ae9ab945972a09298.access`, the bearer, and the Access client secret (already staged in your Keychain as `pf-sync-access-client-secret`). Turn Sync on and Save. **This is the moment the hub is seeded** — the first-configuration enqueue pushes your whole outline.
+
+Then check, in order:
+
+1. `scripts/sync-status.sh` shows `liveNodes` equal to your node count.
+2. Type something; within ~5 s "Last synced" updates and nothing is pending.
+3. ⌘N a second window, edit in one, watch the other — that path is unchanged, but it is worth confirming sync did not disturb it.
+4. Delete a small subtree, then check `sync-status.sh` shows the tombstones.
+5. Pull the office offline (or stop the hub): the error line should say the server is not answering, and the TopBar indicator should appear after the second failure — not the first.
+
+**C. Bootstrap the iPad.** Build and install it, open Settings ▸ Sync, enter the same three credentials, Save. It will refuse to push and offer **"Adopt server data — erases this iPad's outline"**; that is correct and deliberate — the iPad's copy is stale by your own account. Confirm it. Then the on-device checklist from §Phase 4's gate:
+
+- the adopt brings across the Mac's outline, ids and all;
+- edit on the iPad → appears on the Mac within ~35 s;
+- edit on the Mac → appears on the iPad when you foreground it;
+- edit both while the iPad is in airplane mode, then reconnect — the later edit wins on both;
+- delete on the iPad → the node dies on the Mac;
+- force-quit mid-sync, relaunch — nothing is lost or duplicated;
+- put a wrong bearer in and confirm the error says to check the credentials rather than something generic.
+
+**D. Watch it for a week.** `scripts/sync-status.sh` shows `perDevice` last-push and last-pull. Two things to observe rather than fix: whether the focus pane's ordering feels different on the iPad (it now orders by last EDIT, since typing finally stamps the content clock — it used to order by last structural change), and §3.5's accepted semantics that a remote change to the node you are actively typing in loses to your next keystroke.
