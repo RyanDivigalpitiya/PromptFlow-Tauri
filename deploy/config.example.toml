@@ -1,0 +1,46 @@
+# promptflow-sync — the hub's config. Lives at ~/PromptFlow-Sync/config.toml on the
+# Mac Mini, mode 0600. NEVER commit a filled-in copy: the bearer token is a live
+# credential.
+#
+# `scripts/sync-deploy.sh --install` writes this file for you and generates the bearer
+# token; this copy exists so the shape is reviewable in the repo.
+
+# Loopback only. The Cloudflare tunnel connector is the sole thing that may reach this
+# port, and the mini is shared production hardware (SPARC owns 9000–9010 and 5432).
+port = 9273
+
+# `~` and `$HOME` are expanded; a relative path resolves against $HOME, never against
+# the process cwd — launchd starts agents with cwd `/`.
+db_path = "~/PromptFlow-Sync/sync.sqlite"
+
+# The app-level shared secret: `openssl rand -hex 32`. Separate from the Cloudflare
+# Access service token — Access proves the request came through the tunnel's front
+# door, this proves it came from PromptFlow. Also lives in both device Keychains and
+# Ryan's password manager.
+bearer_token = "REPLACE-ME-WITH-openssl-rand-hex-32"
+
+# The Access application's Audience tag (captured 2026-08-11 from the `cf-access-aud`
+# response header on a blocked request).
+access_aud = "88c0e03ef09503d5df316ac21d34bdb7075a49bff979f348adbec5284316c79d"
+
+# The service token's Client ID, pinned as the JWT's `common_name` so a different token
+# in the same Access account cannot reach this origin. Not a secret.
+access_client_id = "00e0de7f97b61a6ae9ab945972a09298.access"
+
+# The `iss` claim to pin: `https://<team>.cloudflareaccess.com`.
+#
+# STILL UNKNOWN at the time of writing — the team domain was auto-provisioned by
+# Cloudflare's merged dashboard and never recorded. Leave it EMPTY for the first
+# deploy: the hub then enforces signature + `aud` + `common_name` and LOGS the `iss` it
+# receives ("Access `iss` is NOT pinned — set access_team_domain to this value").
+# Copy that value in here and restart. Do not ship past the Phase 2 gate without it.
+access_team_domain = ""
+
+# Access's signing keys. Verified live: Access serves them on the APPLICATION's own
+# hostname, so fetching keys needs no team-domain URL — only pinning `iss` does.
+access_certs_url = "https://pf-sync.ryan-div.com/cdn-cgi/access/certs"
+
+# Set false ONLY for a local run with no tunnel in front (the Phase 3 two-instance
+# convergence gate). With it false the bearer token is the ONLY credential, which is
+# why the port binds to loopback unconditionally. Never false on the mini.
+require_access = true

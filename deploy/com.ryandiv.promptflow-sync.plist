@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The sync hub, as a USER LaunchAgent — the same pattern SPARC's agents use on this
+  machine, and the reason auto-login must stay on: no GUI login means no agents, and
+  cloudflared (which is a system LaunchDaemon and starts pre-login) will 502 until
+  someone logs in. Accepted and documented.
+
+  Placeholders __HOME__ and __USER__ are substituted by scripts/sync-deploy.sh at
+  install time, from the values the MINI reports — never from the dev Mac's.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ryandiv.promptflow-sync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/PromptFlow-Sync/promptflow-sync</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!--
+    Restart on a CRASH, but not on a clean exit. The binary exits 0 (never non-zero) on
+    an unrecoverable config error precisely so this stops the loop instead of relaunching
+    every ThrottleInterval forever, filling the shared mini's log with one repeated line.
+  -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/PromptFlow-Sync</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>RUST_LOG</key>
+    <string>info</string>
+  </dict>
+
+  <!--
+    Distinct from SPARC's `sparc-*` log names, and rotated by
+    /etc/newsyslog.d/promptflow-sync.conf — launchd never rotates these files itself, and
+    an unbounded log on shared hardware is somebody else's outage.
+  -->
+  <key>StandardOutPath</key>
+  <string>/opt/homebrew/var/log/promptflow-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>/opt/homebrew/var/log/promptflow-sync.log</string>
+</dict>
+</plist>

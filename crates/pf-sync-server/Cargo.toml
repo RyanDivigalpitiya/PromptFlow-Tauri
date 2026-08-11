@@ -16,9 +16,9 @@ uuid = { workspace = true }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
-jsonwebtoken = "10"
+jsonwebtoken = "11"
 ureq = { version = "3", features = ["rustls"] }
-toml = "0.9"
+toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
