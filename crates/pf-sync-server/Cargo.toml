@@ -16,7 +16,11 @@ uuid = { workspace = true }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
-jsonwebtoken = "11"
+# `rust_crypto` is NOT a default feature (default = ["use_pem"] only): without a
+# backend pinned, v11 compiles clean and PANICS at the first decode() — which took the
+# hub's first real authenticated request down as a 502. Pinned by the RS256 round-trip
+# test in auth.rs.
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 ureq = { version = "3", features = ["rustls"] }
 toml = "1"
 tracing = "0.1"

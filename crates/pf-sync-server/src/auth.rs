@@ -168,6 +168,85 @@ fn fetch_keys(certs_url: &str) -> Result<JwkSet, AuthError> {
 mod tests {
     use super::*;
 
+    // A throwaway 2048-bit RSA keypair, generated for this test and used nowhere else.
+    // It exists so the test below runs REAL RS256 crypto — jsonwebtoken 11 ships no
+    // signature backend by default (`default = ["use_pem"]`), so a missing
+    // `rust_crypto` feature compiles clean and panics at the first decode(). That
+    // panic reached production as a 502 on the hub's first authenticated request; the
+    // scenario suite never saw it because it runs with `require_access = false`.
+    const TEST_RSA_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDRyR1Suwj2jdeP
+tEYzCDeUtg9OVtQ9UHacaJiioh3DP2q/0GnmTWF2mgnRZIP7UqpqtpYe5GfWwBmF
+3C1nS2JBpSbfoOm+JyAtcE/3nq1LAR9oJHjLNQo4sIXJxIvbvIHO4neFjAnr9rvB
+NlUGilEYaarMU6Xq0toMBeGYSBPCVoO3KVcAfoO81K7PjMcmKJ2Wz0P031OvuHC4
+otVS5Q0xvzUcVXeHX8qe8YzxorHZBujRxx3zqZXFIG6rUodWHR+q8rIwSTq6UhqW
+FSribM7II9NXapGkYNjl6WLosoAtwpCuus1Fmo5MRH22YTmildL5wHw2qy84EMpJ
+BS2lGh6pAgMBAAECggEAAmzvHoawJQqyQzWeyI//5IOcOwb6gtQKIoDRfaIFJc7D
+5mbIezO5CWzP2IPNIlFJ9txLtaVUAtL2CaaS/BUF2Jsfj0WOv10EthcdrQunJ60d
+6dgSG93DZJ/eZbryj0kJedklzbDQrRXir7czopkwq+kN646ZXbLjM08NkNFOH5Ro
+u//FEaaEu1s3en6joD4VENvl+fab75xkwN7paqFGMs8cAlsD6v+Mm3PkSnSecvE+
+SrUiliiMmadiaOkvRbG2hAYJDnPNaGv4UX9CPf1LjBz3DVLD2E8sa5FKOJxxoFPF
+d21G1gNAOBiB55pZRQ1WqdfrVQoia32d1GrCicm06QKBgQDsMkgWHQjSunu6u9Bc
+AUdm/Ig/HD2MsTNkdCnsrLvvriZYKgN640D6d46cYI0LQ6Tm6fLLG4Z90h7nkJVi
+rBRr/yr/+4PnBE/SduSBsvBBnN9h8PTuMT3iIuICKDpoSSqT5RoDO2H3LilA5b+j
+SEuhwaN8PbrqmTmMSlaDgUatawKBgQDjX/OWRH6SVGUPKFPenbQKOqIL1IPa9zNv
+e8R9dS/RT+RmbfFE+z2IdiO8YCB4vTfJhhd00qnAfXwId/y7dCQE7x5oB50813ao
+S9bKdWuLkSt/t72LKsNPBzE1IpTMRPjFsjkX2a0uyP46NcPu78Y2Li+z1cHT0LHy
+qmGJkPs1OwKBgCgiYx1e0aD9Dwkr4LvBe+CECKKwqcS+V306P+V3dHfFn75bZTv8
+YY4two3P2ieP1vVly1u30aKPkbDHYJrjopS3Rxc4JbGbifS5PxrKzQhZH5wE1Zmj
+xGAojT7QlxwhUprO0xy5emwF6/ybDXUxU6iovp7d3mT+pEiyWQD/doMBAoGBAM70
+L99vOpFv9YgFWck/W3cQBRylctpjtFJdoevbNQncIPTGTxtNXqWNeltkV0nuWA+6
+WDFB6bZFwRZoOAZa4MoI53EitRCCwQLP/JHMrHWdTa1zDTfVVW3iCvzlG/CNOq2e
+2W6G96Wk1hkfhNY/MfdwtISIJGLqCn3obNzstGmvAoGATyPOi6CqWZFg3KWotvg6
+6O0idG6dBhyJ3lQsxIV4ASnf395+uTGqzD+5pXiIK5aNxGccgW/LNWXZW0RnrBow
+YfMW/s+75eEWwr1DJZnFSx0yWMwwWCZ0X3YmGsW6YJdL8FxbeN7BewYemeMTo0i1
+3XNu4GXmPQK/vglCkmJCx8Y=
+-----END PRIVATE KEY-----";
+
+    // The matching public half, in the shape Access serves keys: a JWKS.
+    const TEST_JWKS: &str = r#"{"keys":[{"kty":"RSA","kid":"test-kid","use":"sig","alg":"RS256","n":"0ckdUrsI9o3Xj7RGMwg3lLYPTlbUPVB2nGiYoqIdwz9qv9Bp5k1hdpoJ0WSD-1KqaraWHuRn1sAZhdwtZ0tiQaUm36DpvicgLXBP956tSwEfaCR4yzUKOLCFycSL27yBzuJ3hYwJ6_a7wTZVBopRGGmqzFOl6tLaDAXhmEgTwlaDtylXAH6DvNSuz4zHJiidls9D9N9Tr7hwuKLVUuUNMb81HFV3h1_KnvGM8aKx2Qbo0ccd86mVxSBuq1KHVh0fqvKyMEk6ulIalhUq4mzOyCPTV2qRpGDY5eli6LKALcKQrrrNRZqOTER9tmE5opXS-cB8NqsvOBDKSQUtpRoeqQ","e":"AQAB"}]}"#;
+
+    #[derive(serde::Serialize)]
+    struct TestClaims {
+        aud: String,
+        iss: String,
+        common_name: String,
+        exp: u64,
+    }
+
+    /// Signs and verifies a REAL RS256 token through the same jsonwebtoken calls
+    /// `verify_access_jwt` makes (`from_jwk` + `decode`). This is the test that fails
+    /// — by panicking — if the crate's crypto backend feature is ever dropped again.
+    #[test]
+    fn rs256_round_trip_has_a_crypto_backend() {
+        let signing = jsonwebtoken::EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes())
+            .expect("test key parses");
+        let mut header = jsonwebtoken::Header::new(Algorithm::RS256);
+        header.kid = Some("test-kid".into());
+        let claims = TestClaims {
+            aud: "test-aud".into(),
+            iss: "https://team.cloudflareaccess.com".into(),
+            common_name: "svc.access".into(),
+            exp: 4102444800, // 2100-01-01
+        };
+        let token = jsonwebtoken::encode(&header, &claims, &signing).expect("signs");
+
+        let set: JwkSet = serde_json::from_str(TEST_JWKS).unwrap();
+        let jwk = set.find("test-kid").expect("kid present");
+        let key = DecodingKey::from_jwk(jwk).expect("JWK usable");
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(&["test-aud"]);
+        validation.set_issuer(&["https://team.cloudflareaccess.com"]);
+
+        let data = decode::<AccessClaims>(&token, &key, &validation).expect("verifies");
+        assert_eq!(data.claims.common_name, "svc.access");
+
+        // A bad signature must come back as an Err, never a panic.
+        let (head_and_body, _sig) = token.rsplit_once('.').unwrap();
+        let forged = format!("{head_and_body}.AAAA");
+        assert!(decode::<AccessClaims>(&forged, &key, &validation).is_err());
+    }
+
     #[test]
     fn secret_comparison_is_length_safe_and_correct() {
         assert!(secret_eq("abcdef", "abcdef"));
