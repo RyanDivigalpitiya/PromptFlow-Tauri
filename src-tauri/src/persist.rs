@@ -145,6 +145,9 @@ pub struct ApplyPlan<'a> {
     /// Queue these changes for the hub. LOCAL mutations do; a remote apply does not —
     /// echoing back what the hub just told us is the definition of a sync loop.
     pub enqueue: bool,
+    /// Queue DELETES even when `enqueue` is off — the configured-but-disabled store's
+    /// tombstone journal (see `ApplyPlan::local`).
+    pub journal_deletes: bool,
     /// Settings written in the same transaction. The sync CURSOR is the one that
     /// matters: advanced separately from the ops it covers, a crash between them either
     /// replays ops (harmless — they merge idempotently) or SKIPS them (silent data
@@ -156,11 +159,23 @@ pub struct ApplyPlan<'a> {
 }
 
 impl<'a> ApplyPlan<'a> {
-    /// The ordinary local-mutation plan.
-    pub fn local(changes: Vec<(Uuid, Option<&'a NodeRec>)>, enqueue: bool) -> Self {
+    /// The ordinary local-mutation plan. `journal_deletes` queues TOMBSTONES even when
+    /// `enqueue` is off: a configured-but-disabled store must remember what stopped
+    /// existing, or re-enabling sync re-offers every live node while the hub keeps the
+    /// deleted ones alive and the next pull resurrects them — for an import that
+    /// replaced the whole outline, that is the entire old world coming back (the
+    /// 2026-08-12 chimera). Upserts need no journal: `enqueue_all_live` re-offers them
+    /// wholesale on re-enable, and its ON CONFLICT upsert also clears any stale
+    /// tombstone row for a node that was deleted and then restored while off.
+    pub fn local(
+        changes: Vec<(Uuid, Option<&'a NodeRec>)>,
+        enqueue: bool,
+        journal_deletes: bool,
+    ) -> Self {
         ApplyPlan {
             changes,
             enqueue,
+            journal_deletes,
             settings: Vec::new(),
             clear_outbox: Vec::new(),
         }
@@ -226,7 +241,7 @@ pub fn apply_plan(db: &mut Connection, plan: ApplyPlan<'_>) -> Result<(), String
                         .map_err(|e| e.to_string())?;
                 }
             }
-            if plan.enqueue {
+            if plan.enqueue || (plan.journal_deletes && rec.is_none()) {
                 let (op, payload) = match rec {
                     Some(r) => (
                         "upsert",
@@ -350,6 +365,26 @@ pub fn outbox_count(db: &Connection) -> i64 {
         .unwrap_or(0)
 }
 
+/// Every node id with a pending outbox UPSERT — what the pusher's batch deferral
+/// weighs a drained batch against (see `plan_push` in sync.rs). Deletes are excluded:
+/// waiting on a parent that is queued to DIE would defer the child for nothing the
+/// hub's cascade doesn't already decide.
+pub fn outbox_pending_ids(db: &Connection) -> Result<std::collections::HashSet<Uuid>, String> {
+    let mut stmt = db
+        .prepare("SELECT node_id FROM outbox WHERE op = 'upsert'")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut out = std::collections::HashSet::new();
+    for r in rows {
+        if let Ok(Ok(id)) = r.map(|s| s.parse()) {
+            out.insert(id);
+        }
+    }
+    Ok(out)
+}
+
 /// How many DELETES are pending — what the mass-delete confirmation has to state.
 pub fn outbox_delete_count(db: &Connection) -> i64 {
     db.query_row(
@@ -364,7 +399,45 @@ pub fn outbox_delete_count(db: &Connection) -> i64 {
 /// the outbox would only ever carry post-configuration edits, and the hub would start
 /// empty forever while the Mac believed it was syncing (test T16).
 pub fn enqueue_all_live(db: &mut Connection, nodes: &HashMap<Uuid, NodeRec>) -> Result<usize, String> {
+    // PRE-ORDER, with queued_at increasing per row, so the outbox drains parents before
+    // children ACROSS push batches. A single queued_at drained ORDER BY (queued_at,
+    // node_id) is uuid order, and the hub's parents-first reorder only works WITHIN one
+    // request — on the 2026-08-12 seed that stranded ~167 children whose parents sat in
+    // the next batch, and the hub's orphan repair promoted every one of them to root,
+    // permanently (the repair keeps the structure clock, so the flat version wins every
+    // later tie). Ordering the queue is the fix at the source; sync.rs's batch deferral
+    // is the belt for edits queued in arbitrary order later.
     let queued_at = now_ms();
+    let mut ordered: Vec<&NodeRec> = Vec::with_capacity(nodes.len());
+    {
+        let mut children: HashMap<Option<Uuid>, Vec<&NodeRec>> = HashMap::new();
+        for rec in nodes.values() {
+            // A parent id that isn't in the live set walks as a root — unreachable
+            // nodes still ship rather than silently dropping from the seed.
+            let key = rec.parent.filter(|p| nodes.contains_key(p));
+            children.entry(key).or_default().push(rec);
+        }
+        for v in children.values_mut() {
+            v.sort_by_key(|r| (r.position, r.id));
+        }
+        let mut stack: Vec<&NodeRec> = children.remove(&None).unwrap_or_default();
+        stack.reverse();
+        while let Some(rec) = stack.pop() {
+            ordered.push(rec);
+            if let Some(mut kids) = children.remove(&Some(rec.id)) {
+                kids.reverse();
+                stack.append(&mut kids);
+            }
+        }
+        // A cycle (corrupted data) leaves rows unreachable from any root; append them
+        // rather than lose them — the hub's validation is the judge of what they are.
+        let seen: std::collections::HashSet<Uuid> = ordered.iter().map(|r| r.id).collect();
+        for rec in nodes.values() {
+            if !seen.contains(&rec.id) {
+                ordered.push(rec);
+            }
+        }
+    }
     let tx = db.transaction().map_err(|e| e.to_string())?;
     {
         let mut stmt = tx
@@ -374,10 +447,10 @@ pub fn enqueue_all_live(db: &mut Connection, nodes: &HashMap<Uuid, NodeRec>) -> 
                    op='upsert', payload=excluded.payload, queued_at=excluded.queued_at",
             )
             .map_err(|e| e.to_string())?;
-        for rec in nodes.values() {
+        for (i, rec) in ordered.iter().enumerate() {
             let payload =
-                serde_json::to_string(&WireNode::from(rec)).map_err(|e| e.to_string())?;
-            stmt.execute(params![rec.id.to_string(), payload, queued_at])
+                serde_json::to_string(&WireNode::from(*rec)).map_err(|e| e.to_string())?;
+            stmt.execute(params![rec.id.to_string(), payload, queued_at + i as i64])
                 .map_err(|e| e.to_string())?;
         }
     }

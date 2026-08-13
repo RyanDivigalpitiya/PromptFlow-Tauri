@@ -147,6 +147,12 @@ impl Device {
     fn new(name: &'static str, hub: &HubProcess) -> Device {
         let dir = tempdir::TempDir::new("pf-store").unwrap();
         let mut store = Store::open(&dir.path().join("promptflow.sqlite")).unwrap();
+        // Production writes the hub URL into settings when sync is configured
+        // (sync_set_config); the off-period tombstone journal keys on it, so the
+        // harness store must carry it too, not just the SyncConfig handed to run_cycle.
+        store
+            .set_setting(promptflow_tauri_lib::sync::URL_KEY, &hub.url)
+            .unwrap();
         store.set_sync_enabled(true).unwrap();
         let device_id = store.device_id().unwrap();
         Device {
@@ -598,4 +604,51 @@ fn turning_sync_off_and_on_again_re_offers_what_was_missed() {
     peer.sync();
     assert_eq!(peer.text(b).as_deref(), Some("written while sync was off"));
     assert_eq!(peer.text(a).as_deref(), Some("edited while sync was off"));
+}
+
+/// The 2026-08-12 chimera: an outline REPLACED while sync was off used to leave the hub
+/// holding the old world alive, and re-enabling pulled every zombie back in beside the
+/// restored copy. Deletes made while configured-but-off now journal tombstones, so
+/// re-enabling reconciles what stopped existing instead of resurrecting it.
+#[test]
+fn deletes_made_while_sync_was_off_do_not_resurrect() {
+    let hub = HubProcess::start();
+    let mac = Device::new("mac", &hub);
+    let peer = Device::new("peer", &hub);
+
+    let doomed = typed(&mac, "doomed");
+    let kept = typed(&mac, "kept");
+    mac.sync();
+    peer.sync();
+    assert_eq!(peer.text(doomed).as_deref(), Some("doomed"));
+
+    mac.with(|s| s.set_sync_enabled(false).unwrap());
+    mac.with(|s| {
+        s.delete(doomed).unwrap();
+    });
+    assert_eq!(
+        mac.with(|s| s.outbox_delete_count()),
+        1,
+        "the off-period delete journalled no tombstone",
+    );
+    mac.with(|s| s.set_sync_enabled(true).unwrap());
+    assert_eq!(
+        mac.with(|s| s.outbox_delete_count()),
+        1,
+        "re-enabling wiped the tombstone",
+    );
+
+    // The cycle pulls before it pushes; the outbox tombstone is what stops the hub's
+    // still-alive copy from walking straight back in.
+    mac.sync();
+    assert!(
+        mac.with(|s| s.get(doomed).is_none()),
+        "the pull resurrected the off-period deletion on the deleting device",
+    );
+    peer.sync();
+    assert!(
+        peer.with(|s| s.get(doomed).is_none()),
+        "the off-period deletion never reached the peer",
+    );
+    assert_eq!(peer.text(kept).as_deref(), Some("kept"));
 }

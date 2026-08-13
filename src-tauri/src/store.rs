@@ -391,6 +391,21 @@ impl Store {
 
     /// Close the transaction: diff before/after images, push an undo entry (with optional
     /// text coalescing), persist to SQLite, bump `rev`, and produce the broadcast delta.
+    /// Deletes are journalled even while sync is configured-but-OFF (a hub URL is set,
+    /// enabled false): re-enabling re-offers every live node, but only tombstone rows
+    /// can say what stopped existing in between — without them the next pull resurrects
+    /// every off-period deletion (a full import-replace brings back the entire old
+    /// outline; the 2026-08-12 chimera). A never-configured store journals nothing.
+    /// The URL is the configuration mark, NOT the cursor: the cursor is only written by
+    /// the first non-empty pull, so a configure→seed→disable sequence would journal
+    /// nothing under a cursor test and the hole would reopen exactly where it bit.
+    fn journal_deletes(&self) -> bool {
+        !self.sync_enabled
+            && self
+                .get_setting(crate::sync::URL_KEY)
+                .is_some_and(|u| !u.is_empty())
+    }
+
     fn commit(&mut self, coalesce: Option<CoalesceKey>) -> Result<Delta, String> {
         let tx = self.tx.take().expect("commit without begin");
         let mut changes: Vec<Change> = Vec::new();
@@ -413,11 +428,13 @@ impl Store {
         // applied to `nodes`, but on error we bump no `rev` and emit no delta — so a
         // store that kept the change would diverge from every window permanently, with
         // nothing to tell them about it. Roll back to the before-images instead.
+        let journal_deletes = self.journal_deletes();
         if let Err(e) = persist::apply_plan(
             &mut self.db,
             persist::ApplyPlan::local(
                 changes.iter().map(|c| (c.id, c.after.as_ref())).collect(),
                 self.sync_enabled,
+                journal_deletes,
             ),
         ) {
             let mut discard = Vec::new();
@@ -490,11 +507,13 @@ impl Store {
         // it was. Mutating first would strand the popped entry (never pushed to redo)
         // AND move the tree without bumping `rev` or emitting a delta — a silent,
         // permanent divergence between the store and every window.
+        let journal_deletes = self.journal_deletes();
         if let Err(e) = persist::apply_plan(
             &mut self.db,
             persist::ApplyPlan::local(
                 images.iter().map(|(id, r)| (*id, r.as_ref())).collect(),
                 self.sync_enabled,
+                journal_deletes,
             ),
         ) {
             self.undo_stack.push(entry); // nothing happened — put the step back
@@ -521,11 +540,13 @@ impl Store {
         };
         let images = restamped(entry.changes.iter().map(|c| (c.id, c.after.clone())));
         // Persist before mutating — see the note in `undo`.
+        let journal_deletes = self.journal_deletes();
         if let Err(e) = persist::apply_plan(
             &mut self.db,
             persist::ApplyPlan::local(
                 images.iter().map(|(id, r)| (*id, r.as_ref())).collect(),
                 self.sync_enabled,
+                journal_deletes,
             ),
         ) {
             self.redo_stack.push(entry); // nothing happened — put the step back
@@ -1722,6 +1743,10 @@ impl Store {
         persist::outbox_batch(&self.db, limit)
     }
 
+    pub fn outbox_pending_ids(&self) -> Result<std::collections::HashSet<Uuid>, String> {
+        persist::outbox_pending_ids(&self.db)
+    }
+
     pub fn outbox_count(&self) -> i64 {
         persist::outbox_count(&self.db)
     }
@@ -1835,6 +1860,8 @@ impl Store {
         let plan = persist::ApplyPlan {
             changes: changes.iter().map(|c| (c.id, c.after.as_ref())).collect(),
             enqueue: false,
+            // A remote delete is the hub talking; journalling it would echo it back.
+            journal_deletes: false,
             settings: cursor
                 .map(|c| (crate::sync::CURSOR_KEY.to_string(), c.to_string()))
                 .into_iter()
@@ -2825,6 +2852,73 @@ mod tests {
         s.set_text(a.new_node.unwrap(), "typed".into(), None, None, None)
             .unwrap();
         assert!(queued(&s).is_empty());
+    }
+
+    /// The 2026-08-12 chimera's local half: a delete made while sync is CONFIGURED but
+    /// OFF must journal a tombstone, or re-enabling re-offers every live node while the
+    /// hub keeps the deleted ones and the next pull resurrects them. A never-configured
+    /// store still journals nothing (the test above).
+    #[test]
+    fn deletes_journal_while_sync_is_configured_but_off() {
+        let mut s = sync_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        // A hub URL is the configuration mark — deliberately NOT the cursor, which a
+        // configure→seed→disable sequence never writes.
+        s.set_setting(crate::sync::URL_KEY, "https://hub.example").unwrap();
+        s.set_sync_enabled(false).unwrap();
+        // Pre-existing queue rows are irrelevant here; what matters is the delete.
+        s.delete(a).unwrap();
+        assert!(
+            queued(&s).contains(&(a, true)),
+            "the off-period delete left no tombstone in the outbox: {:?}",
+            queued(&s),
+        );
+        // An undo while still off revives the node; the tombstone must not survive to
+        // kill it remotely on re-enable. enqueue_all_live's ON CONFLICT upsert is what
+        // clears it — the same sweep re-enabling always runs.
+        s.undo().unwrap();
+        s.enqueue_all_live().unwrap();
+        assert!(
+            !queued(&s).iter().any(|(id, del)| *id == a && *del),
+            "a stale tombstone outlived the node's restoration",
+        );
+    }
+
+    /// The 2026-08-12 seed's local half: the first-configuration sweep must drain
+    /// parents before children ACROSS push batches — batches are queue prefixes, so a
+    /// global parent-first order is what keeps a chunk boundary from stranding a child
+    /// on the hub as a permanently-flattened orphan.
+    #[test]
+    fn seed_queue_drains_parents_before_children() {
+        let mut s = mem_store();
+        // Several roots, each with a chain and a fanout, so uuid order would lose.
+        for _ in 0..5 {
+            let (_, r) = s.append_root(NodeKind::BulletPoint).unwrap();
+            let r = r.new_node.unwrap();
+            let (_, c1) = s.append_child(r, NodeKind::Checkbox).unwrap();
+            let c1 = c1.new_node.unwrap();
+            let (_, c2) = s.append_child(c1, NodeKind::Checkbox).unwrap();
+            let c2 = c2.new_node.unwrap();
+            s.append_child(c2, NodeKind::BulletPoint).unwrap();
+            s.append_child(c1, NodeKind::BulletPoint).unwrap();
+        }
+        s.enqueue_all_live().unwrap();
+        let rows = s.outbox_batch(10_000).unwrap();
+        assert_eq!(rows.len(), 25);
+        let mut seen = std::collections::HashSet::new();
+        for row in rows {
+            if let promptflow_core::wire::WireOp::Upsert { node } = &row.op {
+                if let Some(p) = node.parent {
+                    assert!(
+                        seen.contains(&p),
+                        "child {} drained before its parent {p}",
+                        node.id,
+                    );
+                }
+                seen.insert(node.id);
+            }
+        }
     }
 
     /// T16's local half: the outbox only ever collects post-configuration edits, so a

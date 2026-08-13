@@ -13,8 +13,9 @@
 use crate::commands::StoreState;
 use crate::store::Store;
 use promptflow_core::wire::{
-    ChangesResponse, Current, ErrorResponse, Outcome, PushRequest, PushResponse, Reason,
-    SnapshotResponse, WireOp, CONFIRM_MASS_DELETE_HEADER, PROTOCOL_VERSION,
+    order_parents_first, ChangesResponse, Current, ErrorResponse, Outcome, PushRequest,
+    PushResponse, Reason, SnapshotResponse, WireOp, CONFIRM_MASS_DELETE_HEADER,
+    PROTOCOL_VERSION,
 };
 use serde::Serialize;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -402,17 +403,28 @@ pub fn run_cycle(
     }
 
     // (4) Snapshot the outbox under the lock, release, PUSH.
-    let batch = {
+    let (batch, pending) = {
         let store = state.lock().unwrap();
-        match store.outbox_batch(PUSH_BATCH) {
+        let batch = match store.outbox_batch(PUSH_BATCH) {
             Ok(b) => b,
             Err(e) => return Err((CycleError::Failed(e), deltas)),
-        }
+        };
+        let pending = match store.outbox_pending_ids() {
+            Ok(p) => p,
+            Err(e) => return Err((CycleError::Failed(e), deltas)),
+        };
+        (batch, pending)
     };
     if batch.is_empty() {
         return Ok(deltas);
     }
-    let ops: Vec<WireOp> = batch.iter().map(|r| r.op.clone()).collect();
+    let ops = plan_push(&batch, &pending, batch.len() == PUSH_BATCH);
+    if ops.is_empty() {
+        // Unreachable in practice (a partial batch IS the whole queue, so nothing can
+        // defer), but if it ever happens the idle poll retries — never spin here.
+        return Ok(deltas);
+    }
+    let shipped = ops.len();
     let response = match push(agent, cfg, ops, confirm_mass_delete) {
         Ok(r) => r,
         // NEVER retried automatically. The UI surfaces the count and offers a
@@ -458,11 +470,49 @@ pub fn run_cycle(
     };
     deltas.push(delta);
 
-    // More queued than one batch could carry — come straight back for the rest.
-    if batch.len() == PUSH_BATCH {
+    // More queued than one batch could carry — or rows deferred behind their parents —
+    // come straight back for the rest.
+    if batch.len() == PUSH_BATCH || shipped < batch.len() {
         nudge(Nudge::Now);
     }
     Ok(deltas)
+}
+
+/// What actually ships from a drained batch. An upsert whose parent has a pending
+/// outbox row that did NOT make this batch is DEFERRED: the parent sits behind it in
+/// the queue, and shipping the child first would strand it as a hub orphan — the hub's
+/// repair promotes it to root WITHOUT moving its structure clock, so the flat version
+/// wins every later tie and the mangling is permanent (the 2026-08-12 seed did exactly
+/// this to 167 nodes). What remains is sorted parents-first for the hub, whose own
+/// reorder only sees one request at a time. Fewer ops than batch rows means deferrals,
+/// and the caller must come straight back for them.
+///
+/// If EVERY op would be deferred — only reachable when a FULL batch of children sits
+/// ahead of all their parents, since a partial batch is the entire queue and every
+/// pending parent is then selected — ship the sorted batch anyway: a hub repair is
+/// recoverable by a later re-parent, a push loop that never ships is not.
+fn plan_push(
+    batch: &[crate::persist::OutboxRow],
+    pending: &std::collections::HashSet<Uuid>,
+    batch_is_full: bool,
+) -> Vec<WireOp> {
+    let selected: std::collections::HashSet<Uuid> = batch.iter().map(|r| r.node_id).collect();
+    let mut ops: Vec<WireOp> = batch
+        .iter()
+        .filter(|r| match &r.op {
+            WireOp::Upsert { node } => match node.parent {
+                Some(p) => !pending.contains(&p) || selected.contains(&p),
+                None => true,
+            },
+            _ => true,
+        })
+        .map(|r| r.op.clone())
+        .collect();
+    if ops.is_empty() && batch_is_full {
+        ops = batch.iter().map(|r| r.op.clone()).collect();
+    }
+    order_parents_first(&mut ops);
+    ops
 }
 
 fn emit(app: &AppHandle, delta: crate::store::Delta) {
@@ -613,4 +663,98 @@ fn urlencode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{NodeKind, NodeRec};
+    use crate::persist::OutboxRow;
+    use promptflow_core::wire::WireNode;
+
+    fn upsert_row(rec: &NodeRec, queued_at: i64) -> OutboxRow {
+        OutboxRow {
+            node_id: rec.id,
+            op: WireOp::upsert(WireNode::from(rec)),
+            queued_at,
+        }
+    }
+
+    /// The 2026-08-12 seed failure in miniature: a child whose parent is queued BEHIND
+    /// the batch boundary must be deferred, not shipped as a hub orphan.
+    #[test]
+    fn plan_push_defers_a_child_whose_parent_missed_the_batch() {
+        let parent = NodeRec::new("p".into(), NodeKind::BulletPoint, None, 0);
+        let child = NodeRec::new("c".into(), NodeKind::BulletPoint, Some(parent.id), 0);
+        let batch = vec![upsert_row(&child, 1)];
+        let pending: std::collections::HashSet<Uuid> =
+            [child.id, parent.id].into_iter().collect();
+        let other = NodeRec::new("o".into(), NodeKind::BulletPoint, None, 0);
+        let batch2 = vec![upsert_row(&child, 1), upsert_row(&other, 2)];
+        let pending2: std::collections::HashSet<Uuid> =
+            [child.id, parent.id, other.id].into_iter().collect();
+        let ops = plan_push(&batch2, &pending2, true);
+        assert_eq!(ops.len(), 1, "only the parentless op ships: {ops:?}");
+        match &ops[0] {
+            WireOp::Upsert { node } => assert_eq!(node.id, other.id),
+            other => panic!("expected the root upsert, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_push_ships_a_child_alongside_its_parent_parents_first() {
+        let parent = NodeRec::new("p".into(), NodeKind::BulletPoint, None, 0);
+        let child = NodeRec::new("c".into(), NodeKind::BulletPoint, Some(parent.id), 0);
+        // Child drained ahead of its parent in the SAME batch — order must flip.
+        let batch = vec![upsert_row(&child, 1), upsert_row(&parent, 2)];
+        let pending: std::collections::HashSet<Uuid> =
+            [child.id, parent.id].into_iter().collect();
+        let ops = plan_push(&batch, &pending, true);
+        assert_eq!(ops.len(), 2);
+        match (&ops[0], &ops[1]) {
+            (WireOp::Upsert { node: first }, WireOp::Upsert { node: second }) => {
+                assert_eq!(first.id, parent.id);
+                assert_eq!(second.id, child.id);
+            }
+            other => panic!("expected two upserts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_push_ships_a_child_whose_parent_is_not_pending_at_all() {
+        // The parent already lives on the hub — nothing to wait for.
+        let parent = NodeRec::new("p".into(), NodeKind::BulletPoint, None, 0);
+        let child = NodeRec::new("c".into(), NodeKind::BulletPoint, Some(parent.id), 0);
+        let batch = vec![upsert_row(&child, 1)];
+        let pending: std::collections::HashSet<Uuid> = [child.id].into_iter().collect();
+        assert_eq!(plan_push(&batch, &pending, false).len(), 1);
+    }
+
+    #[test]
+    fn plan_push_never_defers_deletes_and_never_starves() {
+        let parent = NodeRec::new("p".into(), NodeKind::BulletPoint, None, 0);
+        let child = NodeRec::new("c".into(), NodeKind::BulletPoint, Some(parent.id), 0);
+        let pending: std::collections::HashSet<Uuid> =
+            [child.id, parent.id].into_iter().collect();
+        // A delete ships regardless of any pending parent.
+        let del = OutboxRow {
+            node_id: child.id,
+            op: WireOp::Delete {
+                id: child.id,
+                deleted_at: 5,
+            },
+            queued_at: 1,
+        };
+        assert_eq!(plan_push(&[del], &pending, true).len(), 1);
+        // A batch that would defer EVERYTHING ships whole instead of looping forever.
+        let batch = vec![upsert_row(&child, 1)];
+        let all_deferred_pending: std::collections::HashSet<Uuid> =
+            [child.id, parent.id].into_iter().collect();
+        let ops = plan_push(&batch, &all_deferred_pending, true);
+        assert_eq!(ops.len(), 1, "the starvation valve must ship a FULL batch");
+        assert!(
+            plan_push(&batch, &all_deferred_pending, false).is_empty(),
+            "a partial batch never needs the valve",
+        );
+    }
 }
