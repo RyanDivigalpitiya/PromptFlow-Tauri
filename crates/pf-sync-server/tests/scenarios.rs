@@ -765,3 +765,81 @@ async fn a_resurrect_does_not_bring_back_the_subtree() {
         "resurrect brings back the node, not its subtree"
     );
 }
+
+/// 2026-08-12, hole (1): the tripwire counted OPS, but one delete naming a unit root
+/// kills its whole live subtree — 211 ops took 340 nodes and the count never saw the
+/// cascades. The doomed set now follows every live target down.
+#[tokio::test]
+async fn the_tripwire_weighs_cascades_not_ops() {
+    let hub = Hub::new().await;
+    let mut a = Device::new("mac");
+    let parent = a.create("unit root");
+    for i in 0..60 {
+        a.create_child(&format!("child {i}"), parent, now_ms());
+    }
+    a.sync(&hub).await;
+    assert_eq!(hub.live_count().await, 61);
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    let one_op = |at: i64| {
+        serde_json::to_value(promptflow_core::wire::PushRequest {
+            protocol_version: promptflow_core::wire::PROTOCOL_VERSION,
+            device_id: a.id.clone(),
+            ops: vec![promptflow_core::wire::WireOp::Delete {
+                id: parent,
+                deleted_at: at,
+            }],
+        })
+        .unwrap()
+    };
+    let refused = hub.raw_push(&one_op(now_ms()), false).await;
+    assert_eq!(refused.status, 428, "one op, sixty-one victims: {:?}", refused.json);
+    assert_eq!(hub.live_count().await, 61, "a refused batch leaves no trace");
+
+    let confirmed = hub.raw_push(&one_op(now_ms()), true).await;
+    assert_eq!(confirmed.status, 200);
+    assert_eq!(hub.live_count().await, 0);
+}
+
+/// 2026-08-12, holes (2) and (3): a per-request count let chunked pushes walk under the
+/// bar, and a confirmation released only the one request that carried the header. A
+/// device's recent deletes now count with it, and one confirmation covers the device
+/// for the same window — one press per burst, not per chunk.
+#[tokio::test]
+async fn the_tripwire_sees_across_chunks_and_a_confirm_covers_the_burst() {
+    let hub = Hub::new().await;
+    let mut a = Device::new("mac");
+    let ids: Vec<Uuid> = (0..100).map(|i| a.create(&format!("node {i}"))).collect();
+    a.sync(&hub).await;
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    let chunk = |ids: &[Uuid], at: i64| {
+        serde_json::to_value(promptflow_core::wire::PushRequest {
+            protocol_version: promptflow_core::wire::PROTOCOL_VERSION,
+            device_id: a.id.clone(),
+            ops: ids
+                .iter()
+                .map(|id| promptflow_core::wire::WireOp::Delete {
+                    id: *id,
+                    deleted_at: at,
+                })
+                .collect(),
+        })
+        .unwrap()
+    };
+
+    // Chunk 1: 30 deletes, under the 50 floor — passes on its own.
+    let r1 = hub.raw_push(&chunk(&ids[..30], now_ms()), false).await;
+    assert_eq!(r1.status, 200);
+    // Chunk 2: 25 more. Alone it is under the bar; with the 30 just applied it is not.
+    let r2 = hub.raw_push(&chunk(&ids[30..55], now_ms()), false).await;
+    assert_eq!(r2.status, 428, "chunking under the bar must not defeat the tripwire");
+    // The human confirms ONCE — this chunk applies and the confirmation stands.
+    let r3 = hub.raw_push(&chunk(&ids[30..55], now_ms()), true).await;
+    assert_eq!(r3.status, 200);
+    // Chunk 3 follows unconfirmed, exactly as a client draining its outbox would send
+    // it — the standing confirmation covers it.
+    let r4 = hub.raw_push(&chunk(&ids[55..85], now_ms()), false).await;
+    assert_eq!(r4.status, 200, "one press covers the burst: {:?}", r4.json);
+    assert_eq!(hub.live_count().await, 15);
+}

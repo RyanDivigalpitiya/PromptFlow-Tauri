@@ -417,3 +417,9 @@ pub const CONFIRM_MASS_DELETE_HEADER: &str = "x-pf-confirm-mass-delete";
 pub fn mass_delete_threshold(live_nodes: usize) -> usize {
     50.max(live_nodes / 5)
 }
+
+/// How far back a device's applied deletes still count against the tripwire, and how
+/// long one explicit confirmation keeps covering the device. The first stops a chunked
+/// burst from walking under a per-request bar; the second stops the SAME burst, once a
+/// human has confirmed it, from demanding a press per chunk.
+pub const MASS_DELETE_WINDOW_MS: i64 = 10 * 60 * 1000;

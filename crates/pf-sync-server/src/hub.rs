@@ -21,7 +21,7 @@ use promptflow_core::wire::{
     mass_delete_threshold, order_parents_first, ChangesResponse, DeviceHealth, HealthResponse,
     OpResult,
     Outcome, PushRequest, PushResponse, Reason, SeqOp, SnapshotResponse, TombstoneRef, WireNode,
-    WireOp, PROTOCOL_VERSION, SERVER_DEVICE_ID,
+    WireOp, MASS_DELETE_WINDOW_MS, PROTOCOL_VERSION, SERVER_DEVICE_ID,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::collections::HashSet;
@@ -56,7 +56,10 @@ CREATE TABLE IF NOT EXISTS oplog (
 CREATE TABLE IF NOT EXISTS devices (
   device_id     TEXT PRIMARY KEY,
   last_push_at  INTEGER,
-  last_pull_seq INTEGER
+  last_pull_seq INTEGER,
+  -- A mass-delete confirmation covers the device until this instant, so one press
+  -- releases a whole chunked burst instead of demanding one press per chunk.
+  confirmed_until INTEGER
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
@@ -126,6 +129,9 @@ impl Hub {
         let _ = conn.pragma_update(None, "synchronous", "NORMAL");
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
+        // Migration for a database created before `confirmed_until` existed —
+        // CREATE IF NOT EXISTS never alters an existing table.
+        let _ = conn.execute("ALTER TABLE devices ADD COLUMN confirmed_until INTEGER", []);
         Ok(Hub {
             conn,
             started_at: std::time::Instant::now(),
@@ -289,16 +295,64 @@ impl Hub {
                 .query_row("SELECT COUNT(*) FROM nodes WHERE deleted = 0", [], |r| {
                     r.get::<_, i64>(0)
                 })? as usize;
-        let deletes = req.ops.iter().filter(|o| o.is_delete()).count();
         let threshold = mass_delete_threshold(live_nodes);
-        // The tripwire is checked BEFORE the transaction opens, so a refused batch
-        // leaves no trace at all. Clients never set the confirm header on their own —
-        // it is an explicit user action in each app's sync-error UI.
-        if deletes > threshold && !confirm_mass_delete {
-            return Err(HubError::MassDelete { deletes, threshold });
-        }
-
         let now = now_ms();
+        // The tripwire weighs what would actually DIE, not what the request names.
+        // Three holes the 2026-08-12 forensics exposed, closed here:
+        //   (1) CASCADES were never counted — deleting 211 unit roots killed 340 nodes,
+        //       so the doomed set follows every live target to its whole live subtree;
+        //   (2) the count was PER-REQUEST, so any client chunking under the bar walked
+        //       through it — a device's recently-applied deletes now count with it;
+        //   (3) a confirmation released ONE request, so a chunked burst would demand a
+        //       press per chunk — a confirm now covers the device for the same window.
+        // Checked BEFORE the transaction opens, so a refused batch leaves no trace.
+        // Clients never set the confirm header on their own — it is an explicit user
+        // action in each app's sync-error UI.
+        let confirmed_standing: bool = self
+            .conn
+            .query_row(
+                "SELECT confirmed_until FROM devices WHERE device_id = ?1",
+                params![req.device_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .unwrap_or(None)
+            .is_some_and(|until| until >= now);
+        if !confirm_mass_delete && !confirmed_standing {
+            let mut doomed: HashSet<Uuid> = HashSet::new();
+            for op in req.ops.iter().filter(|o| o.is_delete()) {
+                let id = op.node_id();
+                let alive: bool = self
+                    .conn
+                    .query_row(
+                        "SELECT deleted = 0 FROM nodes WHERE id = ?1",
+                        params![id.to_string()],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(false);
+                if alive && doomed.insert(id) {
+                    for d in live_descendants(&self.conn, id)? {
+                        doomed.insert(d);
+                    }
+                }
+            }
+            let recent: usize = self.conn.query_row(
+                "SELECT COUNT(DISTINCT node_id) FROM oplog
+                 WHERE device_id = ?1 AND op = 'delete' AND server_ts > ?2",
+                params![req.device_id, now - MASS_DELETE_WINDOW_MS],
+                |r| r.get::<_, i64>(0),
+            )? as usize;
+            let deletes = doomed.len() + recent;
+            if deletes > threshold {
+                return Err(HubError::MassDelete { deletes, threshold });
+            }
+        }
+        if confirm_mass_delete {
+            self.conn.execute(
+                "INSERT INTO devices (device_id, confirmed_until) VALUES (?1, ?2)
+                 ON CONFLICT(device_id) DO UPDATE SET confirmed_until = excluded.confirmed_until",
+                params![req.device_id, now + MASS_DELETE_WINDOW_MS],
+            )?;
+        }
         // Parents before children, ALWAYS. Every client's batch order is arbitrary with
         // respect to the tree (a uuid-ordered outbox, an unordered SwiftData fetch), and a
         // child applied first finds no parent, gets "repaired" to the root, and — because
@@ -526,7 +580,9 @@ fn put_tombstone(tx: &Transaction, id: Uuid, deleted_at: i64, seq: i64) -> HubRe
 
 /// Every currently-live node under `root`, root excluded. Breadth-first over the
 /// materialized `parent` column, cycle-guarded because imported data can be malformed.
-fn live_descendants(tx: &Transaction, root: Uuid) -> HubResult<Vec<Uuid>> {
+/// Takes a plain Connection so the tripwire can weigh cascades before any transaction
+/// opens; a `&Transaction` derefs straight into it.
+fn live_descendants(tx: &Connection, root: Uuid) -> HubResult<Vec<Uuid>> {
     let mut out = Vec::new();
     let mut seen: HashSet<Uuid> = HashSet::from([root]);
     let mut frontier = vec![root];
