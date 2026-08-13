@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { emitFocusOrderAdopt } from "../lib/api";
 import { OutlineLayout, Theme } from "../lib/layout";
 import { setHideCompleted } from "../state/controller";
+import { persistedFocusOrder, useFocusPane } from "../state/focusPane";
 import { mirror } from "../state/mirror";
 import { useSettings } from "../state/settings";
 import { agoLabel, useSync } from "../state/sync";
@@ -172,7 +174,12 @@ export function SettingsPanel() {
     });
     if (!path) return;
     const collapsed = [...useWindowState.getState().collapsed];
-    const n = await invoke<number>("export_to_file", { path, collapsed });
+    // The pane's order is device-local (pf.focusOrder) and import mints fresh ids, so
+    // the file is the only carrier that survives a backup/restore round trip. Read the
+    // PERSISTED key, not this window's memory — a drag in another window persists but
+    // doesn't broadcast, and a stale copy here would silently back up a pre-drag order.
+    const focusOrder = persistedFocusOrder();
+    const n = await invoke<number>("export_to_file", { path, collapsed, focusOrder });
     setNotice(`Exported ${n} nodes.`);
   };
 
@@ -186,16 +193,23 @@ export function SettingsPanel() {
       "Importing replaces the ENTIRE outline in every window. This cannot be undone. Continue?",
     );
     if (!ok) return;
-    const out = await invoke<{ imported: number; collapsed: string[] }>(
-      "import_from_file",
-      { path },
-    );
+    const out = await invoke<{
+      imported: number;
+      collapsed: string[];
+      focusOrder: string[];
+      rev: number;
+    }>("import_from_file", { path });
     const ws = useWindowState.getState();
     ws.restoreDrill(null);
     ws.clearFocus();
     // The file's collapse flags seed THIS window's collapse state.
     ws.expandAll();
     ws.collapseAll(out.collapsed);
+    // The file's focus-pane order (mapped to the fresh ids) becomes the device's,
+    // broadcast so a peer window's reconcile of the import delta can't persist its
+    // rebuilt-by-updatedAt order over it.
+    useFocusPane.getState().adopt(out.focusOrder, out.rev);
+    void emitFocusOrderAdopt(out.focusOrder, out.rev);
     setNotice(`Imported ${out.imported} nodes.`);
   };
 

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { Delta, MutationOut, NodeKind, Snapshot } from "./types";
 
 /** Typed wrappers over the Rust store commands. Every mutation's delta arrives back
@@ -134,5 +134,27 @@ export function onRowMenuAction(
 ): Promise<UnlistenFn> {
   return listen<{ action: string; node: string }>("row-menu-action", (e) =>
     cb(e.payload.action, e.payload.node),
+  );
+}
+
+/** Focus-pane order restored by an outline import, broadcast to EVERY window: a peer
+ * window's own reconcile of the import delta rebuilds order by (updatedAt, id) and
+ * persists it — clobbering `pf.focusOrder` right after the importing window wrote the
+ * file's order there. Adoption is idempotent, so whichever of the delta and this event
+ * lands second leaves the file's order standing. `rev` is the import delta's rev — the
+ * receiving window's grace boundary for adopted ids its mirror hasn't caught up to
+ * (see focusPane's reconcile). */
+export function emitFocusOrderAdopt(
+  order: string[],
+  rev: number,
+): Promise<void> {
+  return emit("focus-order-adopt", { order, rev });
+}
+
+export function onFocusOrderAdopt(
+  cb: (order: string[], rev: number) => void,
+): Promise<UnlistenFn> {
+  return listen<{ order: string[]; rev: number }>("focus-order-adopt", (e) =>
+    cb(e.payload.order, e.payload.rev),
   );
 }

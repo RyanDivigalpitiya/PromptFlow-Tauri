@@ -18,6 +18,21 @@ function load(): string[] {
   return [];
 }
 
+/** The DEVICE's persisted order, read fresh — for the outline export. Every mutation
+ * (move/adopt/reconcile, in any window) persists synchronously, so the key is never
+ * behind any window's memory; a peer window's memory, seeded once at module init, CAN
+ * be behind the key (a drag in another window broadcasts nothing), and exporting that
+ * stale copy would silently record a pre-drag order into a disaster-recovery file.
+ * Falls back to this window's memory only when the key is empty/unreadable. */
+export function persistedFocusOrder(): string[] {
+  const stored = load();
+  return stored.length ? stored : useFocusPane.getState().order;
+}
+
+/** The rev the last adopted order was minted at (the import delta's rev) — see
+ * reconcile. Session-only: by the next launch the snapshot covers the import. */
+let adoptRev = 0;
+
 function persist(order: string[]) {
   try {
     localStorage.setItem(KEY, JSON.stringify(order));
@@ -30,6 +45,7 @@ interface FocusPaneState {
   order: string[];
   reconcile(): void;
   move(from: number, to: number): void;
+  adopt(order: string[], rev: number): void;
 }
 
 export const useFocusPane = create<FocusPaneState>((set, get) => ({
@@ -38,7 +54,16 @@ export const useFocusPane = create<FocusPaneState>((set, get) => ({
   reconcile() {
     const highlighted = mirror.highlightedIds();
     const hset = new Set(highlighted);
-    const kept = get().order.filter((id) => hset.has(id));
+    // An id ABSENT from the mirror is pruned as dead only once the mirror has caught
+    // up to the rev the adopted order was minted at. Before that, absence means "from
+    // a delta this window hasn't processed yet" — an import's fresh ids arrive here
+    // via the adopt broadcast, and a reconcile against a pre-import mirror (a stale
+    // rev-gap snapshot resolving late, a window mid-spawn) must not prune and PERSIST
+    // over the order the import just restored. Present-but-unhighlighted is pruned
+    // regardless — that is a real un-⌘⇧F, not mirror lag.
+    const keep = (id: string) =>
+      hset.has(id) || (!mirror.get(id) && mirror.rev() < adoptRev);
+    const kept = get().order.filter(keep);
     const keptSet = new Set(kept);
     const newcomers = highlighted
       .filter((id) => !keptSet.has(id))
@@ -65,6 +90,21 @@ export const useFocusPane = create<FocusPaneState>((set, get) => ({
     order.splice(Math.max(0, Math.min(to, order.length)), 0, x);
     set({ order });
     persist(order);
+  },
+
+  /** Replace the order wholesale — an outline import carries the exporting device's
+   * pane order mapped to the FRESH ids, and every window adopts it (see doImport).
+   * `rev` is the import delta's rev: until this window's mirror reaches it, reconcile
+   * treats the adopted ids as not-yet-known rather than dead (see the keep rule).
+   * The immediate reconcile is what appends highlighted-but-UNRANKED nodes (an
+   * archive written by Clear Completed carries flags but no ranks) — without it they
+   * stay off the pane until the next structural change, since a bare adopt bumps no
+   * structure version. */
+  adopt(order, rev) {
+    adoptRev = Math.max(adoptRev, rev);
+    set({ order: [...order] });
+    persist(order);
+    get().reconcile();
   },
 }));
 

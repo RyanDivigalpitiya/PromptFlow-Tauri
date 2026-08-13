@@ -85,7 +85,7 @@ function FocusRow({
   id: string;
   index: number;
   accent: string;
-  onHandleDown: (e: React.MouseEvent, index: number) => void;
+  onHandleDown: (e: React.MouseEvent, id: string) => void;
 }) {
   const rec = useNodeRec(id);
   const task = useCurrentTask(id);
@@ -97,7 +97,7 @@ function FocusRow({
     <div className="focus-row">
       <span
         className="focus-handle"
-        onMouseDown={(e) => onHandleDown(e, index)}
+        onMouseDown={(e) => onHandleDown(e, id)}
       >
         ⠿
       </span>
@@ -170,8 +170,11 @@ export function FocusPane() {
   const members = order.filter((id) => mirror.get(id)?.isHighlighted);
 
   /** Handle drag: track the pointer, paint a drop marker at the nearest row gap, and
-   * commit the reorder on release. */
-  function onHandleDown(e: React.MouseEvent, index: number) {
+   * commit the reorder on release. The dragged row is carried by ID and its index
+   * re-resolved at mouseup — the order can be replaced mid-drag (an import's adopt
+   * landing from another window), and committing the mousedown-time index against the
+   * new order would move a row the user never touched. */
+  function onHandleDown(e: React.MouseEvent, dragId: string) {
     if (e.button !== 0) return;
     e.preventDefault();
     const container = (e.currentTarget as HTMLElement).closest(
@@ -206,9 +209,11 @@ export function FocusPane() {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       setMarkerTop(null);
+      const from = useFocusPane.getState().order.indexOf(dragId);
+      if (from < 0) return; // the row left the order mid-drag
       const gap = gapAt(ev.clientY);
-      const to = gap > index ? gap - 1 : gap;
-      if (to !== index) useFocusPane.getState().move(index, to);
+      const to = gap > from ? gap - 1 : gap;
+      if (to !== from) useFocusPane.getState().move(from, to);
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);

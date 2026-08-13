@@ -1752,8 +1752,8 @@ impl Store {
         cursor: Option<i64>,
         clear_outbox: &[(Uuid, i64)],
     ) -> Result<Delta, String> {
-        use promptflow_core::merge::{merge_delete, merge_upsert, Side, Stored};
-        use promptflow_core::wire::{apply_wire_to_rec, WireNode, WireOp};
+        use promptflow_core::merge::{merge_delete, merge_upsert, Side};
+        use promptflow_core::wire::{apply_wire_to_rec, WireOp};
 
         // A cycle PULLS before it pushes, so the hub still believes anything we deleted
         // a moment ago is alive and will send it right back. The outbox is this client's
@@ -2498,9 +2498,9 @@ mod tests {
         s.set_text(b, "beta".into(), None, None, None).unwrap();
 
         type Step = Box<dyn Fn(&mut Store, Uuid, Uuid)>;
-        /// Some steps only do anything from a particular shape (you cannot outdent a
-        /// root). The prep runs BEFORE the clocks are aged, so it never pollutes the
-        /// measurement.
+        // Some steps only do anything from a particular shape (you cannot outdent a
+        // root). The prep runs BEFORE the clocks are aged, so it never pollutes the
+        // measurement.
         let nest: Step = Box::new(|s, _a, b| {
             s.indent(b, false).unwrap();
         });

@@ -226,7 +226,7 @@ pub fn run() {
                     return;
                 }
                 let dir = archive::archive_dir(&path);
-                let doc = archive::document(&store, &units, &Default::default());
+                let doc = archive::document(&store, &units, &Default::default(), &[]);
                 let Ok(_) = archive::write_archive(&dir, &doc) else {
                     return; // backup failed ⇒ delete nothing
                 };

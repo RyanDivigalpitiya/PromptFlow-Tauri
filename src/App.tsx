@@ -3,8 +3,9 @@ import { FocusPane } from "./components/FocusPane";
 import { OutlineView } from "./components/OutlineView";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { TopBar } from "./components/TopBar";
-import { api, onRowMenuAction } from "./lib/api";
+import { api, onFocusOrderAdopt, onRowMenuAction } from "./lib/api";
 import { endAnimNow } from "./state/collapseAnim";
+import { useFocusPane } from "./state/focusPane";
 import {
   collapseSelectionToCaret,
   copyBlock,
@@ -214,6 +215,15 @@ export default function App() {
     const un = onRowMenuAction((action, node) => {
       void performRowMenuAction(action, node);
     });
+    return () => void un.then((f) => f());
+  }, []);
+
+  // An outline import restores the focus-pane order in EVERY window (see api.ts on why
+  // a peer window left to its own reconcile would clobber it).
+  useEffect(() => {
+    const un = onFocusOrderAdopt((order, rev) =>
+      useFocusPane.getState().adopt(order, rev),
+    );
     return () => void un.then((f) => f());
   }, []);
 

@@ -407,10 +407,16 @@ pub fn export_to_file(
     state: State<StoreState>,
     path: String,
     collapsed: Vec<Uuid>,
+    focus_order: Vec<Uuid>,
 ) -> Result<usize, String> {
     let store = state.lock().unwrap();
     let roots = store.roots();
-    let doc = crate::archive::document(&store, &roots, &collapsed.into_iter().collect());
+    let doc = crate::archive::document(
+        &store,
+        &roots,
+        &collapsed.into_iter().collect(),
+        &focus_order,
+    );
     let json = crate::archive::encode(&doc)?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
     Ok(store.node_count())
@@ -422,6 +428,12 @@ pub struct ImportOut {
     pub imported: usize,
     /// Ids to seed the importing window's collapsed set (per-window state).
     pub collapsed: Vec<Uuid>,
+    /// The file's focus-pane order mapped to the FRESH ids (device state) — the caller
+    /// adopts it into `pf.focusOrder` and broadcasts it to its peer windows.
+    pub focus_order: Vec<Uuid>,
+    /// The import delta's rev. A window whose mirror is still BEHIND this must not
+    /// prune the adopted ids as unknown — they are from its future, not its past.
+    pub rev: u64,
 }
 
 /// REPLACE the whole outline from a `.promptflow.outline` JSON file. Destructive by
@@ -435,13 +447,16 @@ pub fn import_from_file(
 ) -> Result<ImportOut, String> {
     let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let doc = crate::archive::decode(&json)?;
-    let (recs, collapsed) = crate::archive::to_records(&doc);
-    let n = recs.len();
-    let delta = state.lock().unwrap().replace_all(recs)?;
+    let imported = crate::archive::to_records(&doc);
+    let n = imported.recs.len();
+    let delta = state.lock().unwrap().replace_all(imported.recs)?;
+    let rev = delta.rev;
     emit_delta(&app, delta, window.label());
     Ok(ImportOut {
         imported: n,
-        collapsed,
+        collapsed: imported.collapsed,
+        focus_order: imported.focus_order,
+        rev,
     })
 }
 
@@ -488,7 +503,7 @@ pub fn clear_completed(
             path: String::new(),
         });
     }
-    let doc = crate::archive::document(&store, &units, &Default::default());
+    let doc = crate::archive::document(&store, &units, &Default::default(), &[]);
     let dir = crate::archive::archive_dir(&paths.0);
     let path = crate::archive::write_archive(&dir, &doc)?;
     let nodes: usize = units.iter().map(|u| store.descendants(*u).len()).sum();

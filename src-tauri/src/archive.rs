@@ -2,7 +2,7 @@ use crate::model::{NodeKind, NodeRec};
 use crate::store::Store;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -41,6 +41,17 @@ pub struct NodeExport {
     pub italic_ranges: Vec<i64>,
     #[serde(rename = "underlineRanges", default, skip_serializing_if = "Vec::is_empty")]
     pub underline_ranges: Vec<i64>,
+    /// The ⌘⇧F focus-pane membership. Same only-when-set rule as the style arrays:
+    /// highlight-free documents stay byte-identical to the SwiftUI format, and its
+    /// JSONDecoder ignores the key where present.
+    #[serde(rename = "isHighlighted", default, skip_serializing_if = "is_false")]
+    pub is_highlighted: bool,
+    /// The exporting DEVICE's focus-pane position (0-based). The pane's order is
+    /// device-local (`pf.focusOrder`), and import mints fresh ids, so the file is the
+    /// only way order survives an export/import round trip. Written only for ranked
+    /// nodes; import sorts by it, ties falling back to document order.
+    #[serde(rename = "focusRank", default, skip_serializing_if = "Option::is_none")]
+    pub focus_rank: Option<i64>,
     pub position: i64,
     #[serde(rename = "createdAt")]
     pub created_at: String,
@@ -63,7 +74,17 @@ pub struct OutlineDocument {
 pub const FORMAT_ID: &str = "promptflow.outline";
 pub const CURRENT_VERSION: i64 = 1;
 
-fn export_node(store: &Store, id: Uuid, collapsed: &HashSet<Uuid>, seen: &mut HashSet<Uuid>) -> Option<NodeExport> {
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+fn export_node(
+    store: &Store,
+    id: Uuid,
+    collapsed: &HashSet<Uuid>,
+    ranks: &HashMap<Uuid, i64>,
+    seen: &mut HashSet<Uuid>,
+) -> Option<NodeExport> {
     if !seen.insert(id) {
         return None; // cycle guard
     }
@@ -71,7 +92,7 @@ fn export_node(store: &Store, id: Uuid, collapsed: &HashSet<Uuid>, seen: &mut Ha
     let children = store
         .ordered_children(id)
         .into_iter()
-        .filter_map(|c| export_node(store, c, collapsed, seen))
+        .filter_map(|c| export_node(store, c, collapsed, ranks, seen))
         .collect();
     Some(NodeExport {
         uuid: rec.id,
@@ -83,6 +104,16 @@ fn export_node(store: &Store, id: Uuid, collapsed: &HashSet<Uuid>, seen: &mut Ha
         bold_ranges: rec.bold_ranges,
         italic_ranges: rec.italic_ranges,
         underline_ranges: rec.underline_ranges,
+        is_highlighted: rec.is_highlighted,
+        // Rank only what is highlighted: the pane's order can briefly name a node
+        // un-⌘⇧F'd in another window (the exporting window's copy is only as fresh as
+        // its last reconcile), and a rank without the flag imports as a phantom order
+        // entry that desyncs the pane's order==members drag invariant.
+        focus_rank: if rec.is_highlighted {
+            ranks.get(&id).copied()
+        } else {
+            None
+        },
         position: rec.position,
         created_at: iso(rec.created_at),
         updated_at: iso(rec.updated_at),
@@ -92,8 +123,19 @@ fn export_node(store: &Store, id: Uuid, collapsed: &HashSet<Uuid>, seen: &mut Ha
 }
 
 /// Build the document from specific roots (Clear Completed archives units, the full
-/// export passes every root).
-pub fn document(store: &Store, roots: &[Uuid], collapsed: &HashSet<Uuid>) -> OutlineDocument {
+/// export passes every root). `focus_order` is the exporting device's focus-pane order;
+/// the archive paths pass `&[]` (a deleted unit has no pane position to keep).
+pub fn document(
+    store: &Store,
+    roots: &[Uuid],
+    collapsed: &HashSet<Uuid>,
+    focus_order: &[Uuid],
+) -> OutlineDocument {
+    let ranks: HashMap<Uuid, i64> = focus_order
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (*id, i as i64))
+        .collect();
     let mut seen = HashSet::new();
     OutlineDocument {
         format: FORMAT_ID.into(),
@@ -101,22 +143,34 @@ pub fn document(store: &Store, roots: &[Uuid], collapsed: &HashSet<Uuid>) -> Out
         exported_at: iso(crate::model::now_ms()),
         roots: roots
             .iter()
-            .filter_map(|r| export_node(store, *r, collapsed, &mut seen))
+            .filter_map(|r| export_node(store, *r, collapsed, &ranks, &mut seen))
             .collect(),
     }
 }
 
+/// A document decomposed for import: the records plus the two pieces of per-window /
+/// per-device state the file carries, already mapped to the FRESH ids.
+pub struct Imported {
+    pub recs: Vec<NodeRec>,
+    /// Ids that should seed the importing window's collapsed set.
+    pub collapsed: Vec<Uuid>,
+    /// The file's focusRank-carrying nodes in rank order — the importing device's new
+    /// focus-pane order (the exporter's `pf.focusOrder` names ids that no longer exist).
+    pub focus_order: Vec<Uuid>,
+}
+
 /// Flatten a document into fresh records (FRESH ids, like the SwiftUI app's import —
-/// reusing file ids could collide with live nodes). Returns the records plus the ids
-/// that should seed the importing window's collapsed set.
-pub fn to_records(doc: &OutlineDocument) -> (Vec<NodeRec>, Vec<Uuid>) {
+/// reusing file ids could collide with live nodes).
+pub fn to_records(doc: &OutlineDocument) -> Imported {
     let mut out = Vec::new();
     let mut collapsed = Vec::new();
+    let mut ranked: Vec<(i64, Uuid)> = Vec::new();
     fn walk(
         e: &NodeExport,
         parent: Option<Uuid>,
         out: &mut Vec<NodeRec>,
         collapsed: &mut Vec<Uuid>,
+        ranked: &mut Vec<(i64, Uuid)>,
     ) {
         let mut rec = NodeRec::new(
             e.text.clone(),
@@ -130,6 +184,7 @@ pub fn to_records(doc: &OutlineDocument) -> (Vec<NodeRec>, Vec<Uuid>) {
         rec.bold_ranges = e.bold_ranges.clone();
         rec.italic_ranges = e.italic_ranges.clone();
         rec.underline_ranges = e.underline_ranges.clone();
+        rec.is_highlighted = e.is_highlighted;
         rec.created_at = parse_iso(&e.created_at);
         rec.updated_at = parse_iso(&e.updated_at);
         rec.completed_at = e.completed_at.as_deref().map(parse_iso);
@@ -137,15 +192,28 @@ pub fn to_records(doc: &OutlineDocument) -> (Vec<NodeRec>, Vec<Uuid>) {
         if e.is_collapsed {
             collapsed.push(id);
         }
+        // The highlight gate mirrors the exporter's: a hand-edited file carrying a
+        // rank without the flag must not seed a phantom id into every window's order.
+        if let Some(r) = e.focus_rank {
+            if e.is_highlighted {
+                ranked.push((r, id));
+            }
+        }
         out.push(rec);
         for c in &e.children {
-            walk(c, Some(id), out, collapsed);
+            walk(c, Some(id), out, collapsed, ranked);
         }
     }
     for r in &doc.roots {
-        walk(r, None, &mut out, &mut collapsed);
+        walk(r, None, &mut out, &mut collapsed, &mut ranked);
     }
-    (out, collapsed)
+    // Stable, so duplicate ranks (a hand-edited file) fall back to document order.
+    ranked.sort_by_key(|(r, _)| *r);
+    Imported {
+        recs: out,
+        collapsed,
+        focus_order: ranked.into_iter().map(|(_, id)| id).collect(),
+    }
 }
 
 pub fn encode(doc: &OutlineDocument) -> Result<String, String> {
@@ -281,12 +349,20 @@ mod tests {
         s.set_text(b, "child B".into(), None, None, None).unwrap();
         s.set_note(b, "a note".into()).unwrap();
         s.toggle_completed(b).unwrap();
+        s.set_highlighted(a, true).unwrap();
+        s.set_highlighted(b, true).unwrap();
 
         let roots = s.roots();
-        let doc = document(&s, &roots, &HashSet::from([a]));
+        // Pane order REVERSED from document order, so the round trip proves the rank
+        // carried the order rather than the walk happening to reproduce it.
+        let doc = document(&s, &roots, &HashSet::from([a]), &[b, a]);
         let json = encode(&doc).unwrap();
         let parsed = decode(&json).unwrap();
-        let (recs, collapsed) = to_records(&parsed);
+        let Imported {
+            recs,
+            collapsed,
+            focus_order,
+        } = to_records(&parsed);
         assert_eq!(recs.len(), 2);
         assert_eq!(collapsed.len(), 1);
         let ra = recs.iter().find(|r| r.text == "root A").unwrap();
@@ -298,8 +374,59 @@ mod tests {
         assert!(rb.is_completed);
         assert!(rb.completed_at.is_some());
         assert_eq!(rb.note, "a note");
+        assert!(ra.is_highlighted && rb.is_highlighted);
+        assert_eq!(focus_order, vec![rb.id, ra.id]);
         // Fresh ids on import (never reuse the file's).
         assert_ne!(ra.id, a);
+    }
+
+    #[test]
+    fn focus_keys_absent_without_highlights() {
+        // The byte-compat rule: a document with no pane state carries NEITHER new key,
+        // exactly like the style arrays — so plain exports stay identical to the
+        // SwiftUI app's format.
+        let mut s = Store::open_in_memory_for_tests();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        s.set_text(a, "plain".into(), None, None, None).unwrap();
+        let json = encode(&document(&s, &s.roots(), &HashSet::new(), &[])).unwrap();
+        assert!(!json.contains("isHighlighted"));
+        assert!(!json.contains("focusRank"));
+        // A stale pane id (node since deleted) writes no rank either.
+        let ghost = Uuid::new_v4();
+        let json = encode(&document(&s, &s.roots(), &HashSet::new(), &[ghost])).unwrap();
+        assert!(!json.contains("focusRank"));
+        // Nor does a LIVE node the pane order still names but that is no longer
+        // highlighted (un-⌘⇧F'd in another window before this one reconciled): a rank
+        // without the flag would import as a phantom order entry.
+        let json = encode(&document(&s, &s.roots(), &HashSet::new(), &[a])).unwrap();
+        assert!(!json.contains("focusRank"));
+    }
+
+    #[test]
+    fn import_ignores_a_rank_without_the_flag() {
+        // The decode-side twin of the export guard, for hand-edited files: a focusRank
+        // on a node that is not highlighted must not reach the adopted order.
+        let json = r#"{
+            "format": "promptflow.outline", "version": 1,
+            "exportedAt": "2026-08-13T00:00:00Z",
+            "roots": [
+                {"uuid": "11111111-1111-1111-1111-111111111111", "text": "unflagged",
+                 "note": "", "kind": "bulletPoint", "isCompleted": false,
+                 "isCollapsed": false, "boldRanges": [], "position": 0,
+                 "createdAt": "2026-08-13T00:00:00Z", "updatedAt": "2026-08-13T00:00:00Z",
+                 "focusRank": 0, "children": []},
+                {"uuid": "22222222-2222-2222-2222-222222222222", "text": "flagged",
+                 "note": "", "kind": "bulletPoint", "isCompleted": false,
+                 "isCollapsed": false, "boldRanges": [], "position": 1024,
+                 "createdAt": "2026-08-13T00:00:00Z", "updatedAt": "2026-08-13T00:00:00Z",
+                 "isHighlighted": true, "focusRank": 1, "children": []}
+            ]
+        }"#;
+        let doc = decode(json).unwrap();
+        let imported = to_records(&doc);
+        let flagged = imported.recs.iter().find(|r| r.text == "flagged").unwrap();
+        assert_eq!(imported.focus_order, vec![flagged.id]);
     }
 
     #[test]
@@ -338,11 +465,11 @@ mod tests {
         let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
         s.set_text(a.new_node.unwrap(), "first".into(), None, None, None)
             .unwrap();
-        let doc1 = document(&s, &s.roots(), &HashSet::new());
+        let doc1 = document(&s, &s.roots(), &HashSet::new(), &[]);
         let (_, b) = s.append_root(NodeKind::BulletPoint).unwrap();
         s.set_text(b.new_node.unwrap(), "second".into(), None, None, None)
             .unwrap();
-        let doc2 = document(&s, &s.roots(), &HashSet::new());
+        let doc2 = document(&s, &s.roots(), &HashSet::new(), &[]);
 
         let p1 = write_archive(&dir, &doc1).unwrap();
         let p2 = write_archive(&dir, &doc2).unwrap();
