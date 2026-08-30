@@ -142,4 +142,17 @@ export const Theme = {
   defaultIndentGuideHex: "#5B5B60",
   defaultBgTint: 0.45,
   maxBgTint: 0.95,
+  /** A prompt's markdown MARKER ink ("# ", "- ", "1. " and their leading indent) — the
+   * syntax stays on screen but recedes, so the line reads as a heading or a list item
+   * rather than as punctuation.
+   *
+   * A literal, not `var(--text-faint)`, on purpose. It is written as an inline `color`,
+   * and that inline style is compared character-for-character by `domMatchesRuns` — the
+   * check that decides whether the editor rebuilds. Whether CSSOM round-trips a `var()`
+   * reference back out of `node.style.color` as the same token text is an unverified
+   * engine detail, and if it ever read back as "" the editor would rebuild on EVERY
+   * keystroke, silently killing macOS text substitution. `Theme.completeColor` is set
+   * inline the same way and for the same kind of reason. Mirrored by a comment in
+   * styles.css next to --text-faint, whose value this matches. */
+  mdMarkerColor: "rgba(255, 255, 255, 0.35)",
 };

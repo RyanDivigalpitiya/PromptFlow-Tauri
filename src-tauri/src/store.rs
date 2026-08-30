@@ -1088,6 +1088,69 @@ impl Store {
         Ok((delta, MutationOut::default()))
     }
 
+    /// Fill a prompt from a Prompt Templates entry: the template body REPLACES the
+    /// node's text wholesale, as one undo step.
+    ///
+    /// Three things here are load-bearing, none of them tidiness.
+    ///
+    /// `commit(None)`, never `CoalesceKey::Text(node)` — which is the whole reason this
+    /// is not just `set_text`. That one coalesces, and `commit` merges into the top undo
+    /// entry whenever the key matches within `COALESCE_MS`, so a template applied within
+    /// two seconds of typing would fold into the typing burst and ⌘Z could never undo
+    /// just the template. `None` blocks the merge in both directions.
+    ///
+    /// The three style-range arrays are CLEARED. They are UTF-16 offsets into the text
+    /// that no longer exists, so carrying them over would stripe the template at
+    /// arbitrary places — and past the end, where `segments` clamps them into nonsense.
+    ///
+    /// The completion flag is cleared, on `merge_into_prompt`'s precedent rather than
+    /// `set_kind`'s. A completed, childless prompt with an old `completed_at` qualifies
+    /// for `archive::collect`, so the deferred launch sweep would back it up to JSON and
+    /// `delete_archived` it — which ends in `clear_history()`, i.e. the node the user
+    /// just filled with a fresh template would be deleted UN-UNDOABLY. A kind flip leaves
+    /// the flag alone because it keeps the node's content; this replaces all of it.
+    pub fn apply_template(
+        &mut self,
+        node: Uuid,
+        text: String,
+    ) -> Result<(Delta, MutationOut), String> {
+        self.ensure(node)?;
+        // A divider renders no editor and has no text, exactly as ⌘1/2/3 never converts
+        // one — filling one would leave content nothing can display or reach.
+        if self.nodes[&node].kind == NodeKind::Line {
+            return Err("a divider has no text".into());
+        }
+        let converting = self.nodes[&node].kind != NodeKind::PromptDraft;
+        let was_completed = self.nodes[&node].is_completed;
+        self.begin();
+        self.edit(node, |r| {
+            r.text = text;
+            r.bold_ranges.clear();
+            r.italic_ranges.clear();
+            r.underline_ranges.clear();
+            r.kind = NodeKind::PromptDraft;
+            r.is_completed = false;
+            r.completed_at = None;
+            // The text and its runs are CONTENT; the kind and the completion flag are
+            // STRUCTURE. Stamp only what actually moved, or a template applied to an
+            // already-open prompt would beat concurrent structural edits on another
+            // device for no reason.
+            if converting || was_completed {
+                stamp_both(r);
+            } else {
+                stamp_content(r);
+            }
+        });
+        let delta = self.commit(None)?;
+        Ok((
+            delta,
+            MutationOut {
+                new_node: Some(node),
+                ..Default::default()
+            },
+        ))
+    }
+
     pub fn set_highlighted(
         &mut self,
         node: Uuid,
@@ -2240,6 +2303,149 @@ mod tests {
         assert!(!head.is_completed);
         assert_eq!(head.completed_at, None);
         assert!(crate::archive::collect(&s, Some(now_ms() - crate::archive::RETENTION_MS)).is_empty());
+    }
+
+    // MARK: Prompt templates
+
+    #[test]
+    fn apply_template_replaces_the_text_and_clears_its_runs() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::PromptDraft).unwrap();
+        let a = a.new_node.unwrap();
+        s.set_text(a, "half written".into(), Some(vec![0, 4]), Some(vec![5, 7]), Some(vec![0, 12]))
+            .unwrap();
+        let (_, out) = s.apply_template(a, "# Title\n\n- one".into()).unwrap();
+        assert_eq!(out.new_node, Some(a));
+        let rec = s.get(a).unwrap();
+        assert_eq!(rec.text, "# Title\n\n- one");
+        // The old runs are UTF-16 offsets into text that no longer exists.
+        assert!(rec.bold_ranges.is_empty());
+        assert!(rec.italic_ranges.is_empty());
+        assert!(rec.underline_ranges.is_empty());
+        // One undo step puts the whole thing back, runs included.
+        s.undo().unwrap();
+        let rec = s.get(a).unwrap();
+        assert_eq!(rec.text, "half written");
+        assert_eq!(rec.bold_ranges, vec![0, 4]);
+        assert_eq!(rec.italic_ranges, vec![5, 7]);
+        assert_eq!(rec.underline_ranges, vec![0, 12]);
+    }
+
+    /// The reason this is NOT `set_text`. That one coalesces on `CoalesceKey::Text`, so a
+    /// template landing inside the 2000ms window would fold into the typing burst and one
+    /// ⌘Z would undo BOTH — the user would lose the sentence they were writing along with
+    /// the template they just asked for. The mirror image of `text_coalescing_is_one_undo`.
+    #[test]
+    fn apply_template_never_coalesces_into_a_typing_burst() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::PromptDraft).unwrap();
+        let a = a.new_node.unwrap();
+        s.set_text(a, "t".into(), None, None, None).unwrap();
+        s.set_text(a, "typed".into(), None, None, None).unwrap();
+        // Immediately after, i.e. well inside COALESCE_MS.
+        s.apply_template(a, "# Template".into()).unwrap();
+        s.undo().unwrap();
+        assert_eq!(s.get(a).unwrap().text, "typed");
+        // ...and the typing burst is still its own single step underneath.
+        s.undo().unwrap();
+        assert_eq!(s.get(a).unwrap().text, "");
+    }
+
+    /// A completed prompt filled from a template must come back to life. Left completed
+    /// with an old `completed_at`, a childless node qualifies for `archive::collect`, so
+    /// the deferred launch sweep would archive and `delete_archived` it — and that path
+    /// ends in `clear_history()`, so the deletion is NOT undoable. Same failure
+    /// `merge_into_prompt_clears_the_heads_completion` documents.
+    #[test]
+    fn apply_template_clears_completion_so_the_archive_sweep_cannot_eat_it() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::Checkbox).unwrap();
+        let a = a.new_node.unwrap();
+        s.set_text(a, "done thing".into(), None, None, None).unwrap();
+        s.toggle_completed(a).unwrap();
+        let stale = now_ms() - 4 * 24 * 60 * 60 * 1000;
+        s.begin();
+        s.edit(a, |r| r.completed_at = Some(stale));
+        s.commit(None).unwrap();
+        // Childless and long completed: the sweep would take it right now.
+        assert_eq!(
+            crate::archive::collect(&s, Some(now_ms() - crate::archive::RETENTION_MS)).len(),
+            1
+        );
+
+        s.apply_template(a, "# Fresh start".into()).unwrap();
+        let rec = s.get(a).unwrap();
+        assert!(!rec.is_completed);
+        assert_eq!(rec.completed_at, None);
+        assert_eq!(rec.kind, NodeKind::PromptDraft);
+        assert!(crate::archive::collect(&s, Some(now_ms() - crate::archive::RETENTION_MS)).is_empty());
+    }
+
+    /// A divider renders no editor at all, exactly as ⌘1/2/3 never converts one — filling
+    /// it would put content somewhere nothing can display or reach.
+    #[test]
+    fn apply_template_refuses_a_divider() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::Line).unwrap();
+        let a = a.new_node.unwrap();
+        assert!(s.apply_template(a, "# nope".into()).is_err());
+        assert_eq!(s.get(a).unwrap().text, "");
+        assert_eq!(s.get(a).unwrap().kind, NodeKind::Line);
+    }
+
+    /// Applying to a bullet converts it, and ONE undo restores both the kind and the text.
+    #[test]
+    fn apply_template_converts_a_bullet_in_one_step() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        s.set_text(a, "a bullet".into(), None, None, None).unwrap();
+        s.apply_template(a, "# Template".into()).unwrap();
+        assert_eq!(s.get(a).unwrap().kind, NodeKind::PromptDraft);
+        s.undo().unwrap();
+        let rec = s.get(a).unwrap();
+        assert_eq!(rec.kind, NodeKind::BulletPoint);
+        assert_eq!(rec.text, "a bullet");
+    }
+
+    /// Clock classes. Filling an already-open prompt is pure CONTENT: stamping structure
+    /// too would let it beat a concurrent reparent/reorder from another device for no
+    /// reason. Converting a bullet, or reviving a completed node, moves structure as well.
+    #[test]
+    fn apply_template_stamps_content_and_structure_only_when_each_moved() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::PromptDraft).unwrap();
+        let a = a.new_node.unwrap();
+        let (_, b) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let b = b.new_node.unwrap();
+        // Backdate both, then read the baselines, so a stamp is unambiguously newer.
+        age(&mut s, &[a, b]);
+        let (a0, a0s) = clocks(&s, a);
+        let (_, b0s) = clocks(&s, b);
+
+        s.apply_template(a, "# one".into()).unwrap();
+        let (a1, a1s) = clocks(&s, a);
+        assert!(a1 > a0, "content moved");
+        assert_eq!(a1s, a0s, "an open prompt's structure did NOT move");
+
+        s.apply_template(b, "# two".into()).unwrap();
+        let (_, b1s) = clocks(&s, b);
+        assert!(b1s > b0s, "converting a bullet moves structure too");
+    }
+
+    /// One queued upsert carrying the FINAL image, not one row per field — the outbox
+    /// coalesces per node, and the hub must see the template, not the empty node.
+    #[test]
+    fn apply_template_queues_one_coalesced_outbox_row() {
+        let mut s = sync_store();
+        let (_, a) = s.append_root(NodeKind::PromptDraft).unwrap();
+        let a = a.new_node.unwrap();
+        s.apply_template(a, "# Template".into()).unwrap();
+        assert_eq!(queued(&s), vec![(a, false)]);
+        match &s.outbox_batch(10).unwrap()[0].op {
+            WireOp::Upsert { node } => assert_eq!(node.text, "# Template"),
+            _ => panic!("expected an upsert"),
+        }
     }
 
     /// Only a hand-corrupted store can put a parent cycle through the head, but the delete

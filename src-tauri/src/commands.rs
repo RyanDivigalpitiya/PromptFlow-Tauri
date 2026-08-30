@@ -618,10 +618,65 @@ pub fn set_setting(state: State<StoreState>, key: String, value: String) -> Resu
     state.lock().unwrap().set_setting(&key, &value)
 }
 
+/// The row (⋯) menu's CONTENTS, decided per node kind — pure, so `cargo test` can pin
+/// them without an NSMenu. `items` are the entries above the separator; `templates` is the
+/// "Prompt Templates" submenu, empty when there is none.
+///
+/// Every action string must be colon-free: `lib.rs` parses item ids as
+/// `pf-row:<action>:<window>:<node>` with `splitn(4, ':')`, so a colon would shift the
+/// window label and `emit_to` would silently no-op on a label that does not exist.
+#[derive(Debug, PartialEq)]
+pub struct RowMenu {
+    pub items: Vec<(String, String)>,
+    pub templates: Vec<(String, String)>,
+}
+
+pub fn row_menu_items(
+    kind: NodeKind,
+    has_children: bool,
+    templates: &[crate::templates::TemplateInfo],
+) -> RowMenu {
+    let mut items: Vec<(String, String)> = Vec::new();
+    if kind != NodeKind::Line {
+        items.push(("zoom".into(), "Zoom In".into()));
+    }
+    match kind {
+        NodeKind::PromptDraft => {
+            items.push(("copy-md".into(), "Copy Markdown".into()));
+            items.push(("copy-raw".into(), "Copy Raw".into()));
+            if has_children {
+                items.push(("copy-subtree".into(), "Copy Subtree".into()));
+            }
+        }
+        NodeKind::Line => {}
+        _ => items.push(("copy".into(), "Copy".into())),
+    }
+    // Prompts only: this fills the panel's text, and the other kinds have no panel. A
+    // template on a bullet would silently convert the node, which is not what a menu
+    // item called "New Feature Discuss Plan" says it does.
+    let subs = if kind == NodeKind::PromptDraft {
+        templates
+            .iter()
+            .map(|t| {
+                (
+                    crate::templates::menu_action(&t.id),
+                    crate::templates::menu_label(&t.name),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    RowMenu {
+        items,
+        templates: subs,
+    }
+}
+
 /// Native row context menu for the ⋯ button — built per node kind, popped up at the
 /// button. The chosen item is routed back to the OPENING window as a `row-menu-action`
 /// event (see the app-wide menu handler in `lib.rs`), so the frontend reuses its
-/// existing drill / copy / delete gestures. Item ids encode
+/// existing drill / copy / delete / template gestures. Item ids encode
 /// `pf-row:<action>:<window-label>:<node-uuid>`. Built + shown on the main thread
 /// (AppKit menus are main-thread only; a `#[tauri::command]` may run off it).
 #[tauri::command]
@@ -633,43 +688,44 @@ pub fn popup_row_menu(
     x: f64,
     y: f64,
 ) -> Result<(), String> {
-    let (kind, has_children) = {
+    // Everything the menu's CONTENTS depend on is read here, under one lock, and the
+    // lock is dropped before the main-thread hop — `State<StoreState>` is not `Send`
+    // into that closure, and `popup_menu_at` blocks the main thread for the menu's whole
+    // lifetime, which is no place to be holding the mutex every keystroke waits on.
+    let menu_spec = {
         let store = state.lock().unwrap();
-        let rec = store.get(node).ok_or("node not found")?;
-        (rec.kind, !store.ordered_children(node).is_empty())
+        let kind = store.get(node).ok_or("node not found")?.kind;
+        let has_children = !store.ordered_children(node).is_empty();
+        let ov = crate::templates::overrides(store.get_setting(crate::templates::NAMES_KEY));
+        row_menu_items(kind, has_children, &crate::templates::list(&ov))
     };
     let label = window.label().to_string();
     let win = window.clone();
     window
         .run_on_main_thread(move || {
-            use tauri::menu::{MenuBuilder, MenuItemBuilder};
+            use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
             let result = (|| -> tauri::Result<()> {
                 let id = |action: &str| format!("pf-row:{action}:{label}:{node}");
                 let mut items = Vec::new();
-                if kind != NodeKind::Line {
-                    items.push(MenuItemBuilder::with_id(id("zoom"), "Zoom In").build(&app)?);
-                }
-                match kind {
-                    NodeKind::PromptDraft => {
-                        items.push(
-                            MenuItemBuilder::with_id(id("copy-md"), "Copy Markdown").build(&app)?,
-                        );
-                        items.push(MenuItemBuilder::with_id(id("copy-raw"), "Copy Raw").build(&app)?);
-                        if has_children {
-                            items.push(
-                                MenuItemBuilder::with_id(id("copy-subtree"), "Copy Subtree")
-                                    .build(&app)?,
-                            );
-                        }
-                    }
-                    NodeKind::Line => {}
-                    _ => items.push(MenuItemBuilder::with_id(id("copy"), "Copy").build(&app)?),
+                for (action, text) in &menu_spec.items {
+                    items.push(MenuItemBuilder::with_id(id(action), text).build(&app)?);
                 }
                 let mut b = MenuBuilder::new(&app);
                 for it in &items {
                     b = b.item(it);
                 }
-                if !items.is_empty() {
+                // A `Submenu` is an `IsMenuItem`, and its children fire the SAME
+                // `app.on_menu_event` as any other item — so the `pf-row:` routing in
+                // lib.rs needs no knowledge that this is nested.
+                if !menu_spec.templates.is_empty() {
+                    let mut sb = SubmenuBuilder::new(&app, "Prompt Templates");
+                    for (action, text) in &menu_spec.templates {
+                        sb = sb.text(id(action), text);
+                    }
+                    let sub = sb.build()?;
+                    b = b.item(&sub);
+                }
+                if !menu_spec.items.is_empty() || !menu_spec.templates.is_empty() {
                     b = b.separator();
                 }
                 let del = MenuItemBuilder::with_id(id("delete"), "Delete").build(&app)?;
@@ -683,4 +739,145 @@ pub fn popup_row_menu(
         })
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Fill a prompt from a compiled-in template. The body is resolved with NO lock held; the
+/// mutation is the store's `apply_template`, which is deliberately not `set_text` (see its
+/// doc comment: undo coalescing, cleared runs, cleared completion).
+#[tauri::command]
+pub fn apply_prompt_template(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<StoreState>,
+    node: Uuid,
+    template: String,
+) -> Result<MutationOut, String> {
+    let body = crate::templates::by_id(&template)
+        .ok_or_else(|| format!("no such prompt template: {template}"))?
+        .body
+        .to_string();
+    let r = state.lock().unwrap().apply_template(node, body);
+    run_mutation(&app, &window, r)
+}
+
+/// The Settings ▸ Prompt Templates list: each template's id, its file-name-derived
+/// default, and the name the menu currently shows.
+#[tauri::command]
+pub fn prompt_templates(
+    state: State<StoreState>,
+) -> Result<Vec<crate::templates::TemplateInfo>, String> {
+    let store = state.lock().unwrap();
+    let ov = crate::templates::overrides(store.get_setting(crate::templates::NAMES_KEY));
+    Ok(crate::templates::list(&ov))
+}
+
+/// Rename a template for this device. An empty name REMOVES the override, which is what
+/// the Reset button and an emptied field both do.
+#[tauri::command]
+pub fn set_prompt_template_name(
+    state: State<StoreState>,
+    template: String,
+    name: String,
+) -> Result<(), String> {
+    let mut store = state.lock().unwrap();
+    let mut ov = crate::templates::overrides(store.get_setting(crate::templates::NAMES_KEY));
+    if name.trim().is_empty() {
+        ov.remove(&template);
+    } else {
+        ov.insert(template, name.trim().to_string());
+    }
+    let json = serde_json::to_string(&ov).map_err(|e| e.to_string())?;
+    store.set_setting(crate::templates::NAMES_KEY, &json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::templates::TemplateInfo;
+
+    fn tpl(id: &str, name: &str) -> TemplateInfo {
+        TemplateInfo {
+            id: id.into(),
+            default_name: name.into(),
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn only_a_prompt_gets_the_templates_submenu() {
+        let list = vec![tpl("New-Feature-Discuss-Plan", "New Feature Discuss Plan")];
+        assert_eq!(
+            row_menu_items(NodeKind::PromptDraft, false, &list).templates,
+            vec![(
+                "tpl-New-Feature-Discuss-Plan".to_string(),
+                "New Feature Discuss Plan".to_string()
+            )]
+        );
+        for kind in [NodeKind::BulletPoint, NodeKind::Checkbox, NodeKind::Line] {
+            assert!(
+                row_menu_items(kind, false, &list).templates.is_empty(),
+                "{kind:?} must not offer templates"
+            );
+        }
+    }
+
+    /// No templates on disk ⇒ no submenu at all, rather than an empty one to click into.
+    #[test]
+    fn an_empty_table_produces_no_submenu() {
+        assert!(row_menu_items(NodeKind::PromptDraft, false, &[]).templates.is_empty());
+    }
+
+    /// The failure mode is a SILENTLY misrouted event: `lib.rs` splits the item id with
+    /// `splitn(4, ':')`, so a colon in an action shifts the window label and `emit_to`
+    /// no-ops on a label that does not exist. Nothing would appear to happen.
+    #[test]
+    fn no_action_string_contains_a_colon() {
+        let list = vec![tpl("A-B_c.1", "A & B")];
+        for kind in [
+            NodeKind::BulletPoint,
+            NodeKind::Checkbox,
+            NodeKind::PromptDraft,
+            NodeKind::Line,
+        ] {
+            for has_children in [false, true] {
+                let m = row_menu_items(kind, has_children, &list);
+                for (action, _) in m.items.iter().chain(m.templates.iter()) {
+                    assert!(!action.contains(':'), "{kind:?}: action `{action}` has a colon");
+                }
+            }
+        }
+    }
+
+    /// The per-kind map the row-interaction spec records, unchanged by this feature.
+    #[test]
+    fn the_existing_per_kind_items_are_untouched() {
+        let acts = |k, c| {
+            row_menu_items(k, c, &[])
+                .items
+                .into_iter()
+                .map(|(a, _)| a)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(acts(NodeKind::Line, false), Vec::<String>::new());
+        assert_eq!(acts(NodeKind::BulletPoint, false), vec!["zoom", "copy"]);
+        assert_eq!(
+            acts(NodeKind::PromptDraft, false),
+            vec!["zoom", "copy-md", "copy-raw"]
+        );
+        assert_eq!(
+            acts(NodeKind::PromptDraft, true),
+            vec!["zoom", "copy-md", "copy-raw", "copy-subtree"]
+        );
+    }
+
+    /// A `&` in a renamed template must reach AppKit doubled, or muda eats it as a
+    /// mnemonic marker and "Discuss & Plan" renders as "Discuss  Plan".
+    #[test]
+    fn a_renamed_template_keeps_its_ampersand() {
+        let list = vec![tpl("x", "Discuss & Plan")];
+        assert_eq!(
+            row_menu_items(NodeKind::PromptDraft, false, &list).templates[0].1,
+            "Discuss && Plan"
+        );
+    }
 }

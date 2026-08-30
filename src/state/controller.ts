@@ -329,11 +329,38 @@ export async function mergeSelectionIntoPrompt(ids: string[]) {
   ws().focusNode(out.newNode, "main", { type: "end" });
 }
 
+/** The row-menu action prefix for a Prompt Templates entry; the rest is the template id.
+ * Pinned on the Rust side by `templates::menu_action` — the two suites meet on it. */
+const TEMPLATE_ACTION_PREFIX = "tpl-";
+
+/** Fill a prompt from a template, then put the caret at the START of it.
+ *
+ * Offset 0, deliberately. `focusNode` and the template's own delta race: if the delta
+ * lands second, RowEditor's adoption effect overwrites the pending caret request with
+ * `min(sel.start, rec.text.length)` — and 0 is a valid offset against BOTH the old text
+ * and the new one, so the race has no wrong outcome. It also leaves the row's top edge
+ * where it was, so the scroll-into-view effect has nothing to correct, and the top of a
+ * freshly filled template is where you start reading anyway.
+ *
+ * Replacing the existing text is the point: the store makes it ONE undo entry that never
+ * coalesces into a typing burst, so ⌘Z restores whatever was there. */
+export async function applyTemplate(nodeId: string, templateId: string) {
+  await api.applyPromptTemplate(nodeId, templateId);
+  ws().focusNode(nodeId, "main", { type: "start" });
+}
+
 /** Run a native row-(⋯)-menu selection through the existing gesture handlers — the
  * same actions the old in-app dropdown fired, so behavior stays identical. */
 export async function performRowMenuAction(action: string, nodeId: string) {
   const rec = mirror.get(nodeId);
   if (!rec) return;
+  // The Prompt Templates submenu. Its items are `tpl-<id>`, and the id is colon-free by
+  // construction (build.rs) because lib.rs parses the item id with splitn(4, ':'). This
+  // is a PREFIX branch rather than a switch case because the set is data, not code.
+  if (action.startsWith(TEMPLATE_ACTION_PREFIX)) {
+    await applyTemplate(nodeId, action.slice(TEMPLATE_ACTION_PREFIX.length));
+    return;
+  }
   switch (action) {
     case "zoom":
       drillInto(nodeId);

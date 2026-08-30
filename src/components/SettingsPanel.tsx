@@ -321,6 +321,39 @@ export function SettingsPanel() {
             Reveal Archive in Finder
           </button>
         </div>
+        <div className="settings-section">Prompt Templates</div>
+        {s.templates.length === 0 ? (
+          <div className="settings-footnote">
+            None found. Add a file to <code>prompt-templates/</code> in the repo and
+            rebuild.
+          </div>
+        ) : (
+          s.templates.map((t) => (
+            <label key={t.id} className="settings-row settings-row-stack">
+              <span>{t.id}</span>
+              <span className="settings-tpl">
+                <input
+                  type="text"
+                  value={t.name}
+                  placeholder={t.defaultName}
+                  onChange={(e) => s.setTemplateName(t.id, e.target.value)}
+                />
+                <button
+                  className="mini-btn"
+                  disabled={t.name.trim() === "" || t.name === t.defaultName}
+                  onClick={() => s.setTemplateName(t.id, "", true)}
+                >
+                  Reset
+                </button>
+              </span>
+            </label>
+          ))
+        )}
+        <div className="settings-footnote">
+          What a prompt's ⋯ menu calls each template. Names are stored on this Mac; the
+          templates themselves ship with the app.
+        </div>
+
         <div className="settings-section">Sync</div>
         <SyncSection />
 

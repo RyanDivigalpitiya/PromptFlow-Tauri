@@ -18,7 +18,24 @@ import {
 } from "../lib/caret";
 import { resolveKey, type EditorKey } from "../lib/keys";
 import { Theme } from "../lib/layout";
-import { buildRunDom, segments, toMarkdown, type StyleSet } from "../lib/runs";
+import { deleteKind, deleteRange } from "../lib/deleteRange";
+import {
+  bulletAtCaret,
+  hasMarkdown,
+  indentLines,
+  isList,
+  mdLines,
+} from "../lib/mdLines";
+import {
+  buildRunDom,
+  declFor,
+  lineClass,
+  mdLineViews,
+  segments,
+  toMarkdown,
+  type RunSegment,
+  type StyleSet,
+} from "../lib/runs";
 import type { NodeRec } from "../lib/types";
 import { applyWrap, wrapAction } from "../lib/wrap";
 import {
@@ -90,42 +107,79 @@ function wrapperStyle(rec: NodeRec, highlightColor: string): React.CSSProperties
   return style;
 }
 
+/** One run of uniform style, as a span. The imperative twin is `appendSegs` in runs.ts —
+ * the two must build the SAME element for the same segment or the row's metrics change
+ * when it gains focus. `declFor` is the single place that decides what that is. */
+function Run({ seg }: { seg: RunSegment }) {
+  return <span style={declFor(seg)}>{seg.text}</span>;
+}
+
 /** Static text render: bold/italic/underline runs + completed strike + highlight
- * color, in spans — the exact structure the live editor builds imperatively. */
+ * color, in spans — the exact structure the live editor builds imperatively.
+ *
+ * `md` switches to the markdown line renderer: one block per line, with a list item's
+ * marker and body as the two columns of a grid, which is what makes a wrapped line hang
+ * under its own text. It is the same shape `buildRunDom` builds, for the same reason the
+ * flat one is: focusing a row must not move a single pixel of it. */
 function StaticText({
   rec,
   highlightColor,
+  md,
+  fontSize,
 }: {
   rec: NodeRec;
   highlightColor: string;
+  md: boolean;
+  /** The row's font size — the marker's hang is measured at it. */
+  fontSize: number;
 }) {
+  const style = wrapperStyle(rec, highlightColor);
+  // The same trailing-line sentinel buildRunDom appends to the editor, for the
+  // same measured reason: WebKit gives a text ending in "\n" no line box for that
+  // last empty line (`<span>a\n</span>` renders exactly as tall as `<span>a</span>`).
+  // Without it the row is a full line SHORTER unfocused than focused — measured at
+  // 21.6px — so deleting the last line of a node and clicking away snapped the row
+  // up, and clicking back in grew it again. The original has no static/live split
+  // at all (every row is one NSTextView, whose extra line fragment renders the
+  // empty line always), so matching it means rendering the line box in both.
+  const sentinel = rec.text.endsWith("\n");
+
+  if (md) {
+    const views = mdLineViews(rec.text, recStyles(rec), fontSize);
+    return (
+      // `md-root` makes this BLOCK. It is an extra inline box the live editor does not
+      // have, and an inline box holding block children is a block-in-inline split — a
+      // different box tree from the editor's, i.e. exactly the metrics divergence the
+      // static/live split exists to avoid.
+      <span className="node-text-static md-root" style={style}>
+        {views.map((view, i) => (
+          <span
+            key={i}
+            className={lineClass(view.kind)}
+            style={
+              view.hang > 0
+                ? ({ "--md-hang": `${view.hang}px` } as React.CSSProperties)
+                : undefined
+            }
+          >
+            {view.segs.map((seg, j) => (
+              <Run key={j} seg={seg} />
+            ))}
+            {sentinel && i === views.length - 1 && <br data-pf-sentinel="1" />}
+          </span>
+        ))}
+      </span>
+    );
+  }
+
   const segs = segments(rec.text, recStyles(rec));
   return (
-    <span className="node-text-static" style={wrapperStyle(rec, highlightColor)}>
+    <span className="node-text-static" style={style}>
       {segs.map((s, i) => (
-        <span
-          key={i}
-          style={{
-            // 700, not 600: highlighted rows set 600 on the wrapper, and bold
-            // must stay visibly heavier inside them.
-            fontWeight: s.bold ? 700 : undefined,
-            fontStyle: s.italic ? "italic" : undefined,
-            textDecoration: s.underline ? "underline" : undefined,
-          }}
-        >
-          {s.text}
-        </span>
+        <Run key={i} seg={s} />
       ))}
-      {rec.text === "" && "​"}
-      {/* The same trailing-line sentinel buildRunDom appends to the editor, for the
-        * same measured reason: WebKit gives a text ending in "\n" no line box for that
-        * last empty line (`<span>a\n</span>` renders exactly as tall as `<span>a</span>`).
-        * Without it the row is a full line SHORTER unfocused than focused — measured at
-        * 21.6px — so deleting the last line of a node and clicking away snapped the row
-        * up, and clicking back in grew it again. The original has no static/live split
-        * at all (every row is one NSTextView, whose extra line fragment renders the
-        * empty line always), so matching it means rendering the line box in both. */}
-      {rec.text.endsWith("\n") && <br data-pf-sentinel="1" />}
+      {rec.text === "" && "\u200b"}
+      {sentinel && <br data-pf-sentinel="1" />}
     </span>
   );
 }
@@ -135,6 +189,10 @@ export interface RowEditorProps {
   isFocused: boolean;
   isDrillRoot: boolean;
   highlightColor: string;
+  /** The row's font size. Needed only for a markdown prompt: a list item's hanging
+   * indent is its marker's RENDERED width, which has to be measured at the size the row
+   * actually draws — and both renderers have to arrive at the same number. */
+  fontSize: number;
 }
 
 /** One row's main text. Unfocused rows are cheap static spans (thousands of them);
@@ -227,6 +285,17 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
   }, [rec, p.isFocused]);
 
   const value = local ?? rec?.text ?? "";
+  /** Markdown rendering is PROMPTS ONLY, and only when the text actually carries a
+   * marker. Prompts only because a bullet's glyph slot is a fixed
+   * `OutlineLayout.lineHeight(fontSize)` tall, so it would ride visibly high beside a
+   * 1.5em first line. Only when there is a marker so an ordinary prose prompt keeps the
+   * FLAT one-span-per-run DOM it has always had, which is what makes the substitution
+   * fast path provably untouched for it.
+   *
+   * This doubles as the run-DOM effect's kind dependency: ⌘3 on a FOCUSED row changes
+   * `rec.kind` without changing `value`, and a `[isFocused, value, styleEpoch]` dep list
+   * would leave the live editor rendering the old shape while the static branch flipped. */
+  const md = rec?.kind === "promptDraft" && hasMarkdown(value);
 
   // Rebuild the editor's run DOM from the model, then restore the caret. Runs on
   // every text/style change — the editor is CONTROLLED (browser DOM mutations are
@@ -235,11 +304,17 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
     if (!p.isFocused) return;
     const el = edRef.current;
     if (!el || composing.current) return;
-    const rebuilt = buildRunDom(el, value, {
-      bold: localBold.current,
-      italic: localItalic.current,
-      underline: localUnderline.current,
-    });
+    const rebuilt = buildRunDom(
+      el,
+      value,
+      {
+        bold: localBold.current,
+        italic: localItalic.current,
+        underline: localUnderline.current,
+      },
+      md,
+      p.fontSize,
+    );
     const req = caretReq.current;
     if (req && document.activeElement === el) {
       // Only touch the selection when it isn't already where we want it. On the
@@ -252,7 +327,7 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
       }
       caretReq.current = null;
     }
-  }, [p.isFocused, value, styleEpoch]);
+  }, [p.isFocused, value, styleEpoch, md]);
 
   // Apply focus + caret intent (after the run DOM exists — declared later on
   // purpose; layout effects run in declaration order).
@@ -267,7 +342,7 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
     else if (caretIntent.type === "end") at = len;
     else if (caretIntent.type === "at") at = Math.min(caretIntent.offset, len);
     else if (caretIntent.type === "lastLineStart")
-      at = lastVisualLineStart(el, value);
+      at = lastVisualLineStart(el, value, md, p.fontSize);
     setSelectionOffsets(el, at);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.isFocused, focusEpoch]);
@@ -381,6 +456,30 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
       }
     }
 
+    // A printable key in a markdown prompt, in the two places WebKit's paragraph model
+    // takes over: replacing a selection that SPANS a line boundary, and typing at a LINE
+    // START (measured — at the start of a blank line WebKit consumed that line's own
+    // newline instead of inserting before it). Typing anywhere INSIDE a line, the end of
+    // one included, stays native — that is where macOS text substitution lives, and a
+    // line start has no preceding word for it to act on anyway.
+    if (
+      md &&
+      !meta &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      e.key.length === 1 &&
+      (selStart !== selEnd
+        ? value.slice(selStart, selEnd).includes("\n")
+        : selStart > 0 && value[selStart - 1] === "\n")
+    ) {
+      e.preventDefault();
+      commitText(
+        value.slice(0, selStart) + e.key + value.slice(selEnd),
+        selStart + e.key.length,
+      );
+      return;
+    }
+
     // Command-modified shortcuts (the AutoSizingTextView.keyDown ports). ⌘B/⌘I/⌘U
     // must preventDefault even with no selection — the browser's own contenteditable
     // rich-text engine would mutate the DOM behind the model's back.
@@ -489,6 +588,33 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
       return;
     }
 
+    // A markdown prompt renders every line as its own BLOCK box — and a list line's
+    // marker and body as two more — which WebKit treats as PARAGRAPHS. Any delete that
+    // reaches across one of those boundaries runs its paragraph-merge logic instead of
+    // removing characters, and that logic does not agree with a flat string carrying
+    // literal newlines. Measured against a length-identical NON-markdown prompt, which is
+    // the ground truth: ^H at a blank-line start lost a newline, ⌥⌫ ate an extra line,
+    // ⌘⌫ lost one, ^D committed a phantom trailing newline, and a plain Backspace at a
+    // blank line took both.
+    //
+    // So a delete whose range CROSSES a newline is computed in the model and spliced
+    // (`lib/deleteRange.ts`). One that does not cross stays NATIVE, which is where
+    // grapheme clusters (a single Backspace removes a whole emoji), the
+    // revert-a-substitution behaviour, and macOS text substitution itself live.
+    // `resolveKey`'s empty-node `deleteEmpty` still runs first: an empty text has no
+    // boundary to cross, so nothing here claims it.
+    if (md && value !== "") {
+      const kind = deleteKind(e.nativeEvent);
+      if (kind) {
+        const r = deleteRange(kind, value, selStart, selEnd);
+        if (value.slice(r.from, r.to).includes("\n")) {
+          e.preventDefault();
+          commitText(value.slice(0, r.from) + value.slice(r.to), r.from);
+          return;
+        }
+      }
+    }
+
     let key: EditorKey = "other";
     if (e.key === "Enter") key = "enter";
     else if (e.key === "Tab") key = e.shiftKey ? "backtab" : "tab";
@@ -501,14 +627,28 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
     let atFirstLine = true;
     let atLastLine = true;
     if (key === "moveUp" || key === "shiftMoveUp") {
-      atFirstLine = caretLineInfo(el, value, selStart).atFirstLine;
+      atFirstLine = caretLineInfo(el, value, selStart, md, p.fontSize).atFirstLine;
     }
     if (key === "moveDown" || key === "shiftMoveDown") {
-      atLastLine = caretLineInfo(el, value, selEnd).atLastLine;
+      atLastLine = caretLineInfo(el, value, selEnd, md, p.fontSize).atLastLine;
     }
 
+    // Only Tab/⇧Tab and Enter read the line under the caret, so only they pay to look.
+    const isPrompt = rec.kind === "promptDraft";
+    const listLine =
+      isPrompt &&
+      (key === "tab" || key === "backtab") &&
+      mdLines(value).some(
+        (l) => l.start <= selEnd && l.end >= selStart && isList(l.kind),
+      );
+    const bullet =
+      isPrompt && key === "enter" ? bulletAtCaret(value, selStart, selEnd) : null;
+
     const decision = resolveKey(key, {
-      isPrompt: rec.kind === "promptDraft",
+      isPrompt,
+      listLine,
+      bulletLine: bullet !== null,
+      bulletBodyEmpty: bullet?.bodyEmpty ?? false,
       shift: e.shiftKey,
       cmd: meta,
       opt: e.altKey,
@@ -522,6 +662,34 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
       // and splice a literal newline into the model instead.
       e.preventDefault();
       insertText("\n");
+      return;
+    }
+    if (decision === "newlineBullet" && bullet) {
+      // Carry the marker verbatim — its own indent and its own bullet character, so the
+      // new item lines up under the one it came from whatever level that was.
+      e.preventDefault();
+      insertText("\n" + bullet.marker);
+      return;
+    }
+    if (decision === "endBullet" && bullet) {
+      // Enter on an empty bullet ENDS the list: the marker goes and the caret stays on
+      // the now-blank line. Without this the only way out of a list is to backspace the
+      // marker you did not type.
+      e.preventDefault();
+      commitText(
+        value.slice(0, bullet.lineStart) + value.slice(bullet.markerEnd),
+        bullet.lineStart,
+      );
+      return;
+    }
+    if (decision === "indentText" || decision === "outdentText") {
+      // Nest the BULLET, not the node. `indentLines` returns null when nothing would
+      // move (⇧Tab on a list already at the left margin), and then this is a no-op
+      // rather than an outdent of the node — Tab and ⇧Tab have to mean the same KIND of
+      // thing on the same line, or the gesture is unpredictable.
+      e.preventDefault();
+      const r = indentLines(value, selStart, selEnd, decision === "indentText");
+      if (r) commitText(r.text, r.start, r.end);
       return;
     }
     if (decision === "passthrough") {
@@ -623,7 +791,12 @@ export const RowEditor = memo(function RowEditor(p: RowEditorProps) {
           );
       }}
     >
-      <StaticText rec={rec} highlightColor={p.highlightColor} />
+      <StaticText
+        rec={rec}
+        highlightColor={p.highlightColor}
+        md={md}
+        fontSize={p.fontSize}
+      />
     </div>
   );
 });

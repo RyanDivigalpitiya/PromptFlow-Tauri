@@ -90,6 +90,62 @@ describe("serializeEditor", () => {
   it("keeps an emptied MIDDLE line's newlines", () => {
     expect(serializeEditor(editor("<span>mid\n\nend</span>"))).toBe("mid\n\nend");
   });
+
+  // A markdown prompt puts every line — and a list line's marker and body separately —
+  // in its own BLOCK, which multiplies the number of things WebKit can leave a line-box
+  // placeholder inside. The whole-editor rule above cannot see those: the text before an
+  // emptied bullet body ends in the MARKER, not in a newline. Both shapes were MEASURED
+  // in WebKit, and both committed a phantom line before the block rule was added.
+  it("skips WebKit's placeholder inside an emptied markdown CELL", () => {
+    // "# a\n- b", backspace the "b": the trailing bullet's body is a whole paragraph, so
+    // emptying it leaves the placeholder there. Committed "# a\n- \n" before the fix.
+    expect(
+      serializeEditor(
+        editor(
+          '<span class="md-line"><span># </span><span>a\n</span></span>' +
+            '<span class="md-line md-li"><span class="md-mark"><span>- </span></span>' +
+            '<span class="md-body"><br></span></span>',
+        ),
+      ),
+    ).toBe("# a\n- ");
+    // Selecting a MIDDLE line's "- " marker and deleting it empties `.md-mark`. That
+    // <br> is not even the last content-bearing part, so the positional rule never
+    // examines it — this committed "- one\n\ntwo" before the fix.
+    expect(
+      serializeEditor(
+        editor(
+          '<span class="md-line md-li"><span class="md-mark"><span>- </span></span>' +
+            '<span class="md-body"><span>one\n</span></span></span>' +
+            '<span class="md-line md-li"><span class="md-mark"><br></span>' +
+            '<span class="md-body"><span>two</span></span></span>',
+        ),
+      ),
+    ).toBe("- one\ntwo");
+  });
+
+  it("still counts a <br> in a markdown cell that has text beside it", () => {
+    // The dropped-text case, which is why the rule asks about the BLOCK's text rather
+    // than widening to "any <br> in a markdown prompt".
+    expect(
+      serializeEditor(
+        editor('<span class="md-line"><span>a</span><br><span>b</span></span>'),
+      ),
+    ).toBe("a\nb");
+  });
+
+  it("leaves a legitimately BLANK line alone — its block is not empty", () => {
+    // A blank line's block holds the "\n" itself, so `textContent` is not "" and the
+    // block rule does not fire. Its own line box comes from that newline, not a <br>.
+    expect(
+      serializeEditor(
+        editor(
+          '<span class="md-line"><span>a\n</span></span>' +
+            '<span class="md-line"><span>\n</span></span>' +
+            '<span class="md-line"><span>b</span></span>',
+        ),
+      ),
+    ).toBe("a\n\nb");
+  });
 });
 
 describe("selection offsets", () => {

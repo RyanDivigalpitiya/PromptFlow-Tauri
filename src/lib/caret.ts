@@ -2,6 +2,9 @@
  * previously a textarea — the mirror-measurement technique is element-agnostic).
  * Offsets are indices into the SERIALIZED text (text nodes in order, <br> = "\n"). */
 
+import { declFor, lineClass, markerHang } from "./runs";
+import { isList, mdLines } from "./mdLines";
+
 let mirrorEl: HTMLDivElement | null = null;
 
 function mirror(): HTMLDivElement {
@@ -23,6 +26,20 @@ function mirror(): HTMLDivElement {
 function syncTypography(el: HTMLElement, m: HTMLDivElement) {
   const cs = getComputedStyle(el);
   m.style.font = cs.font;
+  // The `font` SHORTHAND writes line-height as a px LENGTH ("16px / 21.6px …"), which
+  // silently drops the one property a markdown prompt depends on: `--row-line-height` is
+  // a UNITLESS number, so it re-multiplies against each descendant's own font-size and a
+  // 1.5em heading span gets a 32.4px line box for free. Pinned to px in the mirror, that
+  // heading would measure 21.6px and every line below it would be attributed to the
+  // wrong visual line. Re-assert it as the RATIO.
+  //
+  // Unit-guarded on purpose: a bare `isFinite` check cannot tell "21.6px" from "1.35",
+  // and dividing the latter by the font size would collapse the mirror to
+  // `line-height: 0.084` for EVERY kind, not just prompts.
+  const lh = cs.lineHeight;
+  const fs = parseFloat(cs.fontSize);
+  m.style.lineHeight =
+    lh.endsWith("px") && fs > 0 ? String(parseFloat(lh) / fs) : lh;
   m.style.letterSpacing = cs.letterSpacing;
   m.style.tabSize = cs.tabSize;
   // Fractional width: the hugging editor shrink-wraps to a fractional advance;
@@ -30,19 +47,98 @@ function syncTypography(el: HTMLElement, m: HTMLDivElement) {
   m.style.width = `${el.getBoundingClientRect().width}px`;
 }
 
+/** A plain-text span carrying one region's markdown decoration. The mirror measures
+ * unstyled text by design (see `caretTop`), but it cannot ignore the DECORATION: a
+ * heading is a different point size, so it wraps at a different column and occupies a
+ * taller line. */
+function mirrorSpan(text: string, heading: number, marker: boolean): HTMLSpanElement {
+  const sp = document.createElement("span");
+  const d = declFor({ text, bold: false, italic: false, underline: false, heading, marker });
+  if (d) Object.assign(sp.style, d);
+  sp.textContent = text;
+  return sp;
+}
+
+/** Lay `value.slice(0, offset)` into the mirror with the SAME line structure the editor
+ * renders, and return the element the caret marker belongs in.
+ *
+ * Lines are classified from the FULL value and then truncated, never classified from the
+ * prefix: with the caret sitting between "#" and its space, the prefix alone reads as
+ * plain and the line would measure at body size while the editor draws it as a title.
+ *
+ * No sentinel <br> is ever emitted here. The mirror is measured, not edited — its
+ * trailing line box comes from the marker span the caller appends, and an extra <br>
+ * after content already ending in "\n" ADDS a line box (measured: 18px vs 36px), which
+ * would put every ArrowDown one line early. */
+function buildMirrorLines(
+  m: HTMLDivElement,
+  value: string,
+  offset: number,
+  fontSize: number,
+): HTMLElement {
+  m.replaceChildren();
+  let host: HTMLElement = m;
+  for (const line of mdLines(value)) {
+    if (line.start > offset) break;
+    const lineEnd = line.end + (line.hasNewline ? 1 : 0);
+    const stop = Math.min(offset, lineEnd);
+    const level = line.kind === "h1" ? 1 : line.kind === "h2" ? 2 : line.kind === "h3" ? 3 : 0;
+    const el = document.createElement("span");
+    el.className = lineClass(line.kind);
+    if (isList(line.kind)) {
+      // The hang widens the block's padding and pulls its first line back, so a wrapped
+      // line breaks at a different column — the mirror has to carry it or it partitions
+      // lines the editor does not.
+      const hang = markerHang(fontSize, value.slice(line.start, line.markerEnd));
+      if (hang > 0) el.style.setProperty("--md-hang", `${hang}px`);
+    }
+    const markEnd = Math.min(stop, line.markerEnd);
+    el.appendChild(mirrorSpan(value.slice(line.start, markEnd), level, true));
+    el.appendChild(mirrorSpan(value.slice(markEnd, stop), level, false));
+    host = el;
+    m.appendChild(el);
+    if (stop >= offset) break;
+  }
+  return host;
+}
+
 /** Y offset (px) of the caret at `offset` inside `value` laid out like `el`.
  * NOTE: measures PLAIN text — styled runs (bold is wider) shift wrap points
  * slightly, so boundary detection is approximate on wrapped styled lines. */
-function caretTop(el: HTMLElement, value: string, offset: number): number {
+function caretTop(
+  el: HTMLElement,
+  value: string,
+  offset: number,
+  md = false,
+  fontSize = 16,
+): number {
   const m = mirror();
   syncTypography(el, m);
-  m.textContent = value.slice(0, offset);
+  let host: HTMLElement = m;
+  let heading = 0;
+  if (md) {
+    host = buildMirrorLines(m, value, offset, fontSize);
+    const line = mdLines(value).find(
+      (l) => offset >= l.start && offset <= l.end + (l.hasNewline ? 1 : 0),
+    );
+    heading = line?.kind === "h1" ? 1 : line?.kind === "h2" ? 2 : line?.kind === "h3" ? 3 : 0;
+  } else {
+    m.textContent = value.slice(0, offset);
+  }
   const marker = document.createElement("span");
   // A zero-width marker measures the NEXT character's line when the caret sits at a
   // soft-wrap boundary; a text node marker sticks to the previous line. Use "​".
   marker.textContent = "​";
-  m.appendChild(marker);
-  return marker.offsetTop;
+  // ...and it carries its LINE's point size, so its box top is the line box's top. Left
+  // at body size inside a 1.5em heading it is baseline-aligned, i.e. several px down,
+  // and `caretLineInfo`'s `y < lh*0.5` test loses most of its margin and inverts.
+  if (heading > 0) marker.style.fontSize = `${[0, 1.5, 1.25, 1.125][heading]}em`;
+  host.appendChild(marker);
+  // Rects rather than `offsetTop`: the marker now lands inside a nested host (a grid
+  // cell), and a rect difference is mirror-relative by construction rather than by
+  // relying on which ancestor happens to be positioned. It is also fractional where
+  // `offsetTop` rounds, which the binary search in `lastVisualLineStart` prefers.
+  return marker.getBoundingClientRect().top - m.getBoundingClientRect().top;
 }
 
 export interface CaretLineInfo {
@@ -54,11 +150,13 @@ export function caretLineInfo(
   el: HTMLElement,
   value: string,
   offset: number,
+  md = false,
+  fontSize = 16,
 ): CaretLineInfo {
   if (value.length === 0) return { atFirstLine: true, atLastLine: true };
   const lh = parseFloat(getComputedStyle(el).lineHeight) || 18;
-  const y = caretTop(el, value, offset);
-  const yEnd = caretTop(el, value, value.length);
+  const y = caretTop(el, value, offset, md, fontSize);
+  const yEnd = caretTop(el, value, value.length, md, fontSize);
   return {
     atFirstLine: y < lh * 0.5,
     atLastLine: y > yEnd - lh * 0.5,
@@ -67,17 +165,22 @@ export function caretLineInfo(
 
 /** Offset of the START of the last visual line (Arrow-Up entering a wrapped node from
  * below lands here — the mirror of Arrow-Down landing on the top line). */
-export function lastVisualLineStart(el: HTMLElement, value: string): number {
+export function lastVisualLineStart(
+  el: HTMLElement,
+  value: string,
+  md = false,
+  fontSize = 16,
+): number {
   const len = value.length;
   if (len === 0) return 0;
-  const lastTop = caretTop(el, value, len);
+  const lastTop = caretTop(el, value, len, md, fontSize);
   // offsetTop is monotone in the caret offset — binary search the first offset on
   // the last visual line.
   let lo = 0;
   let hi = len;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
-    if (caretTop(el, value, mid) >= lastTop) hi = mid;
+    if (caretTop(el, value, mid, md, fontSize) >= lastTop) hi = mid;
     else lo = mid + 1;
   }
   return lo;
@@ -124,6 +227,32 @@ function zeroWidthBrs(el: HTMLElement): Set<Node> {
 
   const zero = new Set<Node>();
   for (const p of parts) if (p.br && isSentinel(p.node)) zero.add(p.node);
+  // A markdown prompt renders every LINE — and a list line's MARKER and BODY separately —
+  // as its own block box, so WebKit drops a line-box placeholder the moment any one of
+  // THOSE is emptied, not only when the editor's last line is. The rule below cannot see
+  // those: it asks whether the text before the <br> ends in "\n", and before an emptied
+  // bullet body the text ends in the MARKER ("- "). Measured in WebKit, both ways in:
+  // backspacing the last character of a trailing bullet's body committed "# a\n- \n" for
+  // "# a\n- ", and deleting a middle line's "- " marker committed "- one\n\ntwo\n- three"
+  // for "- one\ntwo\n- three" — a phantom line each time, persisted and synced.
+  //
+  // So ask the same question of the BLOCK instead: every newline in a markdown prompt is
+  // a literal character in a text node, so a block that renders NO text carries no
+  // newline of its own and a <br> alone in it is furniture. A dropped <br> — the one
+  // insertion path we don't intercept — still counts, because a drop leaves text beside
+  // it; and a legitimately blank line is not empty either, its block holds the "\n".
+  for (const p of parts) {
+    if (!p.br || zero.has(p.node)) continue;
+    const host = (p.node as ChildNode).parentElement;
+    if (
+      host &&
+      host !== el &&
+      host.matches(".md-line, .md-mark, .md-body") &&
+      host.textContent === ""
+    ) {
+      zero.add(p.node);
+    }
+  }
   // The last part that renders anything: an empty text node is no more content than a
   // sentinel is.
   let i = parts.length - 1;
@@ -228,8 +357,38 @@ function pointAtOffset(
   let last: { node: Node; offset: number } = { node: el, offset: 0 };
   const walk = (n: Node): { node: Node; offset: number } | null => {
     if (n.nodeType === Node.TEXT_NODE) {
-      const len = (n.nodeValue ?? "").length;
-      if (remaining <= len) return { node: n, offset: remaining };
+      const v = n.nodeValue ?? "";
+      const len = v.length;
+      if (remaining <= len) {
+        // A boundary offset belongs to the node BEFORE it. That is harmless in the flat
+        // DOM, which is one inline flow — but in a MARKDOWN prompt every line is its own
+        // block and carries its terminating "\n" as the last character INSIDE it, so a
+        // LINE-START offset resolves to the end of the PREVIOUS block: a position after
+        // a newline that WebKit gives no line box of its own (the measured fact the
+        // sentinel <br> exists for). Measured in WebKit: the caret paints at the end of
+        // the previous line and the next character typed lands BEFORE the newline — so
+        // Enter in a prompt (which puts the caret at exactly such an offset) then typing
+        // wrote onto the line you just left. Hand back the NEXT line's block instead.
+        //
+        // This also reaches the trailing empty line: for a text ending in "\n" the
+        // sentinel sits alone in its own block, which the walk below can otherwise never
+        // enter, so a `{type: "end"}` focus landed a line high.
+        if (remaining === len && v.endsWith("\n")) {
+          const next = (n.parentElement?.closest(".md-line") ?? null)?.nextElementSibling;
+          if (next && el.contains(next)) {
+            // Descend to the first TEXT position in that block, not the element position
+            // in front of it: WebKit resolves an element position by its own rules, and
+            // typing at one measured as consuming the blank line's newline. A text offset
+            // is unambiguous. A block with no text at all (the trailing line, whose only
+            // child is the sentinel <br>) has no such position, so it keeps the element
+            // one — which is exactly where that line's caret belongs.
+            const w = document.createTreeWalker(next, NodeFilter.SHOW_TEXT);
+            const first = w.nextNode();
+            return first ? { node: first, offset: 0 } : { node: next, offset: 0 };
+          }
+        }
+        return { node: n, offset: remaining };
+      }
       remaining -= len;
       last = { node: n, offset: len };
       return null;

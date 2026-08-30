@@ -187,6 +187,40 @@ function tauriStub(snapshot) {
           });
         }
       }
+      // A new command whose ANSWER the caller acts on: `applyTemplate` focuses
+      // `newNode`, and the catch-all's `null` would make that assertion vacuous. The
+      // TEXT still only lands via __PF_QA_DELTA — this harness renders states.
+      if (cmd === "apply_prompt_template") return { newNode: args.node, expand: [], moved: false };
+      // The settings sheet loads sync config on open, and SyncSection reads
+      // `config.deviceId` unconditionally — without these the WHOLE panel throws during
+      // render and nothing in it is testable.
+      if (cmd === "sync_get_config")
+        return {
+          url: "",
+          accessClientId: "",
+          enabled: false,
+          hasBearer: false,
+          hasAccessSecret: false,
+          deviceId: "qa-device-00000000",
+        };
+      if (cmd === "sync_status")
+        return {
+          configured: false,
+          syncing: false,
+          lastSyncedAt: null,
+          error: null,
+          failures: 0,
+          pending: 0,
+          blockedDeletes: null,
+        };
+      if (cmd === "prompt_templates")
+        return [
+          {
+            id: "New-Feature-Discuss-Plan",
+            defaultName: "New Feature Discuss Plan",
+            name: "New Feature Discuss Plan",
+          },
+        ];
       return { newNode: null, expand: [], moved: false };
     },
   };
@@ -200,6 +234,11 @@ function tauriStub(snapshot) {
    * defaults to a PEER window, the stricter case: no echo guard drains it, and it is the
    * path a change made in another window travels. `rev` advances by exactly 1 so the
    * mirror adopts the ops instead of falling back to a full snapshot resync. */
+  /** Deliver a Rust→frontend EVENT the way tauri would. The native ⋯ menu is an NSMenu
+   * running AppKit's own modal loop, so Playwright can neither see nor click it — the
+   * only testable half is the round trip either side of it: the invoke that opens it,
+   * and what the app does with the selection it sends back. */
+  window.__PF_QA_EVENT = (event, payload) => emit(event, payload);
   window.__PF_QA_DELTA = (ops, origin = "w1") => {
     for (const op of ops) {
       if (op.type === "upsert") nodes.set(op.node.id, { ...op.node });
@@ -1319,6 +1358,444 @@ const foldX = folded.lines.map((l) => l.x);
 // Indent STEP per level, measured off the rendered dashes: depth 0 → 1 → 2.
 const foldStep = [foldX[1] - foldX[0], foldX[2] - foldX[1]];
 
+// ---- 9. Prompt templates + markdown in the prompt panel ----------------------
+// Two features that meet in one gesture: the ⋯ menu's Prompt Templates submenu fills a
+// prompt, and the panel renders what lands there as markdown.
+//
+// The menu itself is INVISIBLE here — it is a native NSMenu running AppKit's modal loop —
+// so what is testable is the round trip either side of it: the invoke that opens it, and
+// what the app does with the selection Rust routes back (staged with __PF_QA_EVENT).
+// The menu's CONTENTS are `cargo test`'s job (`commands::tests::row_menu_items`), and the
+// two suites meet on the action string `tpl-<id>`.
+//
+// Its own page and fixture: the sweep sections above anchor on "the last row" and on the
+// empty background under the list, so the main fixture must not grow.
+const MD_TEXT =
+  "# New Feature: Discuss & Plan\n\n## Overall Goal\nDiscuss Forming a Development Plan\n\n" +
+  "## Immediate Goal(s)\n" +
+  "1. First, answer the questions raised above before sketching the plan and we will discuss.\n" +
+  "2. Second, bring up concerns.\n\n- a bullet\n  - a nested bullet\n- 2024. That was the year";
+const MD_NODES = [
+  node("m1", null, 0, "before", "bulletPoint"),
+  node("m2", null, 1024, MD_TEXT, "promptDraft"),
+  // The control: prose with no marker anywhere must keep the FLAT one-span DOM the
+  // editor has always built, which is what keeps the substitution fast path untouched.
+  node("m3", null, 2048, "plain prose prompt, no markdown at all", "promptDraft"),
+  // An EMPTY prompt — the one the ⋯ button used to delete out from under the menu.
+  node("m4", null, 3072, "", "promptDraft"),
+  // Ends in a NEWLINE — the trailing-line sentinel case, which is where the static/live
+  // split has shipped bugs twice (21.6px on the main text, 17.7px on the note).
+  node("m6", null, 4096, "# Title\n- item\n", "promptDraft"),
+  // Completed: the strike + dim live on the WRAPPER, and block children have to inherit
+  // them the way inline ones did.
+  node("m7", null, 5120, "# Done\n- and dusted", "promptDraft", {
+    isCompleted: true,
+    completedAt: T,
+  }),
+  node("m5", null, 6144, "after", "bulletPoint"),
+  // The EDITING control: the same text in a BULLET row. Markdown rendering is
+  // prompt-only, so this is the same string at the same offsets rendered the old flat
+  // way — anything the markdown row does differently to a keystroke is a defect.
+  node("m8", null, 7168, "## a\n- b\n\nc", "promptDraft"),
+  node("m9", null, 8192, "## a\n- b\n\nc", "bulletPoint"),
+];
+
+const mp = await b.newPage({
+  // Narrow on purpose: the hanging indent only shows on a line long enough to WRAP, and
+  // at a comfortable width the ordered item fits on one line and proves nothing. TALL
+  // on purpose too: the outline is virtualized, so the editing-parity pair at the bottom
+  // of the fixture has to be rendered to be typed into.
+  viewport: { width: 700, height: 1400 },
+  deviceScaleFactor: 2,
+  colorScheme: "dark",
+});
+mp.on("pageerror", (e) => errors.push(String(e)));
+mp.on("console", (m) => {
+  if (m.type() === "error") errors.push(m.text());
+});
+await mp.addInitScript(tauriStub, {
+  rev: 1,
+  nodes: MD_NODES,
+  canUndo: false,
+  canRedo: false,
+});
+await mp.addInitScript(() =>
+  localStorage.setItem(
+    "pf.win.main",
+    JSON.stringify({
+      collapsed: [],
+      hideCompleted: false,
+      fontSize: 16,
+      drill: null,
+      focusPaneExpanded: false,
+      focusPaneLayout: "top",
+      focusSidebarWidth: 260,
+      focusTopHeight: "auto",
+    }),
+  ),
+);
+await mp.goto(URL_, { waitUntil: "domcontentloaded" });
+await mp.waitForSelector(".node-row", { timeout: 15000 });
+await mp.addStyleTag({ content: "html,body{background:#101014 !important}" });
+await mp.waitForTimeout(300);
+
+const mdRow = mp.locator(".node-row.kind-promptDraft").first();
+
+/** Every rendered line of the markdown prompt: its box, the class that decides its
+ * layout, the first ink's size/weight/colour, and — for a list item — the x its BODY
+ * column starts at, which is the column a wrapped line has to come back to. */
+const readLines = (sel) =>
+  mp.evaluate((s) => {
+    const host = document.querySelector(s);
+    const rows = [...host.querySelectorAll(":scope > .md-line")];
+    return rows.map((l) => {
+      // A line is ONE block: its marker is the first inline span and its body the
+      // rest, so the "body column" a wrapped line has to return to is the first
+      // character AFTER the marker, not a separate box.
+      const spans = [...l.querySelectorAll(":scope > span")];
+      const mark = l.classList.contains("md-li") || /^#{1,3} /.test(l.textContent ?? "")
+        ? spans[0]
+        : null;
+      const ink = spans[spans.length - 1] ?? null;
+      const body = spans.length > 1 ? spans[1] : null;
+      const cs = ink ? getComputedStyle(ink) : null;
+      const r = l.getBoundingClientRect();
+      return {
+        cls: l.className,
+        display: getComputedStyle(l).display,
+        top: +r.top.toFixed(2),
+        height: +r.height.toFixed(2),
+        fontSize: cs ? parseFloat(cs.fontSize) : null,
+        weight: cs ? cs.fontWeight : null,
+        markColor: mark ? getComputedStyle(mark).color : null,
+        bodyX: body ? +body.getBoundingClientRect().left.toFixed(2) : null,
+      };
+    });
+  }, sel);
+
+const mdStatic = await readLines(".node-row.kind-promptDraft .node-text-static");
+const plainHtml = await mp.evaluate(() => {
+  const rows = [...document.querySelectorAll(".node-row.kind-promptDraft")];
+  const el = rows[1].querySelector(".node-text-static");
+  return { html: el.innerHTML, hasMdLine: !!el.querySelector(".md-line") };
+});
+await shot("md-prompt", mp.locator(".app-body"));
+
+/** The hanging indent, measured where it actually shows: an ordered item long enough to
+ * wrap. Each visual line's first ink x comes from a Range over the body's text node —
+ * `getClientRects` on the body returns its border box, not one rect per line. */
+const hang = await mp.evaluate(() => {
+  const li = [...document.querySelectorAll(".node-row.kind-promptDraft .md-line.md-li")].find(
+    (l) => (l.textContent || "").startsWith("1. "),
+  );
+  const tn = [...li.querySelectorAll(":scope > span")][1].firstChild;
+  const rg = document.createRange();
+  const xs = [];
+  for (let i = 0; i < tn.data.length; i++) {
+    rg.setStart(tn, i);
+    rg.setEnd(tn, i + 1);
+    const r = rg.getBoundingClientRect();
+    const last = xs[xs.length - 1];
+    if (!last || Math.abs(last.y - r.top) > 5) xs.push({ y: +r.top.toFixed(1), x: +r.left.toFixed(2) });
+  }
+  return {
+    lines: xs,
+    bodyX: +[...li.querySelectorAll(":scope > span")][1].getBoundingClientRect().left.toFixed(2),
+    markX: +li.querySelector(":scope > span").getBoundingClientRect().left.toFixed(2),
+  };
+});
+
+/** Static vs live: focusing a row must not move one pixel of it. The documented failure
+ * is a row that grows or shrinks on click (measured at 21.6px once, 17.7px on the note),
+ * and mixed line heights are a fresh way to reproduce it. */
+const boxOf = (sel) =>
+  mp.evaluate((s) => {
+    const r = document.querySelector(s).getBoundingClientRect();
+    return { w: +r.width.toFixed(2), h: +r.height.toFixed(2) };
+  }, sel);
+const parityStatic = await boxOf(".node-row.kind-promptDraft .node-text-wrap");
+const hugStatic = await boxOf(".node-row.kind-promptDraft .editor-hug");
+await mdRow.locator(".node-text-wrap").click();
+await mp.waitForTimeout(150);
+const parityLive = await boxOf(".node-row.kind-promptDraft .node-editor");
+const hugLive = await boxOf(".node-row.kind-promptDraft .editor-hug");
+const mdLive = await readLines(".node-row.kind-promptDraft .node-editor");
+
+/** The substitution fast path, measured by NODE IDENTITY — `isControlledByAutomation()`
+ * turns real text replacement off in WebKit, so what is checkable is the mechanism it
+ * needs: that our input handler did NOT `replaceChildren` under WebKit's feet between
+ * its synchronous `input` dispatch and its own substitution pass.
+ *
+ * Two cases, and the second is what makes the first mean something. Typing INSIDE a
+ * heading's body changes only that text node's data, the model agrees, `domMatchesRuns`
+ * returns true and the node survives. Typing at a list marker's BOUNDARY does not:
+ * `pointAtOffset` resolves that offset to the END of the marker span's text node (a
+ * boundary belongs to the node before it), so WebKit types into the MARKER, the model
+ * says the marker is still "- ", and the editor rebuilds. That is the honest rebuild
+ * set — a marker-creating keystroke AND the first character typed at a marker boundary. */
+const typeAt = async (pick, key) => {
+  await mp.evaluate((f) => {
+    const el = document.querySelector(".node-row.kind-promptDraft .node-editor");
+    const line = [...el.querySelectorAll(".md-line")].find((l) =>
+      (l.textContent || "").startsWith(f.starts),
+    );
+    const span = line.querySelectorAll(":scope > span")[f.span];
+    const tn = span.firstChild;
+    window.__probeNode = tn;
+    const rg = document.createRange();
+    rg.setStart(tn, f.offset < 0 ? tn.data.length : f.offset);
+    rg.collapse(true);
+    const s = getSelection();
+    s.removeAllRanges();
+    s.addRange(rg);
+  }, pick);
+  await mp.keyboard.type(key);
+  await mp.waitForTimeout(80);
+  return mp.evaluate(() => {
+    const n = window.__probeNode;
+    return { alive: !!n && n.isConnected, text: n ? n.data : null };
+  });
+};
+// Mid-word in "Overall Goal", the heading's BODY span (span 1; span 0 is the "## ").
+const typeInHeading = await typeAt({ starts: "## Overall Goal", span: 1, offset: 8 }, "X");
+// The end of "- ", which is where model offset 2 resolves to.
+const typeAfterMarker = await typeAt({ starts: "- a bullet", span: 0, offset: -1 }, "Y");
+await mp.keyboard.press("Escape");
+await mp.waitForTimeout(80);
+
+/** The template round trip. The NSMenu is invisible, so: assert the ⋯ click fires the
+ * invoke that opens it, then stage the selection Rust would route back and assert what
+ * the app does with it. `tpl-<id>` is the string the cargo suite pins too. */
+const emptyRow = mp.locator(".node-row.kind-promptDraft").nth(2);
+// The PANEL, not the text: an empty prompt's `.node-text-wrap` is a zero-width
+// inline-block, which Playwright will not click. The panel focuses the editor on any
+// press in its blank space, which is how you would open an empty prompt by hand anyway.
+await emptyRow.locator(".prompt-panel").click({ position: { x: 200, y: 12 } });
+await mp.waitForTimeout(80);
+await emptyRow.locator('.row-action[aria-label="Node menu"]').click();
+// Long enough for the blur-prune's setTimeout(…, 0) to have fired if it were going to.
+await mp.waitForTimeout(200);
+const menuInvoke = await mp.evaluate(() => window.__PF_QA_CALLS.at(-1));
+const pruneCalls = await mp.evaluate(() =>
+  window.__PF_QA_CALLS.filter((c) => c.cmd === "delete_node").map((c) => c.args),
+);
+
+await mp.evaluate(() =>
+  window.__PF_QA_EVENT("row-menu-action", {
+    action: "tpl-New-Feature-Discuss-Plan",
+    node: "m4",
+  }),
+);
+await mp.waitForTimeout(120);
+const applyInvoke = await mp.evaluate(() =>
+  window.__PF_QA_CALLS.filter((c) => c.cmd === "apply_prompt_template").at(-1),
+);
+// The store answers with a delta; stage it, then read what the panel makes of it.
+await mp.evaluate((text) => {
+  const n = { id: "m4", parent: null, position: 3072, text, note: "", kind: "promptDraft",
+    isCompleted: false, isHighlighted: false, isCollapsed: false,
+    boldRanges: [], italicRanges: [], underlineRanges: [],
+    createdAt: 1700000000, updatedAt: 1700000000, completedAt: null };
+  window.__PF_QA_DELTA([{ type: "upsert", node: n }], "main");
+}, MD_TEXT);
+await mp.waitForTimeout(200);
+const applied = await mp.evaluate(() => {
+  const rows = [...document.querySelectorAll(".node-row.kind-promptDraft")];
+  const row = rows[2];
+  const el = row.querySelector(".node-editor, .node-text-static");
+  const sel = getSelection();
+  return {
+    lines: el.querySelectorAll(".md-line").length,
+    firstFontSize: parseFloat(getComputedStyle(el.querySelector(".md-line span")).fontSize),
+    focused: !!row.querySelector(".node-editor"),
+    caretAtStart:
+      sel.rangeCount > 0 && sel.getRangeAt(0).collapsed
+        ? sel.getRangeAt(0).startOffset === 0
+        : null,
+  };
+});
+await shot("md-template-applied", mp.locator(".app-body"));
+
+/** The trailing-newline case, static vs live. A text ending in "\n" has one more
+ * (empty) line than it has newlines, and the sentinel <br> is what gives that line a box
+ * — get it wrong in only one of the two renderers and the row jumps on click, which is
+ * the documented failure this pairing exists to catch. */
+const nlRow = mp.locator(".node-row.kind-promptDraft").nth(3);
+const nlStatic = await mp.evaluate(() => {
+  const el = [...document.querySelectorAll(".node-row.kind-promptDraft")][3]
+    .querySelector(".node-text-wrap");
+  return { h: +el.getBoundingClientRect().height.toFixed(2), lines: el.querySelectorAll(".md-line").length };
+});
+await nlRow.locator(".prompt-panel").click({ position: { x: 200, y: 12 } });
+await mp.waitForTimeout(150);
+const nlLive = await mp.evaluate(() => {
+  const el = [...document.querySelectorAll(".node-row.kind-promptDraft")][3]
+    .querySelector(".node-editor");
+  return { h: +el.getBoundingClientRect().height.toFixed(2), lines: el.querySelectorAll(".md-line").length };
+});
+await mp.keyboard.press("Escape");
+await mp.waitForTimeout(100);
+
+/** A completed prompt: the strike and the 0.55 dim are declared on the WRAPPER, and its
+ * children are now block boxes rather than inline ones. */
+const doneRow = await mp.evaluate(() => {
+  const el = [...document.querySelectorAll(".node-row.kind-promptDraft")][4]
+    .querySelector(".node-text-static");
+  const cs = getComputedStyle(el);
+  const ink = getComputedStyle(el.querySelector(".md-line span"));
+  return {
+    decoration: cs.textDecorationLine,
+    opacity: +cs.opacity,
+    // `text-decoration` is NOT inherited — a child's computed value is "none" while the
+    // line still paints through it. What decides whether it does is the child's box:
+    // CSS propagates a decoration into in-flow BLOCK-LEVEL descendants, and skips atomic
+    // inlines and out-of-flow boxes. So the checkable claim is the box type.
+    inFlowBlocks: [...el.querySelectorAll(".md-line")].every((l) => {
+      const d = getComputedStyle(l);
+      return (
+        (d.display === "block" || d.display === "grid") &&
+        d.position === "static" &&
+        d.float === "none"
+      );
+    }),
+    inkDecoration: ink.textDecorationLine,
+    lines: el.querySelectorAll(".md-line").length,
+  };
+});
+
+/** EDITING parity against a flat row holding the SAME text.
+ *
+ * Rendering each line as its own block makes WebKit treat it as a PARAGRAPH, and its
+ * paragraph logic does not agree with a flat string carrying literal newlines. Measured
+ * before the interception went in: Backspace at a blank-line start took BOTH newlines,
+ * ⌥⌫ ate an extra line, ^H and ⌘⌫ lost one, ^D committed a phantom trailing newline, and
+ * typing at a blank-line start consumed that line's own newline. A two-column grid for
+ * the hanging indent additionally put a SECOND caret position at one model offset, so an
+ * ArrowRight was silently swallowed at every list marker.
+ *
+ * The bullet row is the control: same string, same offsets, flat DOM. */
+const PARITY_TEXT = "## a\n- b\n\nc";
+const parityRow = (md) =>
+  md
+    ? mp.locator(".node-row.kind-promptDraft").nth(5)
+    : mp.locator(".node-row.kind-bulletPoint").nth(2);
+/** Click the first glyph, ArrowRight `k` times, then run `keys`; report the text sent. */
+async function parityRun(md, k, keys) {
+  await mp.keyboard.press("Escape");
+  await mp.waitForTimeout(50);
+  const box = await parityRow(md).evaluate((row) => {
+    const el = row.querySelector(".node-text-static, .node-editor");
+    const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const n = w.nextNode();
+    const rg = document.createRange();
+    rg.setStart(n, 0);
+    rg.setEnd(n, 1);
+    const r = rg.getBoundingClientRect();
+    return { x: r.left + 1, y: r.top + r.height / 2 };
+  });
+  await mp.mouse.click(box.x, box.y);
+  await mp.waitForTimeout(70);
+  for (let j = 0; j < k; j++) await mp.keyboard.press("ArrowRight");
+  for (const key of keys) {
+    if (key.length === 1) await mp.keyboard.type(key);
+    else await mp.keyboard.press(key);
+  }
+  await mp.waitForTimeout(90);
+  return mp.evaluate(() => window.__PF_QA_CALLS.filter((c) => c.cmd === "set_text").at(-1)?.args?.text ?? null);
+}
+const PARITY_CASES = [
+  ["Backspace at a blank-line start", 9, ["Backspace"]],
+  ["typing at a blank-line start", 9, ["X"]],
+  ["⌥⌫ just after a list marker", 7, ["Alt+Backspace"]],
+  ["^H at a blank-line start", 9, ["Control+h"]],
+  ["⌘⌫ at a line start", 5, ["Meta+Backspace"]],
+  ["ArrowRight past a list marker, then type", 8, ["X"]],
+];
+const parity = [];
+for (const [name, k, keys] of PARITY_CASES) {
+  const a = await parityRun(true, k, keys);
+  const b = await parityRun(false, k, keys);
+  parity.push({ name, md: a, flat: b, same: a === b });
+}
+
+/** Tab / ⇧Tab on a prompt's LIST line nests the bullet in the TEXT; anywhere else in a
+ * prompt it still indents the NODE, which is what the outline gesture means. Driven
+ * through the real editor: the invoke that comes back says which of the two happened. */
+const tabRow = () => mp.locator(".node-row.kind-promptDraft").nth(5); // "## a\n- b\n\nc"
+async function tabAt(k, keys) {
+  await mp.keyboard.press("Escape");
+  await mp.waitForTimeout(50);
+  const box = await tabRow().evaluate((row) => {
+    const el = row.querySelector(".node-text-static, .node-editor");
+    const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const n = w.nextNode();
+    const rg = document.createRange();
+    rg.setStart(n, 0);
+    rg.setEnd(n, 1);
+    const r = rg.getBoundingClientRect();
+    return { x: r.left + 1, y: r.top + r.height / 2 };
+  });
+  await mp.mouse.click(box.x, box.y);
+  await mp.waitForTimeout(70);
+  for (let j = 0; j < k; j++) await mp.keyboard.press("ArrowRight");
+  for (const key of keys) await mp.keyboard.press(key);
+  await mp.waitForTimeout(110);
+  return mp.evaluate(() => {
+    const c = window.__PF_QA_CALLS.at(-1);
+    return { cmd: c?.cmd, text: c?.args?.text ?? null };
+  });
+}
+// Offset 7 is inside "- b"; offset 2 is inside the "## a" heading.
+const tabOnList = await tabAt(7, ["Tab"]);
+const tabTwice = await tabAt(7, ["Tab", "Tab"]);
+const untabOnList = await tabAt(7, ["Tab", "Shift+Tab"]);
+const untabAtMargin = await tabAt(7, ["Shift+Tab"]);
+const tabOnHeading = await tabAt(2, ["Tab"]);
+
+/** Enter on a bulleted line carries the bullet; on an EMPTY one it ends the list.
+ * "## a\n- b\n\nc": offset 8 is the END of "- b", 7 is between its marker and its "b",
+ * and 3 is just past the heading's "## ". */
+const enterOnBullet = await tabAt(8, ["Enter"]);
+const enterThenType = await tabAt(8, ["Enter", "z"]);
+const enterOnEmptyBullet = await tabAt(8, ["Enter", "Enter"]);
+const enterKeepsIndent = await tabAt(8, ["Tab", "Enter", "z"]);
+const enterOnHeading = await tabAt(3, ["Enter"]);
+const enterMidItem = await tabAt(7, ["Enter"]);
+
+/** Settings ▸ Prompt Templates: the names the ⋯ menu shows are editable here, and the
+ * override is written to the BACKEND settings table (not localStorage) because the menu
+ * is built in Rust and cannot see the webview's storage. */
+await mp.locator('button[title="Settings"]').click();
+await mp.waitForSelector(".settings-panel", { timeout: 5000 });
+await mp.waitForTimeout(250);
+const tplPanel = await mp.evaluate(() => {
+  const row = document.querySelector(".settings-tpl");
+  const input = row?.querySelector("input");
+  return {
+    sections: [...document.querySelectorAll(".settings-section")].map((x) => x.textContent),
+    rows: document.querySelectorAll(".settings-tpl").length,
+    label: row?.closest(".settings-row")?.querySelector("span")?.textContent ?? null,
+    value: input?.value ?? null,
+    placeholder: input?.getAttribute("placeholder") ?? null,
+    resetDisabled: row?.querySelector("button")?.disabled ?? null,
+  };
+});
+await mp.locator(".settings-tpl input").fill("New Feature: Discuss & Plan");
+await mp.waitForTimeout(150);
+const renamed = await mp.evaluate(() => ({
+  sent: window.__PF_QA_CALLS.filter((c) => c.cmd === "set_prompt_template_name").at(-1),
+  resetDisabled: document.querySelector(".settings-tpl button").disabled,
+  value: document.querySelector(".settings-tpl input").value,
+}));
+await shot("settings-templates", mp.locator(".settings-panel"));
+await mp.locator(".settings-tpl button").click();
+await mp.waitForTimeout(150);
+const afterReset = await mp.evaluate(() => ({
+  sent: window.__PF_QA_CALLS.filter((c) => c.cmd === "set_prompt_template_name").at(-1),
+  value: document.querySelector(".settings-tpl input").value,
+  resetDisabled: document.querySelector(".settings-tpl button").disabled,
+}));
+
 // ---- Report ------------------------------------------------------------------
 const eq = (a, b, tol = 0.6) => Math.abs(a - b) <= tol;
 const distinct = (xs) => new Set(xs.filter((v) => v != null)).size;
@@ -1444,6 +1921,65 @@ const checks = [
   ["fold: siblings at one depth share an indent", eq(foldX[1], foldX[3]) && eq(foldX[0], foldX[4]) && eq(foldX[3], foldX[5])],
   ["fold: the rows below SLIDE up as the block leaves (>8 interpolated frames)", foldSlide.frames > 8 && foldSlide.travel > 40],
   ["fold: …and land before `.rows-animating` drops — the remainder is never snapped", foldSlide.settled !== null && foldSlide.settled <= 1],
+  // --- prompt markdown ---
+  ["md: a prose prompt with no marker keeps the FLAT one-span DOM", !plainHtml.hasMdLine && plainHtml.html === "<span>plain prose prompt, no markdown at all</span>"],
+  ["md: every line of a markdown prompt is its own block", mdStatic.length === 12],
+  ["md: # renders 1.5x the body, ## 1.25x", eq(mdStatic[0].fontSize, 24, 0.2) && eq(mdStatic[2].fontSize, 20, 0.2)],
+  ["md: …at 600, so ⌘B's 700 is still heavier inside a heading", mdStatic[0].weight === "600"],
+  ["md: a heading's line box grows with it — the unitless --row-line-height", eq(mdStatic[0].height, 32.4, 0.5)],
+  ["md: a plain line stays one body line", eq(mdStatic[3].height, 21.6, 0.5)],
+  // `cls.includes("md-li")` would be true for EVERY line — "md-li" is a prefix of
+  // "md-line". Split, or the check passes on nothing.
+  ["md: an ordered item hangs its wrap, a heading does not", mdStatic[6].cls.split(" ").includes("md-li") && !mdStatic[5].cls.split(" ").includes("md-li")],
+  ["md: the marker is dimmed, not the body", /0\.3/.test(mdStatic[6].markColor ?? "")],
+  ["md: a nested bullet indents past a flat one", mdStatic[10].bodyX > mdStatic[9].bodyX + 4],
+  ["md: '- 2024. That was the year' is a BULLET, not item 2024", eq(mdStatic[11].bodyX, mdStatic[9].bodyX)],
+  ["md: a wrapped list line hangs under its own text", hang.lines.length > 1 && hang.lines.every((l) => eq(l.x, hang.lines[0].x, 0.5))],
+  ["md: …which is right of the marker, not at the left edge", hang.lines[0].x > hang.markX + 4 && eq(hang.lines[0].x, hang.bodyX, 0.5)],
+  ["md: focusing the row changes NOTHING about its box", eq(parityStatic.w, parityLive.w) && eq(parityStatic.h, parityLive.h)],
+  ["md: …nor about the flex box around it", eq(hugStatic.h, hugLive.h)],
+  ["md: the live editor builds the same lines as the static render", JSON.stringify(mdLive.map((l) => [l.cls, l.height])) === JSON.stringify(mdStatic.map((l) => [l.cls, l.height]))],
+  ["md: typing inside a heading keeps WebKit's own text node — the substitution fast path", typeInHeading.alive],
+  ["md: …and the check discriminates: typing at a marker boundary rebuilds", !typeAfterMarker.alive],
+  // --- prompt templates ---
+  ["templates: the ⋯ button opens the native menu for the pressed node", menuInvoke.cmd === "popup_row_menu" && menuInvoke.args.node === "m4"],
+  ["templates: …and does NOT blur-prune the empty prompt out from under it", pruneCalls.length === 0],
+  ["templates: a tpl- selection invokes apply_prompt_template with the BARE id", applyInvoke?.cmd === "apply_prompt_template" && applyInvoke.args.node === "m4" && applyInvoke.args.template === "New-Feature-Discuss-Plan"],
+  ["templates: the applied template renders as markdown in the panel", applied.lines === 12 && eq(applied.firstFontSize, 24, 0.2)],
+  ["templates: …with the caret at the start of it", applied.focused && applied.caretAtStart === true],
+  ["md: a text ending in a newline renders its empty last line…", nlStatic.lines === 3 && eq(nlStatic.h, 32.4 + 21.6 + 21.6, 1)],
+  ["md: …identically focused and unfocused (the row must not jump on click)", nlLive.lines === 3 && eq(nlStatic.h, nlLive.h)],
+  ["md: a completed prompt is still struck through and dimmed", doneRow.decoration === "line-through" && eq(doneRow.opacity, 0.55, 0.01)],
+  // …and it reaches the ink: every line box is an in-flow block-level box, which is
+  // exactly the condition under which CSS propagates the wrapper's decoration into it
+  // (an atomic inline or a floated box would swallow it). Confirmed visually in
+  // md-prompt.png, where a completed prompt is struck through across both of its lines.
+  ["md: …through every line box, all of which are in-flow blocks", doneRow.inFlowBlocks && doneRow.lines === 2],
+  // --- markdown editing parity, against the same text in a flat row ---
+  ...parity.map((p) => [
+    `md/flat: ${p.name} — ${JSON.stringify(p.md)}`,
+    p.same,
+  ]),
+  // --- Tab nests a prompt's bullet ---
+  ["tab: Tab on a prompt's list line indents the TEXT, not the node", tabOnList.cmd === "set_text" && tabOnList.text === "## a\n    - b\n\nc"],
+  ["tab: …one level per press", tabTwice.text === "## a\n        - b\n\nc"],
+  ["tab: ⇧Tab takes it back", untabOnList.text === "## a\n- b\n\nc"],
+  ["tab: ⇧Tab at the left margin is a no-op, NOT an outdent of the node", untabAtMargin.cmd !== "outdent_node"],
+  ["tab: on a heading line it still indents the NODE", tabOnHeading.cmd === "indent_node"],
+  // --- Enter carries a bullet ---
+  ["enter: Enter on a bulleted line opens the next one already bulleted", enterOnBullet.text === "## a\n- b\n- \n\nc"],
+  ["enter: …and typing lands after the marker", enterThenType.text === "## a\n- b\n- z\n\nc"],
+  ["enter: Enter on the now-EMPTY bullet ends the list instead of minting another", enterOnEmptyBullet.text === "## a\n- b\n\n\nc"],
+  ["enter: the new bullet keeps the indent it came from", enterKeepsIndent.text === "## a\n    - b\n    - z\n\nc"],
+  ["enter: a heading line still just breaks", enterOnHeading.text === "## \na\n- b\n\nc"],
+  ["enter: mid-item it splits, both halves bulleted", enterMidItem.text === "## a\n- \n- b\n\nc"],
+  // --- settings: prompt templates ---
+  ["settings: a Prompt Templates section lists the compiled-in templates", tplPanel.sections.includes("Prompt Templates") && tplPanel.rows === 1],
+  ["settings: the row is named by its FILE, and shows the name the menu uses", tplPanel.label === "New-Feature-Discuss-Plan" && tplPanel.value === "New Feature Discuss Plan"],
+  ["settings: Reset is dead while the name is still the derived default", tplPanel.resetDisabled === true],
+  ["settings: renaming writes the override to the BACKEND settings table", renamed.sent?.cmd === "set_prompt_template_name" && renamed.sent.args.template === "New-Feature-Discuss-Plan" && renamed.sent.args.name === "New Feature: Discuss & Plan"],
+  ["settings: …and Reset comes alive", renamed.resetDisabled === false],
+  ["settings: Reset clears the override and the derived name comes back", afterReset.sent?.args.name === "" && afterReset.value === "New Feature Discuss Plan" && afterReset.resetDisabled === true],
   ["no page errors", errors.length === 0],
 ];
 console.log("\nrest    :", JSON.stringify(rest));

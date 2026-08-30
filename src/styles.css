@@ -6,6 +6,11 @@
   --bg-tint: rgba(10, 10, 14, 0.45);
   --text: rgba(255, 255, 255, 0.92);
   --text-dim: rgba(255, 255, 255, 0.55);
+  /* Also spelled out as `Theme.mdMarkerColor` in lib/layout.ts, which is what a
+     prompt's markdown markers are dimmed with. That one has to be a literal: it is
+     written as an INLINE color and compared character-for-character by
+     `domMatchesRuns`, the check that decides whether the editor rebuilds. Keep the
+     two values equal. */
   --text-faint: rgba(255, 255, 255, 0.35);
   --accent: #3b82f6;
   --complete: #06ff9a;
@@ -1140,6 +1145,43 @@ body {
   min-width: 10px;
 }
 
+/* ---------- Prompt markdown (DISPLAY only — the `#`/`- ` characters stay in the text) ---------- */
+
+/* Deliberately UNSCOPED, not nested under `.node-row`. The caret mirror (caret.ts) lays
+   its copy of the text out on <body>, outside every row, and it has to break lines
+   exactly where the editor does or ArrowUp/ArrowDown leave the node on the wrong one.
+   A rule that only matched inside a row would silently not reach it. */
+.md-line {
+  display: block;
+}
+
+/* A list item HANGS its wrapped text under its own first line: the padding opens a
+   gutter the width of the marker, and the negative text-indent pulls the FIRST line back
+   out of it, so line 1 starts where it always did and every wrapped line starts at the
+   body's column. `--md-hang` is that marker's measured width, set per line by the
+   renderers (runs.ts `markerHang`).
+
+   Measured rather than guessed because it varies with the marker AND with the leading
+   indent of a nested item — at fontSize 16, "1. " is 15.34px while the obvious `3ch`
+   guess is 29.3px. It was first built as a two-column grid, which needs no measurement
+   at all and is exact; that is a strictly better mechanism for LAYOUT and a worse one
+   for EDITING, because a grid item is its own block box, so the marker/body boundary
+   became a second caret position at one model offset and an ArrowRight was silently
+   swallowed at every marker (4 of 12 offsets diverged from a non-markdown prompt). Two
+   adjacent INLINE spans in one block share one caret position. */
+.md-line.md-li {
+  padding-left: var(--md-hang, 0);
+  text-indent: calc(-1 * var(--md-hang, 0));
+}
+
+/* The static renderer keeps one extra wrapper span that the live editor does not have
+   (the editor's lines are direct children of the contenteditable). An INLINE box holding
+   block children is a block-in-inline split — a different box tree, which is precisely
+   the static-vs-live metrics divergence this file has shipped bugs against twice. */
+.md-root {
+  display: block;
+}
+
 .grow-wrap {
   display: grid;
   width: 100%;
@@ -1675,6 +1717,25 @@ body {
 .settings-row-stack > span {
   display: block;
   margin-bottom: 0.23em;
+}
+
+/* A template's name field and its Reset, side by side under the file name.
+   Selected as a CHILD of the stack row on purpose: `.settings-row-stack > span` is
+   (0,1,1) and blocks a bare `.settings-tpl` at (0,1,0), which silently dropped the
+   Reset onto its own line under the field. */
+.settings-row-stack > .settings-tpl {
+  display: flex;
+  align-items: center;
+  gap: 0.46em;
+}
+
+.settings-tpl > input[type="text"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-tpl > .mini-btn {
+  flex: none;
 }
 
 /* "· set" beside a secret's label: the ONLY thing the panel ever learns about a stored

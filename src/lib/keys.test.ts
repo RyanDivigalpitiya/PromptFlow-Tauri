@@ -28,6 +28,24 @@ describe("resolveKey", () => {
     expect(resolveKey("enter", ctx({ isPrompt: true, opt: true }))).toBe("newNode");
   });
 
+  it("carries a prompt's BULLET onto the next line, and an empty one ends the list", () => {
+    expect(resolveKey("enter", ctx({ isPrompt: true, bulletLine: true }))).toBe(
+      "newlineBullet",
+    );
+    expect(
+      resolveKey("enter", ctx({ isPrompt: true, bulletLine: true, bulletBodyEmpty: true })),
+    ).toBe("endBullet");
+    // ⌥Enter and ⌘Enter are resolved before any of this and keep their meaning.
+    expect(
+      resolveKey("enter", ctx({ isPrompt: true, bulletLine: true, opt: true })),
+    ).toBe("newNode");
+    expect(
+      resolveKey("enter", ctx({ isPrompt: true, bulletLine: true, cmd: true })),
+    ).toBe("toggleComplete");
+    // A bullet line only exists inside a prompt, so the flag alone changes nothing.
+    expect(resolveKey("enter", ctx({ bulletLine: true }))).toBe("newNode");
+  });
+
   it("Cmd+Enter completes for every kind", () => {
     expect(resolveKey("enter", ctx({ cmd: true }))).toBe("toggleComplete");
     expect(resolveKey("enter", ctx({ isPrompt: true, cmd: true }))).toBe("toggleComplete");
@@ -36,6 +54,22 @@ describe("resolveKey", () => {
   it("Tab / Shift+Tab indent and outdent", () => {
     expect(resolveKey("tab", ctx())).toBe("indent");
     expect(resolveKey("backtab", ctx())).toBe("outdent");
+    // Still the NODE inside a prompt whose caret is not on a list line — a heading, a
+    // paragraph, an empty draft. That is where indenting the node is the only reading.
+    expect(resolveKey("tab", ctx({ isPrompt: true }))).toBe("indent");
+    expect(resolveKey("backtab", ctx({ isPrompt: true }))).toBe("outdent");
+    // ...and a list line ONLY exists in a prompt, so the flag alone never flips a bullet
+    // or checkbox row.
+    expect(resolveKey("tab", ctx({ listLine: true }))).toBe("indent");
+  });
+
+  it("nests the BULLET, not the node, on a prompt's list line", () => {
+    // A prompt is a document you are writing and its list lives in the text, so Tab
+    // there means what it means in every editor: one more level of list.
+    expect(resolveKey("tab", ctx({ isPrompt: true, listLine: true }))).toBe("indentText");
+    expect(resolveKey("backtab", ctx({ isPrompt: true, listLine: true }))).toBe(
+      "outdentText",
+    );
   });
 
   it("Backspace deletes only an empty node at caret start", () => {

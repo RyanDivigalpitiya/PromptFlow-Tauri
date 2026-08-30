@@ -119,6 +119,18 @@ function TrailingCluster(p: {
       className="row-action"
       style={{ width: slot }}
       tabIndex={-1}
+      onMouseDown={(e) => {
+        // Keep the caret where it is while the native menu is up. WITHOUT this, the
+        // mousedown's default action steals focus to body AFTER the handler, which
+        // blurs the editor -> onBlur -> clearFocus() -> the focus subscription's
+        // setTimeout(0) (controller.ts) -> pruneIfEmptyOnDefocus DELETES an empty,
+        // note-less, childless node before the menu selection ever arrives — and
+        // performRowMenuAction's `if (!rec) return` then swallows it silently. That
+        // is exactly the Prompt Templates flow ("make a prompt, hit ⋯, pick one"),
+        // so an empty prompt used to disappear the moment you opened its menu.
+        // The other row controls defocus on purpose; this one must not.
+        e.preventDefault();
+      }}
       onClick={(e) => {
         // Open the NATIVE macOS row menu at the button, dropping down from its
         // bottom-left. Rust builds the items per node kind and routes the
@@ -374,6 +386,7 @@ export const NodeRow = memo(function NodeRow(p: NodeRowProps) {
           isFocused={p.isFocused}
           isDrillRoot={p.isDrillRoot}
           highlightColor={p.highlightColor}
+          fontSize={p.fontSize}
         />
       </div>
       {!isPrompt && cluster}

@@ -21,8 +21,8 @@ npm install                  # once
 scripts/dev.sh [store.sqlite]  # tauri dev against an ISOLATED store (default /tmp/promptflow-tauri-dev.sqlite)
 scripts/build.sh             # release bundle -> src-tauri/target/release/bundle/macos/PromptFlow.app
 scripts/verify.sh            # launch smoke test of the release build (throwaway store, polls for a window)
-npm test                     # vitest: 10 suites / 97 tests (resolveKey, wrap, bold, runs, caret, projectDrop, projectSelectionHead, rowBands, kindMorph, currentTask)
-cd src-tauri && cargo test   # 25 tests (store mutations/undo, block bold + nested prompt merge, archive round-trip + collect)
+npm test                     # vitest: 12 suites / 166 tests (resolveKey, wrap, bold, runs, caret, mdLines, deleteRange, projectDrop, projectSelectionHead, rowBands, kindMorph, currentTask)
+cd src-tauri && cargo test   # 78 tests (store mutations/undo, block bold + nested prompt merge, apply_template, archive round-trip + collect, the templates table + row-menu contents, sync e2e)
 npx tsc --noEmit             # typecheck (strict; noUnusedLocals/Parameters)
 npm run dev & node scripts/qa.mjs [outDir]   # headless visual QA in WebKit (see below)
 ```
@@ -258,6 +258,9 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   the REC OBJECT (not `rec.text`) so style-only deltas (remote ⌘B, store ⌘Z of a
   style toggle) drain their echo and adopt — keying on text alone made the next
   keystroke silently clobber remote/undone styles (shipped bug, fixed).
+- **Prompt markdown** (`lib/mdLines.ts` + the `md` path in `lib/runs.ts`; CSS `.md-line` / `.md-li` / `.md-mark` / `.md-body`): a `promptDraft`'s text renders `# ` headings bigger and `- ` / `1. ` lines as real list items. DISPLAY ONLY — the markers stay in the text, keep their offsets, and copy out verbatim; nothing here rewrites the model, and there is still no markdown PARSER in the repo (`toMarkdown` is a serializer). Gated on `kind === "promptDraft" && hasMarkdown(text)`: prompts only because a bullet's glyph slot is a fixed `OutlineLayout.lineHeight(fontSize)` tall and would ride visibly high beside a 32.4px first line, and only when a marker is actually present so an ordinary prose prompt keeps the FLAT one-span-per-run DOM byte-identical to before — which is what makes the text-substitution fast path provably untouched for it. **One block per LINE, and each line's own `\n` is the last character INSIDE its block** (measured in WebKit: a block whose text ends in `\n` is exactly one line tall, 21.59px, and so is a blank line's block holding only `\n`; the alternative — making the block boundary itself the newline — would mean teaching `serializeEditor`/`offsetOfPoint`/`pointAtOffset` a fourth concept, since `serializeEditor` emits NOTHING at an element boundary). Keeping the newline as a real character is also what keeps `textOffsetFromPoint` right: it sums TEXT-node lengths and ignores `<br>`s entirely, so a `<br>`-encoded newline would put click-to-place-caret off by every newline above it. A **list line HANGS its wrapped text** with `padding-left: var(--md-hang)` and a negative `text-indent` of the same amount: the padding opens a gutter the width of the marker and the indent pulls line 1 back out of it, so the first line starts where it always did and every wrapped line starts at the body's column. `--md-hang` is the marker's MEASURED width (`markerHang`, cached per font size and marker string, measured in a hidden box on `<body>`) — measured because it varies with `- ` vs `10. ` and with every level of leading indent (at fontSize 16 `"1. "` is 15.34px, while the obvious `3ch` guess is 29.3px). **It was first built as a two-column grid** (`grid-template-columns: auto 1fr`), which is exact and needs no measurement at all — a strictly better mechanism for LAYOUT and a worse one for EDITING, because a grid item is its own block box, so the marker/body boundary became a SECOND caret position at one model offset and an ArrowRight was silently swallowed at every marker (measured: 4 of 12 offsets diverged from the same text in a flat row). Two adjacent INLINE spans in one block share one caret position. Don't reintroduce it. The measurer must NOT carry `class="node-row"`, however convenient the cascade: it lives on `<body>` and anything doing `querySelectorAll(".node-row")` — qa.mjs does — would find a phantom row. Nesting comes from the leading spaces, which live INSIDE the marker cell — so ⌘3's fold output keeps the geometry qa.mjs section 8 already measures, and a fold's two-space CONTINUATION line (no marker) classifies plain by construction. Three things are load-bearing. (1) **Every decoration is an inline `style` property**, never a class or `data-*` on a RUN span: `domMatchesRuns`'s `attributes.length !== (style ? 1 : 0)` is the strictest line in `runs.ts` and stays verbatim; a wrapper span is checked separately, for its exact `class` and nothing else. (2) **`declFor` returns `undefined`, never `""`** for an unset property — React renders `style={{}}` as `style=""`, whose `getAttribute` is falsy while `attributes.length` is 1, so `domMatchesRuns` would return false forever, the editor would rebuild on every keystroke, and macOS text substitution would die with no visible symptom. The comparison also runs each value through the engine's own serializer (`canon`), because setting `#06FF9A` reads back as `rgb(6, 255, 154)`. (3) **A heading is `font-weight: 600`, not 700** — plain 400 → heading 600 → bold 700 stays strictly increasing, so ⌘B inside a heading is still visibly heavier and a highlighted row's own 600 wrapper is not outranked. Heading SIZES are `em` and declare no `line-height`, because `--row-line-height: 1.35` is a UNITLESS number and so re-multiplies against each descendant's font-size for free. `.node-text-static` gains `md-root` (`display: block`): it is one extra wrapper the live editor does not have, and an inline box holding block children is a block-in-inline split, i.e. a different box tree from the editor's — exactly the static/live metrics divergence this file has shipped bugs against twice. The honest substitution-rebuild set is "a keystroke that changes what a line IS, **plus the first character typed at a marker boundary**": `pointAtOffset` resolves an offset at the end of the marker to the marker's own text node, so WebKit types into it and the model disagrees. Both halves are pinned in qa.mjs by NODE IDENTITY, so the check discriminates instead of always passing. NOT covered, deliberately: markdown on non-prompt rows, inline `**bold**` (style runs own that), blockquotes/fences/tables/links, and hiding the markers (a caret could sit in unpainted text). The focus pane renders `rec.text` directly and stays plain.
+- **Edits that cross a line boundary in a markdown prompt are taken over from WebKit** (`lib/deleteRange.ts` + `RowEditor.onKeyDown`): one block per line means WebKit treats each as a PARAGRAPH, and its paragraph logic does not agree with a flat string carrying literal newlines. Measured against the SAME text in a bullet row (markdown is prompt-only, so that is an exact control): a plain Backspace at a blank-line start took BOTH newlines, `^H` and ⌘⌫ lost one, ⌥⌫ ate an extra line, `^D` committed a phantom trailing newline, and typing at a blank-line start consumed that line's own newline. So a delete whose range CROSSES a newline is computed in the model and spliced, as is a printable key that replaces a multi-line selection or lands at a LINE START. Everything INSIDE a line stays native — that is where grapheme clusters (one Backspace deletes a whole emoji, which a code-unit splice would break), the revert-a-substitution behaviour, and macOS text substitution itself all live, and a line start has no preceding word for substitution to act on anyway. `resolveKey`'s empty-node `deleteEmpty` still runs first: an empty text has no boundary to cross. `deleteKind` claims macOS's own ctrl ALIASES (`^H` is `deleteBackward:`, `^D` is `deleteForward:`) because they issue the identical editor command and reach the identical merge, and `deleteRange`'s word rule steps back over any run of NON-WORD characters (punctuation included) before taking the word — matching what native ⌥⌫ was measured doing, and without which the markdown path diverged from every other row. `zeroWidthBrs` grew ONE clause for the same family: a `<br>` alone in an empty `.md-line` is a WebKit line-box placeholder, not a newline, because every model newline is a literal character. A dropped `<br>` still counts (a drop leaves text beside it), and a legitimately blank line is not empty — its block holds the `\n`. `pointAtOffset` grew the mirror-image rule: a LINE-START offset resolves into the NEXT line's block (its first text position), not to the end of the previous one, or the caret paints a line high and the next character typed lands before the newline. **The regression gate is qa.mjs's `md/flat` block**, which runs the same keystrokes at the same offsets against a bullet row holding the same string; a fuller sweep of every offset × five key sequences measured 60/60 identical.
+- **The caret mirror is markdown-aware** (`caret.ts` `buildMirrorLines`): `caretTop` lays the prefix out in a hidden div to decide which VISUAL line an offset is on, so with mixed line heights it has to build the same blocks the editor does or ArrowUp/ArrowDown leave the row on the wrong line. Three details. Lines are classified from the FULL value and then truncated, never classified from the prefix — with the caret between `#` and its space the prefix alone reads as plain and the line would measure at body size. **No sentinel `<br>` is ever emitted there**: the mirror is measured, not edited, its trailing line box comes from the marker span the caller appends, and an extra `<br>` after content already ending in `\n` ADDS a box (18px vs 36px), putting every ArrowDown one line early. And `syncTypography`'s `m.style.font = cs.font` writes line-height as a px LENGTH, silently pinning the one property a heading depends on — it is re-asserted as the RATIO, unit-guarded, because a bare `isFinite` check cannot tell `"21.6px"` from `"1.35"` and would collapse the mirror to `line-height: 0.084` for EVERY kind. The zero-width marker span carries its own line's point size so its box top is the line box's top; left at body size inside a 1.5em heading it is baseline-aligned and `caretLineInfo`'s `y < lh*0.5` test loses most of its margin. It also carries each list line's `--md-hang`, since the hang changes where a line wraps. Passing no `md` flag is byte-identical to before, which keeps every non-prompt row on the unchanged path. (A collapsed `Range.getBoundingClientRect()` on the REAL element was measured as a possible replacement for the whole mirror — monotone, and correct at soft-wrap boundaries — but it returns a ZERO rect at an element position with no text, which is exactly the trailing-empty-line caret. Left as a future simplification.)
 - **Virtualized outline** (`OutlineView.tsx`, TanStack Virtual): flatten → one
   virtualizer, `getItemKey` = row id, dynamic heights via `measureElement`.
   **`paddingStart: OutlineLayout.documentVInset`, never CSS padding-top** on the
@@ -521,7 +524,11 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   is the panel's CHROME, never the node's TEXT — the text is the same text the row already
   showed, and fading the panel whole blinks it out on the row ⌘3 was just pressed in, the
   exact failure `--enter-fade-ease` exists for; chrome-only also makes the two directions
-  mirror images, since the leaving ghost has no text by construction. `transform-origin:
+  mirror images, since the leaving ghost has no text by construction. (ONE exception since
+  prompt markdown: a `# `-leading node converted TO a prompt does change point size, in the
+  same commit the FLIP translates it, because the markdown renderer is gated on the kind. A
+  third accepted artifact beside the ghost overhang and the one-paint overlap; gating
+  markdown on the morph having finished is the fix if it ever reads badly.) `transform-origin:
   0 50%` (the leading edge is the glyph column the bar sits on — the one thing that must
   not move) and 0.96 rather than anything bolder because a panel is ~25x wider than tall,
   so the factor that is 1px of vertical growth is ~36px of horizontal sweep.
@@ -609,10 +616,14 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   backup-FIRST (write succeeds, then delete) into `<store dir>/Archive`.
   The FOCUS PANE round-trips through the file on the style-arrays precedent (keys written only when set, so pane-free documents stay byte-identical and the Swift decoder ignores them): `isHighlighted` per node, plus `focusRank` — the exporting DEVICE's 0-based pane position, which has to ride the file because the pane's order is device-local (`pf.focusOrder`) and import mints fresh ids, killing every id the localStorage key names. Four rules came out of the adversarial review of this feature, all pinned by tests: (1) the export reads `persistedFocusOrder()` (the localStorage key, fresh), never the exporting window's in-memory copy — a drag in another window persists but doesn't broadcast, so a window's memory can be stale and would silently back up a pre-drag order; (2) a rank is written, and on import honored, only WITH the highlight flag (both guards, exporter and `to_records`) — a rank alone would seed a phantom id into every window's order and desync the pane's order==members drag invariant; (3) import maps ranks to the fresh ids (stable-sorted, duplicate ranks fall back to document order), returns them as `ImportOut.focusOrder` plus the import delta's `rev`, and the importing window ADOPTS the order and broadcasts `focus-order-adopt {order, rev}` to every window — without the broadcast a peer's own reconcile of the import delta rebuilds order by `(updatedAt, id)` and PERSISTS it over the file's. `adopt()` runs a reconcile immediately (that is what appends highlighted-but-UNRANKED nodes — e.g. restoring a Clear Completed archive, whose focus order is empty by design), and reconcile prunes a mirror-ABSENT id only once `mirror.rev() >= adoptRev`: below that, absence means "from a delta this window hasn't processed yet" (a stale rev-gap snapshot resolving late, a window mid-spawn), and pruning would persist over the order the import just restored; present-but-unhighlighted is pruned regardless. (4) the pane's handle drag carries the dragged row's ID and re-resolves its index at mouseup (bailing if gone) — an adopt can replace the order mid-drag, and a mousedown-time index would move a row the user never touched. The archive paths (Clear Completed, auto-archive) pass an empty order — a deleted unit has no pane position to keep.
 
+- **Prompt templates** (`prompt-templates/` at the repo root → `src-tauri/build.rs` → `src/templates.rs`): a prompt's ⋯ menu carries a **Prompt Templates** submenu that fills the panel from a scaffold. The bodies are COMPILED IN — `build.rs` scans the folder, emits an `include_str!` table into `OUT_DIR`, and prints `cargo:rerun-if-changed`, so adding one is "drop a file in the folder, `/release`" with no `bundle.resources` key, no `fs:` capability, and no directory that resolves differently under `tauri dev` than in the shipped .app. **`prompt-templates/` is therefore a BUILD DEPENDENCY and must stay committed** — without it the table is silently empty rather than a compile error. A template's `id` is its file name with everything outside `[A-Za-z0-9._-]` replaced by `_`, which keeps it COLON-FREE: menu item ids are `pf-row:<action>:<window>:<node>` and `lib.rs` parses them with `splitn(4, ':')`, so a colon (legal in an APFS file name) would shift the window label and `emit_to` would silently no-op on a label that does not exist. The menu action is `tpl-<id>` and the invoke argument is the BARE id — the cargo and qa suites meet on that string. Display names are DERIVED from the file name and overridable in Settings ▸ Prompt Templates; the overrides live in the backend `settings` table under `promptTemplateNames`, NOT localStorage, because the menu is built in Rust and cannot see the webview's storage — which is also why a rename needs no delta: every window's next menu opening reads it. A name reaching AppKit has its `&` doubled (`templates::menu_label`), or muda eats it as a mnemonic marker and "Discuss & Plan" renders as "Discuss  Plan". The mutation is `Store::apply_template`, deliberately NOT `set_text`: it commits with `CoalesceKey` `None`, because `set_text` coalesces and a template applied within `COALESCE_MS` of typing would fold into the typing burst so one ⌘Z could never undo just the template. It also clears the three style-range arrays (UTF-16 offsets into text that no longer exists) and **clears `is_completed`/`completed_at`** — on `merge_into_prompt`'s precedent, not `set_kind`'s: a completed childless prompt with an old `completed_at` qualifies for `archive::collect`, so the launch sweep would archive and `delete_archived` it, and that path ends in `clear_history()`, i.e. the node the user just filled would be gone UN-UNDOABLY. `row_menu_items` is a pure function so `cargo test` can pin the menu's contents without an NSMenu, including that no action string for any kind contains a colon.
+
 ## Conventions & gotchas
 
 - **Keyboard handling is split three ways — check all three before adding a shortcut**:
-  (1) `RowEditor.onKeyDown` (focused editing: `resolveKey` routing, ⌘B/⌘1-3/⌘⇧F/⌘⇧N,
+  (1) `RowEditor.onKeyDown` (focused editing: `resolveKey` routing — including Tab/⇧Tab,
+  which nest the BULLET in a prompt's text when the caret touches a markdown list line
+  and otherwise still indent the NODE, ⌘B/⌘1-3/⌘⇧F/⌘⇧N,
   ⌘B/⌘I/⌘U style toggles, ⌘4 → divider (single-node only, then clearFocus — a divider
   has no editor), ⇧⌘C markdown copy, ⌥↑/⌥↓ (move node), ⌘↑/⌘↓ collapse/expand the focused
   parent — childless falls through to the native caret jump, wrap-selection, Escape);
@@ -635,7 +646,31 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
 - **`resolveKey` (`lib/keys.ts`) is the pure keyboard truth table** (same semantics as
   the Swift original: bullet/checkbox Enter=new node, ⇧Enter=newline; prompt Enter AND
   ⇧Enter=newline — a prompt's "new node" is ⌥Enter, not ⇧Enter; ⌘Enter completes any
-  kind; boundary-line arrows cross nodes). It's pinned by `keys.test.ts` — change
+  kind; boundary-line arrows cross nodes). ONE divergence from the original, added with
+  prompt markdown: `ctx.listLine` routes Tab/⇧Tab in a prompt to `indentText`/
+  `outdentText` — one level of `LIST_INDENT` (four spaces) added to, or up to one level
+  removed from, every line the selection touches, via `indentLines`. That is WIDER than
+  the two spaces ⌘3's fold writes per depth, so a folded list nests in smaller steps than
+  a hand-tabbed one; nothing computes a level from the width (the renderer paints the
+  leading whitespace the text carries), so the two mix without breaking. Align the Rust
+  `INDENT` if they should ever match — that is a stored-text change pinned by
+  `merge_into_prompt_nests_descendants_by_depth` and by qa.mjs's `FOLDED`, so both suites
+  move in one commit.
+  A prompt is a document you are writing and its list lives in its TEXT, so Tab there
+  means what it means in every editor. **Enter on a prompt's BULLET line carries the
+  bullet** the same way (`bulletAtCaret` → `newlineBullet`), repeating the line's own
+  indent and bullet character verbatim so the new item lines up under the one it came
+  from; on an EMPTY bullet it `endBullet`s instead — the marker goes and the caret stays
+  on the blank line, which is the only way out of a list that is not backspacing a marker
+  you did not type. ORDERED lists are deliberately excluded: continuing "1." means
+  deciding the next number and renumbering everything below on every insert, which is a
+  different feature. Null-and-fall-through when the caret is inside the marker (it is
+  being edited, not extended) or when there is a selection (which line it belongs to is
+  ambiguous). ⌥Enter and ⌘Enter resolve first and keep their meanings. Everywhere else in a prompt — a heading, a
+  paragraph, an empty draft — and in every other kind, Tab still indents the NODE, so the
+  outline gesture survives where it is the only sensible reading. ⇧Tab on a list already
+  at the left margin is a NO-OP rather than falling through to a node outdent: Tab and
+  ⇧Tab have to mean the same KIND of thing on the same line. It's pinned by `keys.test.ts` — change
   semantics there first, then the handler.
 - **Stateful modules decline HMR** — every module in `src/state/` (tests excepted) ends
   with `import.meta.hot.accept(() => import.meta.hot?.invalidate())`. A hot swap of a module
@@ -678,7 +713,13 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
 - **Column math**: `OutlineLayout` (`lib/layout.ts`) matches the Swift constants exactly
   (indent 22, hInset 18, glyph slot 18·s, gap 6; `guideX(level) = glyphCenterX(level−1)`).
   TWO deliberate divergences. (1) `lineHeight = fontSize × 1.35`, locked to CSS
-  `--row-line-height: 1.35` — change both or neither. (2) **`indentAt(depth)` ROUNDS
+  `--row-line-height: 1.35` — change both or neither. That CSS value is a **unitless
+  number** and must stay one: it inherits as a number and re-multiplies against each
+  descendant's own font-size, which is the only reason a prompt's 1.5em heading gets a
+  proportionally taller line box without declaring one. Writing it as `1.35em` would
+  compute once on `.node-row` and flatten every heading. (It reaches the caret mirror as a
+  px LENGTH via the `font` shorthand, which `syncTypography` has to undo — see the mirror
+  entry.) (2) **`indentAt(depth)` ROUNDS
   `depth · 22 · scale` to a whole CSS pixel**, and EVERY depth→x conversion must go
   through it — the row's paddingLeft, `glyphCenterX` (hence `guideX`),
   `contentLeadingInset`, and the tab glide's FLIP offset in OutlineView, which for the
@@ -703,6 +744,13 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   collapse; trailing ⋯ = Zoom In / Copy / Delete, built per kind in Rust — no Zoom In on
   a divider, and a prompt's copy item is Copy Markdown + Copy Raw (+ Copy Subtree when it
   has children) while a divider gets none (delete confirms at ≥10 descendants);
+  a PROMPT also gets a **Prompt Templates** submenu when any template is compiled in (see
+  the templates entry above); the ⋯ button itself `preventDefault`s its MOUSEDOWN, which
+  deliberately contradicts the "pressing a row control defocuses" habit two lines up —
+  without it the focus steal blurs the editor, `clearFocus()` runs, and the focus
+  subscription's `setTimeout(…, 0)` prunes an EMPTY node before the menu selection ever
+  arrives, so opening the menu on a blank prompt deleted it and `performRowMenuAction`'s
+  `if (!rec) return` swallowed the failure;
   completing the LAST sibling via ⌘Enter spawns a fresh sibling (never for the drill
   root); an abandoned empty node is pruned on defocus (`exemptPruneOnce` protects
   Enter-at-line-start splits); dividers (`line`) never drill, never parent, never
@@ -749,7 +797,7 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   Enter split keeps styling on both halves. Export writes `italicRanges`/
   `underlineRanges` ONLY when non-empty — style-free documents stay byte-identical to
   the SwiftUI format (whose decoder ignores the extra keys on styled ones).
-- **The mutation surface is the Rust commands** (39 registered in `lib.rs`; typed
+- **The mutation surface is the Rust commands** (47 registered in `lib.rs`; typed
   wrappers in `src/lib/api.ts`). Never mutate the mirror locally — apply state only from
   deltas. New mutations follow the pattern: store method → command → `emit_delta` →
   `MutationOut` hints for the caller.

@@ -5,6 +5,7 @@ mod macos_defaults;
 mod model;
 mod persist;
 mod seed;
+pub mod templates;
 pub mod store;
 pub mod sync;
 
@@ -355,6 +356,9 @@ pub fn run() {
             commands::get_setting,
             commands::set_setting,
             commands::popup_row_menu,
+            commands::apply_prompt_template,
+            commands::prompt_templates,
+            commands::set_prompt_template_name,
             commands::sync_get_config,
             commands::sync_set_config,
             commands::sync_status,
