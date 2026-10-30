@@ -26,7 +26,8 @@ import {
 } from "../state/windowState";
 
 /** The collapsible strip mirroring the highlighted (⌘⇧F) nodes — read-only rows:
- * ⠿ handle · numbered accent disc · bold accent title + the node's CURRENT TASK.
+ * ⠿ handle · numbered accent disc · bold accent title, the first line of its NOTE when
+ * it has one, and the node's CURRENT TASK.
  * Clicking a row REVEALS its current task in the outline (the pinned node itself when
  * it has none); the handle drag reorders the device-local priority order and shows a
  * drop marker while dragging. */
@@ -76,6 +77,17 @@ function useCurrentTask(focusedId: string): NodeRec | null {
   return taskId === null ? null : (mirror.get(taskId) ?? null);
 }
 
+/** The note's first line with any text on it, trimmed — or null when the note is blank.
+ * "First non-blank" rather than literally line 0: a note opening on an empty line would
+ * otherwise paint an empty middle row, which says nothing and costs a line of height. */
+function firstNoteLine(note: string): string | null {
+  for (const line of note.split("\n")) {
+    const t = line.trim();
+    if (t) return t;
+  }
+  return null;
+}
+
 function FocusRow({
   id,
   index,
@@ -93,6 +105,9 @@ function FocusRow({
   // The whole row navigates to the CURRENT TASK — that is the node the row is pointing
   // at. With nothing left to do under it, it falls back to the pinned node itself.
   const target = task?.id ?? id;
+  // Read off `rec`, so the per-node subscription above already repaints it on a note
+  // edit from any window — a note change is never structural.
+  const note = firstNoteLine(rec.note);
   return (
     <div className="focus-row">
       <span
@@ -112,6 +127,7 @@ function FocusRow({
         <span className="focus-title" style={{ color: accent }}>
           {rec.text || "Untitled"}
         </span>
+        {note && <span className="focus-note">{note}</span>}
         {task && (
           <span className="focus-task">{task.text || "Untitled"}</span>
         )}

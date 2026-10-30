@@ -907,7 +907,12 @@ const alpha = (c) => {
 // Its own page and fixture — this is the screenshot's tree, whose whole point is that
 // `Example`'s task is `Child 1` and NOT its first child `Parent 1`.
 const FOCUS_NODES = [
-  node("fx1", null, 0, "Example", "checkbox", { isHighlighted: true }),
+  // A note that OPENS on a blank line: its middle row is the first line with text on it,
+  // and only that one.
+  node("fx1", null, 0, "Example", "checkbox", {
+    isHighlighted: true,
+    note: "  \nShip the beta before Friday\nthis second line never shows",
+  }),
   node("fx1a", "fx1", 0, "Parent 1", "checkbox"),
   node("fx1a1", "fx1a", 0, "Child 1", "checkbox"),
   node("fx1a2", "fx1a", 1024, "Parent 2", "checkbox"),
@@ -915,8 +920,11 @@ const FOCUS_NODES = [
   node("fx1b", "fx1", 1024, "Parent 3", "checkbox"),
   node("fx1b1", "fx1b", 0, "Parent 4", "checkbox"),
   node("fx1b1a", "fx1b1", 0, "Child 3", "checkbox"),
-  // A pinned LEAF — nothing under it, so its row is title-only.
-  node("fx2", null, 1024, "A lone pinned node", "checkbox", { isHighlighted: true }),
+  // A pinned LEAF — nothing under it, so it has no task line; its note still shows.
+  node("fx2", null, 1024, "A lone pinned node", "checkbox", {
+    isHighlighted: true,
+    note: "Just a note, no task",
+  }),
   // Pinned with a child that is already done: also title-only, since nothing is left.
   node("fx3", null, 2048, "All done under here", "checkbox", { isHighlighted: true }),
   node("fx3a", "fx3", 0, "the done child", "checkbox", {
@@ -983,24 +991,34 @@ await fp.waitForSelector(".focus-row", { timeout: 15000 });
 await fp.addStyleTag({ content: "html,body{background:#101014 !important}" });
 await fp.waitForTimeout(400); // past the pane's open animation
 
-/** Every focus row as the pane presents it: the pinned node's title and its Current Task
- * line — ABSENT as an element, not empty, when there is nothing left to do — plus the two
- * resolved colours that have to differ (accent title, white task). */
+/** Every focus row as the pane presents it: the pinned node's title, its note's first
+ * line and its Current Task line — the last two ABSENT as elements, not empty, when there
+ * is nothing to show — plus the resolved colours that have to differ (accent title, dim
+ * note, white task) and the order the lines stack in. */
 const focusRows = () =>
   fp.evaluate(() =>
     [...document.querySelectorAll(".focus-row")].map((r) => {
       const t = r.querySelector(".focus-title");
+      const n = r.querySelector(".focus-note");
       const k = r.querySelector(".focus-task");
       return {
         title: t?.textContent ?? null,
         titleColor: t ? getComputedStyle(t).color : null,
+        note: n?.textContent ?? null,
+        noteColor: n ? getComputedStyle(n).color : null,
         task: k?.textContent ?? null,
         taskColor: k ? getComputedStyle(k).color : null,
+        // Visual order, by y — not DOM order, which a flex `order` could contradict.
+        stack: [t, n, k]
+          .filter(Boolean)
+          .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)
+          .map((el) => el.className),
       };
     }),
   );
 /** Just the task lines, which is what every live-update step below is watching. */
 const focusTasks = async () => (await focusRows()).map((r) => r.task);
+const focusNotes = async () => (await focusRows()).map((r) => r.note);
 const fpFocusedRow = () =>
   fp.evaluate(() => {
     const row = document.activeElement?.closest?.(".node-row");
@@ -1081,13 +1099,42 @@ await fpDelta([
 ]);
 const afterKindFlip = (await focusTasks())[3];
 
+// The NOTE line, LIVE from another window: a note edit is not structural either, so the
+// row's per-node subscription is again the only thing that can repaint it — adding a
+// note grows a middle line, and blanking one removes the ELEMENT, not just its text.
+await fpDelta([
+  {
+    type: "upsert",
+    node: node("fx3", null, 2048, "All done under here", "checkbox", {
+      isHighlighted: true,
+      note: "Added from another window",
+    }),
+  },
+  {
+    type: "upsert",
+    node: node("fx2", null, 1024, "A lone pinned node", "checkbox", {
+      isHighlighted: true,
+      note: " \n\n",
+    }),
+  },
+]);
+const afterNoteEdits = await focusNotes();
+
 // The task line is now the row's PRIMARY content, so the narrow dock is where it is most
 // at risk: give it text no 260px sidebar can hold and check it ellipsizes on ONE line
-// rather than wrapping the row open. Dock through the app's own switcher.
+// rather than wrapping the row open. Same for the note line above it. Dock through the
+// app's own switcher.
 await fpDelta([
   {
     type: "upsert",
     node: node("fx1b1a", "fx1b1", 0, "Child 3, whose text runs on well past anything a sidebar could hold", "checkbox"),
+  },
+  {
+    type: "upsert",
+    node: node("fx1", null, 0, "Example", "checkbox", {
+      isHighlighted: true,
+      note: "A note whose first line also runs on well past anything a sidebar could hold\nline two",
+    }),
   },
 ]);
 await fp.locator('button[aria-label="Switch focus pane layout"]').click();
@@ -1104,6 +1151,15 @@ const sidebarTask = await fp.evaluate(() => {
     clipped: k.scrollWidth > k.clientWidth,
     ellipsis: getComputedStyle(k).textOverflow,
     withinTitle: k.getBoundingClientRect().width <= t.getBoundingClientRect().width + 0.5,
+  };
+});
+const sidebarNote = await fp.evaluate(() => {
+  const n = document.querySelector(".focus-note");
+  const line = parseFloat(getComputedStyle(n).fontSize) * 1.6;
+  return {
+    lines: +(n.getBoundingClientRect().height / line).toFixed(2),
+    clipped: n.scrollWidth > n.clientWidth,
+    ellipsis: getComputedStyle(n).textOverflow,
   };
 });
 await shot("focus-pane-sidebar", fp.locator(".app-body"));
@@ -1903,6 +1959,15 @@ const checks = [
   ["focus: an over-long task stays on ONE line in the sidebar dock, overflowing", sidebarTask.lines <= 1 && sidebarTask.clipped],
   ["focus: …and that overflow is painted as an ellipsis, not a hard clip", sidebarTask.ellipsis === "ellipsis"],
   ["focus: …without pushing the row wider than the title above it", sidebarTask.withinTitle],
+  // --- focus pane: the note line ---
+  ["focus note: a pinned node's note shows its first line WITH text, trimmed", focusRest[0].note === "Ship the beta before Friday"],
+  ["focus note: …as the MIDDLE line: title, note, task", JSON.stringify(focusRest[0].stack) === '["focus-title","focus-note","focus-task"]'],
+  ["focus note: dimmer than the white task line, and not the accent", alpha(focusRest[0].noteColor) < alpha(focusRest[0].taskColor) && focusRest[0].noteColor !== focusRest[0].titleColor],
+  ["focus note: a note with no task under it is title + note", focusRest[1].note === "Just a note, no task" && focusRest[1].task === null],
+  ["focus note: a node with no note has NO note element", focusRest[2].note === null && focusRest[3].note === null],
+  ["focus note: a remote note edit grows the middle line, live", afterNoteEdits[2] === "Added from another window"],
+  ["focus note: …and a note blanked to whitespace removes it", afterNoteEdits[1] === null],
+  ["focus note: an over-long note stays on ONE line in the sidebar, ellipsized", sidebarNote.lines <= 1 && sidebarNote.clipped && sidebarNote.ellipsis === "ellipsis"],
   // --- folding a hierarchical selection ---
   ["fold: a sweep onto a deeper row still selects two root members", JSON.stringify(foldSel.members) === '["Alpha","Beta"]'],
   ["fold: …with both subtrees, two levels deep, tinted", ["Child one", "Grandchild", "Child two", "Beta's child"].every((t) => foldSel.tinted.includes(t))],

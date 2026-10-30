@@ -1968,11 +1968,17 @@ body {
   padding: 4px 0;
 }
 
+/* Rows are spaced by their OWN vertical padding, not by a gap on the pane: the row box
+   then spans the whole space, so the drag's gap test (a row's midpoint) and its marker (a
+   row's top edge) both land centred in the space between two rows. 12px is 24px between
+   one row's ink and the next, and with the pane's 6px top/bottom padding it puts the first
+   and last rows 18px from the pane's edges — equal to its 18px side inset. No fill and no
+   border, so the zero horizontal padding paints nothing; the pane owns the side inset. */
 .focus-row {
   display: flex;
   align-items: center;
   gap: 0;
-  padding: 5px 0;
+  padding: 12px 0;
 }
 
 .focus-handle {
@@ -2025,6 +2031,19 @@ body {
 .focus-task {
   color: var(--text);
   font-size: 0.86em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The pinned node's NOTE, first non-blank line only, between the title and the task.
+   Dim and at the outline's own note size (`.node-note-static`), so it reads as the same
+   note it is in the outline and stays quieter than the white task line below it. One
+   line, ellipsized, for the same row-height reason as the task; absent entirely when the
+   note is blank. */
+.focus-note {
+  color: var(--text-dim);
+  font-size: 0.82em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

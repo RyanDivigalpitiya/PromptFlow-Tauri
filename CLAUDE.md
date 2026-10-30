@@ -161,6 +161,7 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   `.focus-task` ELEMENT at all (not an empty one), and the row is just its accent title —
   repeating the pinned node as its own task would say nothing. The whole row (disc,
   title, task line) reveals the TASK, falling back to the pinned node when there is none.
+  **A pinned node with a NOTE gets a middle line between title and task** (`.focus-note`, dim at the outline's own 0.82em note size, one ellipsized line): the note's first NON-BLANK line, trimmed, so a note opening on an empty line still says something; a blank or whitespace-only note renders no element, exactly like a missing task. It reads `rec.note` off the row's own `useNodeRec`, so a note edit from any window repaints it with no extra subscription — a note change is never structural.
   `useCurrentTask` subscribes to the walk's `visited` — precisely the records it READ, the
   ones it rejected as much as the ones it descended into, since a rejection is a decision
   (siblings PAST the answer are deliberately absent: nothing they do matters while the
