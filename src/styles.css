@@ -1985,9 +1985,24 @@ body {
    border, so the zero horizontal padding paints nothing; the pane owns the side inset. */
 .focus-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0;
   padding: 12px 0;
+  /* The title's line height, as a number. ONE value for two places that must agree: the
+     title's own line box and `.focus-lead`'s height, which is what centres the handle and
+     the disc on the title's line. Left at `normal` it would be a font metric no other box
+     could be sized to. */
+  --focus-title-lh: 1.2;
+}
+
+/* The handle + disc, in a box exactly one TITLE line tall, so they centre on the name
+   rather than on the whole row (the stage bar made the row tall enough that centring on
+   it put the disc beside the note). `em` here is the row's font, which is the title's. */
+.focus-lead {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: calc(var(--focus-title-lh) * 1em);
 }
 
 .focus-handle {
@@ -2040,6 +2055,7 @@ body {
 
 .focus-title {
   font-weight: 600;
+  line-height: var(--focus-title-lh);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2083,15 +2099,15 @@ body {
    1em of padding):
      ≥ 24em  one row, full labels — the mockup. Four cells of 5.91em = 23.65em.
      < 24em  a 2×2 grid, full labels. The sidebar dock at its DEFAULT 280px gives the bar
-             ~15.5em, which no single row can serve: even abbreviated, four equal cells
-             need 17.6em. The sidebar has height to spare and no width, so it wraps.
+             ~17em, which no single row can serve well: abbreviated, four equal cells need
+             17.6em. The sidebar has height to spare and no width, so it wraps.
      < 12em  2×2 with abbreviated labels, for the dock's narrowest widths.
    Below that the labels ellipsize — the last resort, at a 180px dock. */
 .focus-stages {
   align-self: stretch;
   max-width: 30em;
   margin-top: 0.6em;
-  font-size: 0.78em;
+  font-size: 0.7em;
   /* The layout switches on the BAR's width, not the pane's: the bar is capped and the
      docks differ. A container query only reaches DESCENDANTS, which is why the grid is the
      inner `.focus-stage-track` and not this box. */

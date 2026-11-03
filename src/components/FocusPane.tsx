@@ -174,15 +174,20 @@ function FocusRow({
   const note = firstNoteLine(rec.note);
   return (
     <div className="focus-row">
-      <span className="focus-handle" onMouseDown={(e) => onHandleDown(e, id)}>
-        ⠿
-      </span>
-      <span
-        className="focus-index"
-        style={{ ["--focus-accent" as string]: accent } as React.CSSProperties}
-        onClick={() => revealNode(target)}
-      >
-        {index + 1}
+      {/* One title-line-tall box, so the handle and the disc centre on the TITLE rather
+          than on the whole row — which grew a stage bar and would otherwise drag them
+          down off the name they number. */}
+      <span className="focus-lead">
+        <span className="focus-handle" onMouseDown={(e) => onHandleDown(e, id)}>
+          ⠿
+        </span>
+        <span
+          className="focus-index"
+          style={{ ["--focus-accent" as string]: accent } as React.CSSProperties}
+          onClick={() => revealNode(target)}
+        >
+          {index + 1}
+        </span>
       </span>
       <div className="focus-body">
         <span className="focus-content" onClick={() => revealNode(target)}>

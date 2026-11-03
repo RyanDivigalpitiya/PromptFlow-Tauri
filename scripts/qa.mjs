@@ -2033,7 +2033,25 @@ const monotone = (vs) =>
   vs.every((v, i) => i === 0 || v >= vs[i - 1] - 0.01) ||
   vs.every((v, i) => i === 0 || v <= vs[i - 1] + 0.01);
 
+/** The handle's and the disc's vertical centres relative to the TITLE's, per row. They
+ * used to centre on the whole row, which the stage bar made tall enough to put the disc
+ * beside the note instead of the name it numbers. */
+const leadOffsets = () =>
+  sp.evaluate(() =>
+    [...document.querySelectorAll(".focus-row")].map((row) => {
+      const mid = (el) => {
+        const r = el.getBoundingClientRect();
+        return r.top + r.height / 2;
+      };
+      const t = mid(row.querySelector(".focus-title"));
+      return {
+        disc: +(mid(row.querySelector(".focus-index")) - t).toFixed(2),
+        handle: +(mid(row.querySelector(".focus-handle")) - t).toFixed(2),
+      };
+    }),
+  );
 const stRest = await stageBars();
+const leadTop = await leadOffsets();
 await shot("focus-stages-top", sp.locator(".focus-pane-shell"));
 
 // Focus an OUTLINE editor first, so the click below can prove it leaves the caret alone.
@@ -2100,6 +2118,7 @@ await sp.waitForTimeout(30);
 const runningAfterSwitch = (await stageBars()).reduce((n, b) => n + b.running, 0);
 await sp.waitForTimeout(450);
 const stSidebar = await stageBars();
+const leadSidebar = await leadOffsets();
 await shot("focus-stages-sidebar", sp.locator(".focus-pane-shell"));
 // A diagonal move in the grid: Deploying (1,1) → Planning (0,0), both axes on one clock.
 await sp.mouse.move(990, 690); // off the pane: the switcher click left the pointer in the TopBar
@@ -2145,6 +2164,7 @@ const stageChecks = [
   ["stages: top dock is ONE row of four equal cells, fill exactly on the record's stage", barOk(stRest[0], 0, 4, 1) && barOk(stRest[1], 2, 4, 1) && barOk(stRest[2], 3, 4, 1)],
   ["stages: the bar starts on the title's column (the mockup's alignment)", stRest.every((b) => Math.abs(b.alignedWithTitle) <= 0.5)],
   ["stages: nothing slides on mount", stRest.every((b) => b.running === 0)],
+  ["stages: the handle and disc centre on the TITLE, not on the tall row (both docks)", [...leadTop, ...leadSidebar].every((o) => Math.abs(o.disc) <= 0.5 && Math.abs(o.handle) <= 0.5)],
   ["stages: a click sends set_stage {node, stage}", JSON.stringify(stClick.calls) === '[{"node":"st1","stage":"executing"}]'],
   ["stages: …and moves NOTHING until the store answers (no local mutation)", barOk(stClick.barAfterClick, 0, 4, 1)],
   ["stages: …and leaves the outline editor's caret where it was", editingBefore !== null && stClick.editingAfter === editingBefore],
@@ -2388,6 +2408,7 @@ console.log("  slide :", slideOwn.frames.map((f) => `${f.ms}:${f.x}`).join(" "))
 console.log("  grid  :", slideGrid.frames.map((f) => `${f.ms}:${f.x},${f.y}`).join(" "));
 console.log("  hover :", JSON.stringify({ hoverIn, hoverOut }), "| calls", JSON.stringify(stClick.calls));
 console.log("  docks :", JSON.stringify({ sidebar: stSidebar[0].track, wide: stWide[0].track, narrow: stNarrow[0].track }));
+console.log("  lead  :", JSON.stringify({ leadTop, leadSidebar }), "(px from the title's centre)");
 if (errors.length) console.log("errors  :", errors.slice(0, 5));
 console.log();
 let failed = 0;
