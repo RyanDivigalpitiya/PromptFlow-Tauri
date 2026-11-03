@@ -59,12 +59,20 @@ impl NodeKind {
 /// back as `Planning` rather than failing the whole node, the same forward-compatibility
 /// stance the wire module takes on unknown keys — a strict enum here would turn one new
 /// stage into a node that cannot be pulled at all.
+///
+/// `Building` and `Executing` are TWO VALUES FOR ONE SLOT of the selector: the second
+/// segment reads "Building" by default, and clicking it while it is lit flips it to
+/// "Executing" and back. They are distinct stored values rather than a label preference
+/// so that the choice belongs to the node (synced, undoable, exported) exactly as the stage
+/// itself does. Declaration order is NOT slot order; the frontend's `STAGE_SLOTS` owns that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(from = "String")]
 pub enum Stage {
     #[default]
     #[serde(rename = "planning")]
     Planning,
+    #[serde(rename = "building")]
+    Building,
     #[serde(rename = "executing")]
     Executing,
     #[serde(rename = "testing")]
@@ -76,6 +84,7 @@ pub enum Stage {
 impl Stage {
     pub fn from_raw(s: &str) -> Self {
         match s {
+            "building" => Self::Building,
             "executing" => Self::Executing,
             "testing" => Self::Testing,
             "deploying" => Self::Deploying,
@@ -86,6 +95,7 @@ impl Stage {
     pub fn raw(self) -> &'static str {
         match self {
             Self::Planning => "planning",
+            Self::Building => "building",
             Self::Executing => "executing",
             Self::Testing => "testing",
             Self::Deploying => "deploying",

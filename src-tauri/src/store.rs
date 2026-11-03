@@ -3085,6 +3085,23 @@ mod tests {
         assert_eq!(loaded[&a].stage, Stage::Executing);
     }
 
+    /// Building and Executing share the selector's second slot, but they are two stored
+    /// values: flipping between them is a real change (one delta, one undo step), not a
+    /// no-op the "unchanged" guard swallows, and each survives the SQLite round trip.
+    #[test]
+    fn building_and_executing_are_distinct_stages() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        s.set_stage(a, Stage::Building).unwrap();
+        assert_eq!(persist::load_all(&s.db).unwrap()[&a].stage, Stage::Building);
+        let (d, _) = s.set_stage(a, Stage::Executing).unwrap();
+        assert_eq!(d.ops.len(), 1, "the label flip is a real mutation");
+        assert_eq!(persist::load_all(&s.db).unwrap()[&a].stage, Stage::Executing);
+        s.undo().unwrap();
+        assert_eq!(s.get(a).unwrap().stage, Stage::Building, "one ⌘Z undoes just the flip");
+    }
+
     // MARK: Sync client (the outbox, and the remote-apply path)
     //
     // The wire-level scenarios live in the server crate's matrix; these pin the parts

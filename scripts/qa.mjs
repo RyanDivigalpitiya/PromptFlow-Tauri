@@ -1856,8 +1856,9 @@ const afterReset = await mp.evaluate(() => ({
 }));
 
 // ---- 10. Focus pane: the STAGE selector -------------------------------------
-// Each pinned row ends in Planning ▸ Executing ▸ Testing ▸ Deploying, and the lit fill
-// SLIDES to the clicked stage. The store half (one undo step, the structure clock, no
+// Each pinned row ends in Planning ▸ Building ▸ Testing ▸ Deploying, and the lit fill
+// SLIDES to the clicked stage. The second segment is a SLOT holding two stages: clicking it
+// while it is lit flips Building ⇄ Executing, and the fill neither moves nor resizes. The store half (one undo step, the structure clock, no
 // inheritance on split, export) is `cargo test`'s; the two meet at `set_stage {node,
 // stage}`. What only the engine can answer is all here: that the fill is ONE element
 // sitting exactly on the current cell at rest, that a click does NOT move it (the UI shows
@@ -1880,7 +1881,8 @@ const STAGE_NODES = [
     stage: "deploying",
   }),
   // NOT pinned, but staged: a node keeps its stage while it is out of the pane, and
-  // shows it — without sliding in — the moment it is pinned.
+  // shows it — without sliding in — the moment it is pinned. It is at the slot's SECOND
+  // stage, so it is also the case that reads "Executing" rather than the default.
   node("st4", null, 3072, "Staged while unpinned", "checkbox", { stage: "executing" }),
 ];
 const stRec = Object.fromEntries(STAGE_NODES.map((n) => [n.id, n]));
@@ -2058,7 +2060,7 @@ await shot("focus-stages-top", sp.locator(".focus-pane-shell"));
 await sp.locator(".node-row", { hasText: "Out for deploy" }).first().locator(".node-text-static").click();
 await sp.waitForTimeout(150);
 const editingBefore = await sp.evaluate(() => document.activeElement?.closest(".node-row")?.textContent ?? null);
-await barBtn(0, "Executing").click();
+await barBtn(0, "Building").click();
 await sp.waitForTimeout(150);
 const editingAfterClick = await sp.evaluate(() => document.activeElement?.closest(".node-row")?.textContent ?? null);
 await sp.mouse.move(5, 690); // off the bar, so the colour clause isn't reading a hover
@@ -2071,13 +2073,32 @@ const stClick = {
   editingAfter: editingAfterClick,
 };
 // The answer arrives as this window's own delta, and the fill travels one cell.
-const slideOwn = await stageSlide(0, "st1", "executing", "main");
+const slideOwn = await stageSlide(0, "st1", "building", "main");
 const stAfterOwn = (await stageBars())[0];
-// Clicking the stage that is already lit costs nothing — not even an invoke.
-await barBtn(0, "Executing").click();
+// Clicking a lit ONE-stage segment costs nothing — not even an invoke. (Row 1 is Testing.)
+await barBtn(1, "Testing").click();
 await sp.mouse.move(5, 690);
 await sp.waitForTimeout(100);
 const callsAfterReclick = (await stageCalls()).length;
+// The lit segment says whether clicking it again does anything.
+const litCursors = await sp.evaluate(() => {
+  const cur = (row) =>
+    getComputedStyle(document.querySelectorAll(".focus-row")[row].querySelector(".focus-stage.current")).cursor;
+  return { cycling: cur(0), single: cur(1) };
+});
+// Clicking the LIT Building segment flips it to Executing: the same slot, so the fill must
+// not travel, resize or even start a transition — only the label swaps. Then back again.
+const stageFlip = async (label, to) => {
+  const before = (await stageCalls()).length;
+  await barBtn(0, label).click();
+  await sp.mouse.move(5, 690);
+  await sp.waitForTimeout(100);
+  const calls = (await stageCalls()).slice(before);
+  const slide = await stageSlide(0, "st1", to, "main");
+  return { calls, slide, bar: (await stageBars())[0] };
+};
+const flipTo = await stageFlip("Building", "executing");
+const flipBack = await stageFlip("Executing", "building");
 // From ANOTHER window (or ⌘Z — the same delta path): two cells, same clock.
 const slidePeer = await stageSlide(0, "st1", "deploying", "w1", 100);
 await shot("focus-stages-midslide", sp.locator(".focus-row").first());
@@ -2145,7 +2166,7 @@ const runningAfterNarrow = (await stageBars()).reduce((n, b) => n + b.running, 0
 const stNarrow = await stageBars();
 await shot("focus-stages-narrow", sp.locator(".focus-pane-shell"));
 
-const STAGE_IDX = { planning: 0, executing: 1, testing: 2, deploying: 3 };
+const STAGE_IDX = { planning: 0, building: 1, executing: 1, testing: 2, deploying: 3 };
 const slideOk = (sl, axis, from, to) => {
   const vs = sl.frames.map((f) => f[axis]);
   const interior = vs.filter((v) => Math.min(from, to) + 0.5 < v && v < Math.max(from, to) - 0.5);
@@ -2159,29 +2180,46 @@ const slideOk = (sl, axis, from, to) => {
   );
 };
 const cellOf = (bar, i) => bar.cells[i];
+/** The fill and every cell occupy exactly the boxes they did in `ref` — a label flip must
+ * not move or resize anything, the fill least of all. */
+const sameBoxes = (bar, ref) =>
+  ["x", "y", "w", "h"].every((k) => near(bar.thumb[k], ref.thumb[k], 0.01)) &&
+  bar.cells.every((c, i) => ["x", "y", "w", "h"].every((k) => near(c[k], ref.cells[i][k], 0.01)));
+const flipOk = (f, to, label) =>
+  JSON.stringify(f.calls) === JSON.stringify([{ node: "st1", stage: to }]) &&
+  f.slide.count === 0 &&
+  barOk(f.bar, 1, 4, 1) &&
+  f.bar.cells[1].text === label &&
+  sameBoxes(f.bar, stAfterOwn);
+const barOf = (bars, title) => bars.find((b) => b.title === title);
 const stageChecks = [
   ["stages: one bar per pinned row, none for the unpinned-but-staged node", stRest.length === 3],
   ["stages: top dock is ONE row of four equal cells, fill exactly on the record's stage", barOk(stRest[0], 0, 4, 1) && barOk(stRest[1], 2, 4, 1) && barOk(stRest[2], 3, 4, 1)],
   ["stages: the bar starts on the title's column (the mockup's alignment)", stRest.every((b) => Math.abs(b.alignedWithTitle) <= 0.5)],
   ["stages: nothing slides on mount", stRest.every((b) => b.running === 0)],
   ["stages: the handle and disc centre on the TITLE, not on the tall row (both docks)", [...leadTop, ...leadSidebar].every((o) => Math.abs(o.disc) <= 0.5 && Math.abs(o.handle) <= 0.5)],
-  ["stages: a click sends set_stage {node, stage}", JSON.stringify(stClick.calls) === '[{"node":"st1","stage":"executing"}]'],
+  ["stages: the second segment reads Building by default", stRest.every((b) => b.cells[1].text === "Building")],
+  ["stages: a click sends set_stage {node, stage}, landing on the slot's default", JSON.stringify(stClick.calls) === '[{"node":"st1","stage":"building"}]'],
   ["stages: …and moves NOTHING until the store answers (no local mutation)", barOk(stClick.barAfterClick, 0, 4, 1)],
   ["stages: …and leaves the outline editor's caret where it was", editingBefore !== null && stClick.editingAfter === editingBefore],
   ["stages: the answer SLIDES the fill one cell on --stage-anim-dur (240ms)", slideOk(slideOwn, "x", cellOf(stRest[0], 0).x, cellOf(stRest[0], 1).x) && slideOwn.dur === 240],
   ["stages: the slide eases OUT (over half the travel in its first third)", (() => { const f = slideOwn.frames.find((q) => q.ms === 80); const end = cellOf(stRest[0], 1).x; return f && f.x > end * 0.5; })()],
   ["stages: …and lands with the new stage lit and checked", barOk(stAfterOwn, 1, 4, 1)],
-  ["stages: re-clicking the lit stage sends nothing", callsAfterReclick === 1],
+  ["stages: re-clicking a lit one-stage segment sends nothing", callsAfterReclick === 1],
+  ["stages: re-clicking lit Building flips it to Executing — label only, the fill neither moves, resizes nor animates", flipOk(flipTo, "executing", "Executing")],
+  ["stages: …and clicking it again flips back to Building, the same way", flipOk(flipBack, "building", "Building")],
+  ["stages: the lit segment's cursor is a pointer only where a click flips it", litCursors.cycling === "pointer" && litCursors.single === "default"],
   ["stages: a peer window's change slides two cells on the same clock", slideOk(slidePeer, "x", cellOf(stRest[0], 1).x, cellOf(stRest[0], 3).x) && slidePeer.dur === 240],
   ["stages: hover arrives INSTANTLY (0s while hovered)", hoverIn.dur === "0s" && alphaOf(hoverIn.color) > 0.6],
   ["stages: …and fades out (0.2s once un-hovered)", hoverOut === "0.2s"],
-  ["stages: pinning a staged node shows ITS stage, with no slide-in", !!stPinned && barOk(stPinned, STAGE_IDX.executing, 4, 1) && stPinned.running === 0],
+  ["stages: pinning a staged node shows ITS stage (Executing, not the default), with no slide-in", !!stPinned && barOk(stPinned, STAGE_IDX.executing, 4, 1) && stPinned.cells[1].text === "Executing" && stPinned.running === 0],
   ["stages: the dock switch slides nothing", runningAfterSwitch === 0],
-  ["stages: the 280px sidebar wraps to 2×2 with the FULL words, fill on its cell", barOk(stSidebar[0], 3, 2, 2) && barOk(stSidebar[1], 2, 2, 2) && stSidebar.every((b) => b.cells.every((c) => !["Plan", "Exec", "Test", "Deploy"].includes(c.text)))],
+  ["stages: the 280px sidebar wraps to 2×2 with the FULL words, fill on its cell", barOk(stSidebar[0], 3, 2, 2) && barOk(stSidebar[1], 2, 2, 2) && stSidebar.every((b) => b.cells.every((c) => !["Plan", "Build", "Exec", "Test", "Deploy"].includes(c.text)))],
+  ["stages: …where Executing fits unclipped too", !!barOf(stSidebar, "Staged while unpinned") && barOk(barOf(stSidebar, "Staged while unpinned"), 1, 2, 2) && barOf(stSidebar, "Staged while unpinned").cells[1].text === "Executing"],
   ["stages: a grid move travels BOTH axes on one clock (Deploying → Planning)", slideOk(slideGrid, "x", cellOf(stSidebar[2], 3).x, 0) && slideOk(slideGrid, "y", cellOf(stSidebar[2], 3).y, 0)],
   ["stages: …and lands on Planning", barOk(stGridAfter, 0, 2, 2)],
   ["stages: widening the dock back to one row slides nothing", runningAfterWiden === 0 && barOk(stWide[0], 3, 4, 1)],
-  ["stages: the 180px dock keeps 2×2 and abbreviates (only an ellipsis past that)", runningAfterNarrow === 0 && barOk(stNarrow[0], 3, 2, 2, true) && JSON.stringify(stNarrow[0].cells.map((c) => c.text)) === '["Plan","Exec","Test","Deploy"]'],
+  ["stages: the 180px dock keeps 2×2 and abbreviates (only an ellipsis past that)", runningAfterNarrow === 0 && barOk(stNarrow[0], 3, 2, 2, true) && JSON.stringify(stNarrow[0].cells.map((c) => c.text)) === '["Plan","Build","Test","Deploy"]' && barOf(stNarrow, "Staged while unpinned")?.cells[1].text === "Exec"],
 ];
 
 // ---- Report ------------------------------------------------------------------

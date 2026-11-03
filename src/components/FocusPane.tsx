@@ -8,7 +8,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { walkCurrentTask } from "../lib/currentTask";
-import { STAGES, type NodeRec, type Stage } from "../lib/types";
+import { STAGE_SLOTS, stageSlot, type NodeRec, type Stage } from "../lib/types";
 import { revealNode, setStage } from "../state/controller";
 import { useFocusPane } from "../state/focusPane";
 import {
@@ -88,8 +88,15 @@ function firstNoteLine(note: string): string | null {
   return null;
 }
 
-/** Planning ▸ Executing ▸ Testing ▸ Deploying — a segmented control whose lit fill
+/** Planning ▸ Building ▸ Testing ▸ Deploying — a segmented control whose lit fill
  * SLIDES to the clicked segment.
+ *
+ * A segment is a SLOT, and a slot may hold more than one stage (`STAGE_SLOTS`): clicking
+ * the LIT segment steps to the slot's next stage, which is how Building becomes Executing
+ * and back. The fill does not move for that — same slot, same index, same transform — and
+ * cannot change width either, since every cell is one `minmax(0, 1fr)` column whatever its
+ * label says; only the label swaps. An unlit segment always reads its slot's DEFAULT and a
+ * click lands there, so leaving Executing and coming back reads Building again.
  *
  * The fill is ONE element (`.focus-stage-thumb`) translated by whole segment widths, never
  * a background on the current button: a per-button background can only swap, it cannot
@@ -110,10 +117,7 @@ function firstNoteLine(note: string): string | null {
  * mousedown `preventDefault`s so a stage click never steals focus from an outline editor:
  * a stage is metadata about the row, not a navigation, and the caret should stay put. */
 function StageBar({ nodeId, stage }: { nodeId: string; stage: Stage }) {
-  const current = Math.max(
-    0,
-    STAGES.findIndex((s) => s.id === stage),
-  );
+  const current = stageSlot(stage);
   return (
     // Two boxes because a container query cannot restyle the container itself: the outer
     // one is measured, the inner track is what wraps into 2×2.
@@ -131,22 +135,33 @@ function StageBar({ nodeId, stage }: { nodeId: string; stage: Stage }) {
         }
       >
         <span className="focus-stage-thumb" aria-hidden="true" />
-        {STAGES.map((s, i) => (
-          <button
-            key={s.id}
-            type="button"
-            role="radio"
-            aria-checked={i === current}
-            aria-label={s.label}
-            tabIndex={-1}
-            className={"focus-stage" + (i === current ? " current" : "")}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => void setStage(nodeId, s.id)}
-          >
-            <span className="focus-stage-long">{s.label}</span>
-            <span className="focus-stage-short">{s.short}</span>
-          </button>
-        ))}
+        {STAGE_SLOTS.map((slot, i) => {
+          const lit = i === current;
+          // The lit slot reads the node's own stage; every other reads its default.
+          const shown = (lit && slot.find((o) => o.id === stage)) || slot[0];
+          // A lit slot steps to its next option — itself, i.e. no invoke at all, for a
+          // one-stage slot (`setStage` drops an unchanged value).
+          const next = lit ? slot[(slot.indexOf(shown) + 1) % slot.length] : slot[0];
+          const cycles = lit && slot.length > 1;
+          return (
+            <button
+              // Keyed by SLOT, never by the label showing: a label flip must not remount
+              // the button (it would drop its hover state and its colour transition).
+              key={slot[0].id}
+              type="button"
+              role="radio"
+              aria-checked={lit}
+              aria-label={shown.label}
+              tabIndex={-1}
+              className={"focus-stage" + (lit ? " current" : "") + (cycles ? " cycles" : "")}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => void setStage(nodeId, next.id)}
+            >
+              <span className="focus-stage-long">{shown.label}</span>
+              <span className="focus-stage-short">{shown.short}</span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );

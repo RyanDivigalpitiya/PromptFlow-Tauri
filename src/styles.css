@@ -2184,6 +2184,12 @@ body {
   cursor: default;
 }
 
+/* …unless clicking it again does something: a slot with a second stage (Building ⇄
+   Executing) flips its label when the lit segment is clicked. */
+.focus-stage.current.cycles {
+  cursor: pointer;
+}
+
 /* The ellipsis lives on the label spans, not the button: a WebKit button lays its content
    out in an anonymous inner box that `text-overflow` on the button never reaches. */
 .focus-stage-long,
