@@ -326,6 +326,39 @@ fn two_desktops_converge_through_the_real_hub() {
     );
 }
 
+/// The focus pane's stage over the real wire: it crosses, it rides the STRUCTURE clock
+/// (so concurrent typing on the other device neither loses it nor is lost to it), and the
+/// hub's re-encode of every payload through its own `WireNode` carries it rather than
+/// silently dropping an unknown key.
+#[test]
+fn a_stage_crosses_and_survives_concurrent_typing() {
+    use promptflow_core::Stage;
+    let hub = HubProcess::start();
+    let mac = Device::new("mac", &hub);
+    let studio = Device::new("studio", &hub);
+
+    let a = typed(&mac, "ship the stage selector");
+    mac.sync();
+    studio.sync();
+    assert_eq!(studio.node(a).unwrap().stage, Stage::Planning);
+
+    tick();
+    mac.with(|s| s.set_stage(a, Stage::Testing).unwrap());
+    // The studio, not knowing, retypes the same node.
+    studio.with(|s| {
+        s.set_text(a, "retyped on the studio".into(), None, None, None)
+            .unwrap()
+    });
+    mac.sync();
+    studio.sync();
+    mac.sync();
+    for dev in [&mac, &studio] {
+        let n = dev.node(a).unwrap();
+        assert_eq!(n.stage, Stage::Testing, "{}: the stage survived the typing", dev.name);
+        assert_eq!(n.text, "retyped on the studio", "{}: the typing survived the stage", dev.name);
+    }
+}
+
 /// The first-configuration seed, end to end: a store that predates sync hands its WHOLE
 /// outline over, and a fresh device picks all of it up.
 #[test]

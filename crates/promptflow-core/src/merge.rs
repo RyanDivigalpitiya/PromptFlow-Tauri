@@ -424,6 +424,7 @@ mod tests {
             kind: NodeKind::BulletPoint,
             is_completed: false,
             is_highlighted: false,
+            stage: Default::default(),
             bold_ranges: vec![],
             italic_ranges: vec![],
             underline_ranges: vec![],

@@ -315,6 +315,121 @@
         "underlineRanges": [],
         "updatedAt": 1000
       }
+    },
+    {
+      "name": "a non-default stage is written (focus pane stage, syncs on the structure clock)",
+      "json": {
+        "boldRanges": [],
+        "completedAt": null,
+        "createdAt": 1000,
+        "id": "11111111-1111-4111-8111-111111111111",
+        "isCompleted": false,
+        "isHighlighted": true,
+        "italicRanges": [],
+        "kind": "bulletPoint",
+        "note": "",
+        "parent": null,
+        "position": 0,
+        "stage": "testing",
+        "structureUpdatedAt": 2000,
+        "text": "alpha",
+        "underlineRanges": [],
+        "updatedAt": 1000
+      },
+      "canonical": {
+        "boldRanges": [],
+        "completedAt": null,
+        "createdAt": 1000,
+        "id": "11111111-1111-4111-8111-111111111111",
+        "isCompleted": false,
+        "isHighlighted": true,
+        "italicRanges": [],
+        "kind": "bulletPoint",
+        "note": "",
+        "parent": null,
+        "position": 0,
+        "stage": "testing",
+        "structureUpdatedAt": 2000,
+        "text": "alpha",
+        "underlineRanges": [],
+        "updatedAt": 1000
+      }
+    },
+    {
+      "name": "the default stage is never written, so stage-free nodes encode exactly as before",
+      "json": {
+        "boldRanges": [],
+        "completedAt": null,
+        "createdAt": 1000,
+        "id": "11111111-1111-4111-8111-111111111111",
+        "isCompleted": false,
+        "isHighlighted": false,
+        "italicRanges": [],
+        "kind": "bulletPoint",
+        "note": "",
+        "parent": null,
+        "position": 0,
+        "stage": "planning",
+        "structureUpdatedAt": 1000,
+        "text": "alpha",
+        "underlineRanges": [],
+        "updatedAt": 1000
+      },
+      "canonical": {
+        "boldRanges": [],
+        "completedAt": null,
+        "createdAt": 1000,
+        "id": "11111111-1111-4111-8111-111111111111",
+        "isCompleted": false,
+        "isHighlighted": false,
+        "italicRanges": [],
+        "kind": "bulletPoint",
+        "note": "",
+        "parent": null,
+        "position": 0,
+        "structureUpdatedAt": 1000,
+        "text": "alpha",
+        "underlineRanges": [],
+        "updatedAt": 1000
+      }
+    },
+    {
+      "name": "an unknown stage (a newer peer's) decodes as planning instead of failing the node",
+      "json": {
+        "boldRanges": [],
+        "completedAt": null,
+        "createdAt": 1000,
+        "id": "11111111-1111-4111-8111-111111111111",
+        "isCompleted": false,
+        "isHighlighted": false,
+        "italicRanges": [],
+        "kind": "bulletPoint",
+        "note": "",
+        "parent": null,
+        "position": 0,
+        "stage": "shipping",
+        "structureUpdatedAt": 1000,
+        "text": "alpha",
+        "underlineRanges": [],
+        "updatedAt": 1000
+      },
+      "canonical": {
+        "boldRanges": [],
+        "completedAt": null,
+        "createdAt": 1000,
+        "id": "11111111-1111-4111-8111-111111111111",
+        "isCompleted": false,
+        "isHighlighted": false,
+        "italicRanges": [],
+        "kind": "bulletPoint",
+        "note": "",
+        "parent": null,
+        "position": 0,
+        "structureUpdatedAt": 1000,
+        "text": "alpha",
+        "underlineRanges": [],
+        "updatedAt": 1000
+      }
     }
   ]
 }

@@ -11,5 +11,5 @@ pub mod model;
 pub mod splice;
 pub mod wire;
 
-pub use model::{now_ms, sibling_order, utf16_len, NodeKind, NodeRec, GAP};
+pub use model::{now_ms, sibling_order, utf16_len, NodeKind, NodeRec, Stage, GAP};
 pub use wire::{WireNode, PROTOCOL_VERSION};

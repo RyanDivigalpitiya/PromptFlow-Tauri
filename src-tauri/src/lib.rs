@@ -333,6 +333,7 @@ pub fn run() {
             commands::set_note,
             commands::set_kind,
             commands::set_highlighted,
+            commands::set_stage,
             commands::indent_block,
             commands::outdent_block,
             commands::move_block_by,

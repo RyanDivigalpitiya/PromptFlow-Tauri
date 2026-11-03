@@ -1,4 +1,4 @@
-use crate::model::{now_ms, NodeKind, NodeRec};
+use crate::model::{now_ms, NodeKind, NodeRec, Stage};
 use promptflow_core::wire::{TombstoneRef, WireNode, WireOp};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   kind          TEXT NOT NULL,
   is_completed  INTEGER NOT NULL DEFAULT 0,
   is_highlighted INTEGER NOT NULL DEFAULT 0,
+  stage         TEXT NOT NULL DEFAULT 'planning',
   is_collapsed  INTEGER NOT NULL DEFAULT 0,
   bold_ranges   TEXT NOT NULL DEFAULT '[]',
   italic_ranges TEXT NOT NULL DEFAULT '[]',
@@ -84,12 +85,18 @@ fn init(db: &Connection) -> Result<(), String> {
         "UPDATE nodes SET structure_updated_at = updated_at WHERE structure_updated_at = 0",
         [],
     );
+    // The focus pane's stage. Every existing row reads back as the default, which is what
+    // "a node nobody has staged yet" means — no backfill, and no clock moves.
+    let _ = db.execute(
+        "ALTER TABLE nodes ADD COLUMN stage TEXT NOT NULL DEFAULT 'planning'",
+        [],
+    );
     Ok(())
 }
 
 pub fn load_all(db: &Connection) -> Result<HashMap<Uuid, NodeRec>, String> {
     let mut stmt = db
-        .prepare("SELECT id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges, created_at, updated_at, completed_at, structure_updated_at FROM nodes")
+        .prepare("SELECT id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges, created_at, updated_at, completed_at, structure_updated_at, stage FROM nodes")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
@@ -114,6 +121,7 @@ pub fn load_all(db: &Connection) -> Result<HashMap<Uuid, NodeRec>, String> {
                 kind: NodeKind::from_raw(&row.get::<_, String>(5)?),
                 is_completed: row.get::<_, i64>(6)? != 0,
                 is_highlighted: row.get::<_, i64>(7)? != 0,
+                stage: Stage::from_raw(&row.get::<_, String>(16)?),
                 is_collapsed: row.get::<_, i64>(8)? != 0,
                 bold_ranges: serde_json::from_str(&bold_json).unwrap_or_default(),
                 italic_ranges: serde_json::from_str(&italic_json).unwrap_or_default(),
@@ -188,8 +196,8 @@ pub fn apply_plan(db: &mut Connection, plan: ApplyPlan<'_>) -> Result<(), String
     {
         let mut upsert = tx
             .prepare_cached(
-                "INSERT INTO nodes (id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges, created_at, updated_at, completed_at, structure_updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                "INSERT INTO nodes (id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges, created_at, updated_at, completed_at, structure_updated_at, stage)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                  ON CONFLICT(id) DO UPDATE SET
                    parent=excluded.parent, position=excluded.position, text=excluded.text,
                    note=excluded.note, kind=excluded.kind, is_completed=excluded.is_completed,
@@ -197,7 +205,7 @@ pub fn apply_plan(db: &mut Connection, plan: ApplyPlan<'_>) -> Result<(), String
                    bold_ranges=excluded.bold_ranges, italic_ranges=excluded.italic_ranges,
                    underline_ranges=excluded.underline_ranges, created_at=excluded.created_at,
                    updated_at=excluded.updated_at, completed_at=excluded.completed_at,
-                   structure_updated_at=excluded.structure_updated_at",
+                   structure_updated_at=excluded.structure_updated_at, stage=excluded.stage",
             )
             .map_err(|e| e.to_string())?;
         let mut delete = tx
@@ -232,6 +240,7 @@ pub fn apply_plan(db: &mut Connection, plan: ApplyPlan<'_>) -> Result<(), String
                             r.updated_at,
                             r.completed_at,
                             r.structure_updated_at,
+                            r.stage.raw(),
                         ])
                         .map_err(|e| e.to_string())?;
                 }
@@ -456,4 +465,52 @@ pub fn enqueue_all_live(db: &mut Connection, nodes: &HashMap<Uuid, NodeRec>) -> 
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(nodes.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store created before stages existed has a `nodes` table WITHOUT the column. The
+    /// idempotent ALTER in `init` must add it, every old row must read back as the
+    /// default, and running `init` a second time (every launch does) must change nothing.
+    #[test]
+    fn a_store_from_before_stages_migrates_to_the_default() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE nodes (
+               id TEXT PRIMARY KEY, parent TEXT, position INTEGER NOT NULL,
+               text TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL,
+               is_completed INTEGER NOT NULL DEFAULT 0,
+               is_highlighted INTEGER NOT NULL DEFAULT 0,
+               is_collapsed INTEGER NOT NULL DEFAULT 0,
+               bold_ranges TEXT NOT NULL DEFAULT '[]',
+               italic_ranges TEXT NOT NULL DEFAULT '[]',
+               underline_ranges TEXT NOT NULL DEFAULT '[]',
+               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+               structure_updated_at INTEGER NOT NULL DEFAULT 0,
+               completed_at INTEGER);
+             INSERT INTO nodes (id, position, text, kind, created_at, updated_at,
+               structure_updated_at)
+             VALUES ('00000000-0000-0000-0000-000000000000', 0, 'old', 'bulletPoint',
+               1000, 1000, 1000);",
+        )
+        .unwrap();
+        init(&db).unwrap();
+        init(&db).unwrap();
+        let loaded = load_all(&db).unwrap();
+        let rec = &loaded[&Uuid::nil()];
+        assert_eq!(rec.stage, Stage::Planning);
+        assert_eq!(rec.structure_updated_at, 1000, "the migration moves no clock");
+    }
+
+    #[test]
+    fn a_stage_survives_a_reload() {
+        let mut db = open_in_memory().unwrap();
+        let mut rec = NodeRec::new("staged".into(), NodeKind::Checkbox, None, 0);
+        rec.stage = Stage::Executing;
+        let id = rec.id;
+        apply_plan(&mut db, ApplyPlan::local(vec![(id, Some(&rec))], false, false)).unwrap();
+        assert_eq!(load_all(&db).unwrap()[&id].stage, Stage::Executing);
+    }
 }

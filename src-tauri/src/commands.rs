@@ -1,4 +1,4 @@
-use crate::model::NodeKind;
+use crate::model::{NodeKind, Stage};
 use crate::store::{Delta, MutationOut, Snapshot, Store};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
@@ -233,6 +233,18 @@ pub fn set_highlighted(
     on: bool,
 ) -> Result<MutationOut, String> {
     let r = state.lock().unwrap().set_highlighted(node, on);
+    run_mutation(&app, &window, r)
+}
+
+#[tauri::command]
+pub fn set_stage(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<StoreState>,
+    node: Uuid,
+    stage: Stage,
+) -> Result<MutationOut, String> {
+    let r = state.lock().unwrap().set_stage(node, stage);
     run_mutation(&app, &window, r)
 }
 

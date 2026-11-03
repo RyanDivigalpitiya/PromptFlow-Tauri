@@ -1,4 +1,4 @@
-use crate::model::{now_ms, sibling_order, utf16_len, NodeKind, NodeRec};
+use crate::model::{now_ms, sibling_order, utf16_len, NodeKind, NodeRec, Stage};
 use crate::persist;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -17,7 +17,7 @@ fn stamp_content(r: &mut NodeRec) {
 }
 
 /// Stamp the STRUCTURE clock: parent, position, kind, is_completed, completed_at,
-/// is_highlighted.
+/// is_highlighted, stage.
 fn stamp_structure(r: &mut NodeRec) {
     r.structure_updated_at = now_ms();
 }
@@ -1163,6 +1163,29 @@ impl Store {
         self.begin();
         self.edit(node, |r| {
             r.is_highlighted = on;
+            stamp_structure(r);
+        });
+        let delta = self.commit(None)?;
+        Ok((delta, MutationOut::default()))
+    }
+
+    /// The focus pane's stage selector. A STRUCTURE field — it sits beside
+    /// `is_highlighted` as workflow state about the node rather than its words, so a stage
+    /// click on one device can never carry stale text over concurrent typing on another
+    /// (the T7 race, which the merge vectors pin for this field too). One commit, so one
+    /// ⌘Z steps it back; re-selecting the current stage emits nothing.
+    pub fn set_stage(
+        &mut self,
+        node: Uuid,
+        stage: Stage,
+    ) -> Result<(Delta, MutationOut), String> {
+        self.ensure(node)?;
+        if self.nodes[&node].stage == stage {
+            return Ok((self.empty_delta(), MutationOut::default()));
+        }
+        self.begin();
+        self.edit(node, |r| {
+            r.stage = stage;
             stamp_structure(r);
         });
         let delta = self.commit(None)?;
@@ -2792,6 +2815,13 @@ mod tests {
                 &noop,
             ),
             (
+                "set_stage",
+                Box::new(|s, _a, b| {
+                    s.set_stage(b, Stage::Testing).unwrap();
+                }),
+                &noop,
+            ),
+            (
                 "indent_block",
                 Box::new(|s, _a, b| {
                     s.indent_block(&[b], false).unwrap();
@@ -3001,6 +3031,58 @@ mod tests {
         .unwrap();
         let loaded = persist::load_all(&db).unwrap();
         assert_eq!(loaded[&Uuid::nil()].structure_updated_at, 7777);
+    }
+
+    // MARK: Focus pane stage
+
+    #[test]
+    fn set_stage_is_one_undo_step_and_a_noop_when_unchanged() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::Checkbox).unwrap();
+        let a = a.new_node.unwrap();
+        assert_eq!(s.get(a).unwrap().stage, Stage::Planning, "a new node starts at Planning");
+        let (d, _) = s.set_stage(a, Stage::Testing).unwrap();
+        assert_eq!(d.ops.len(), 1);
+        assert_eq!(s.get(a).unwrap().stage, Stage::Testing);
+        // Re-selecting the current stage: no delta, no undo entry, no rev bump.
+        let rev = s.rev;
+        let (d, _) = s.set_stage(a, Stage::Testing).unwrap();
+        assert!(d.ops.is_empty());
+        assert_eq!(s.rev, rev);
+        s.undo().unwrap();
+        assert_eq!(s.get(a).unwrap().stage, Stage::Planning);
+        s.redo().unwrap();
+        assert_eq!(s.get(a).unwrap().stage, Stage::Testing);
+    }
+
+    /// "Default stage for a new bullet is always Planning" — so a node split off a staged
+    /// one, or created beside it, never inherits the stage the way it inherits the kind.
+    #[test]
+    fn new_nodes_never_inherit_a_stage() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::Checkbox).unwrap();
+        let a = a.new_node.unwrap();
+        s.set_text(a, "leftright".into(), None, None, None).unwrap();
+        s.set_stage(a, Stage::Deploying).unwrap();
+        let (_, split) = s
+            .commit_new_node(a, "left".into(), "right".into(), false, false)
+            .unwrap();
+        let (_, sib) = s.insert_sibling_after(a, NodeKind::Checkbox).unwrap();
+        let (_, child) = s.append_child(a, NodeKind::Checkbox).unwrap();
+        for id in [split.new_node, sib.new_node, child.new_node] {
+            assert_eq!(s.get(id.unwrap()).unwrap().stage, Stage::Planning);
+        }
+        assert_eq!(s.get(a).unwrap().stage, Stage::Deploying, "the source keeps its own");
+    }
+
+    #[test]
+    fn a_stage_persists_through_the_commit() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::BulletPoint).unwrap();
+        let a = a.new_node.unwrap();
+        s.set_stage(a, Stage::Executing).unwrap();
+        let loaded = persist::load_all(&s.db).unwrap();
+        assert_eq!(loaded[&a].stage, Stage::Executing);
     }
 
     // MARK: Sync client (the outbox, and the remote-apply path)

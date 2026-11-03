@@ -9,7 +9,7 @@
 //! keys, so a newer peer may add fields without breaking an older one. Do not add
 //! `deny_unknown_fields` anywhere in this module.
 
-use crate::model::{NodeKind, NodeRec};
+use crate::model::{NodeKind, NodeRec, Stage};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -38,6 +38,14 @@ pub struct WireNode {
     pub kind: NodeKind,
     pub is_completed: bool,
     pub is_highlighted: bool,
+    /// Structure group. Absent ⇒ `Planning`, and `Planning` is never WRITTEN: every node
+    /// at the default stage encodes byte-identically to protocol v1 before stages existed,
+    /// so this is an additive change an older peer decodes by ignoring the key. (An older
+    /// HUB would also drop a non-default value on its way through — it re-encodes every
+    /// payload through its own `WireNode` — so the hub must be redeployed before a client
+    /// that sets stages syncs through it.)
+    #[serde(default, skip_serializing_if = "Stage::is_default")]
+    pub stage: Stage,
     #[serde(default)]
     pub bold_ranges: Vec<i64>,
     #[serde(default)]
@@ -48,7 +56,7 @@ pub struct WireNode {
     /// Content clock: text, note, and the three style-range arrays.
     pub updated_at: i64,
     /// Structure clock: parent, position, kind, is_completed, completed_at,
-    /// is_highlighted.
+    /// is_highlighted, stage.
     pub structure_updated_at: i64,
     #[serde(default)]
     pub completed_at: Option<i64>,
@@ -79,6 +87,7 @@ impl WireNode {
         self.is_completed = src.is_completed;
         self.completed_at = src.completed_at;
         self.is_highlighted = src.is_highlighted;
+        self.stage = src.stage;
         self.structure_updated_at = src.structure_updated_at;
     }
 }
@@ -94,6 +103,7 @@ impl From<&NodeRec> for WireNode {
             kind: r.kind,
             is_completed: r.is_completed,
             is_highlighted: r.is_highlighted,
+            stage: r.stage,
             bold_ranges: r.bold_ranges.clone(),
             italic_ranges: r.italic_ranges.clone(),
             underline_ranges: r.underline_ranges.clone(),
@@ -125,6 +135,7 @@ impl From<&WireNode> for NodeRec {
             kind: w.kind,
             is_completed: w.is_completed,
             is_highlighted: w.is_highlighted,
+            stage: w.stage,
             is_collapsed: false,
             bold_ranges: w.bold_ranges.clone(),
             italic_ranges: w.italic_ranges.clone(),

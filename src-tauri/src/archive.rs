@@ -1,4 +1,4 @@
-use crate::model::{NodeKind, NodeRec};
+use crate::model::{NodeKind, NodeRec, Stage};
 use crate::store::Store;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,12 @@ pub struct NodeExport {
     /// nodes; import sorts by it, ties falling back to document order.
     #[serde(rename = "focusRank", default, skip_serializing_if = "Option::is_none")]
     pub focus_rank: Option<i64>,
+    /// The focus pane's stage. Written only when it is not the default, on the same
+    /// byte-compat rule as everything above. Unlike `focusRank` it is NOT gated on the
+    /// highlight: every node keeps its own stage while it is out of the pane, so an
+    /// un-pinned node's stage is real data and has to survive a backup.
+    #[serde(default, skip_serializing_if = "Stage::is_default")]
+    pub stage: Stage,
     pub position: i64,
     #[serde(rename = "createdAt")]
     pub created_at: String,
@@ -114,6 +120,7 @@ fn export_node(
         } else {
             None
         },
+        stage: rec.stage,
         position: rec.position,
         created_at: iso(rec.created_at),
         updated_at: iso(rec.updated_at),
@@ -185,6 +192,7 @@ pub fn to_records(doc: &OutlineDocument) -> Imported {
         rec.italic_ranges = e.italic_ranges.clone();
         rec.underline_ranges = e.underline_ranges.clone();
         rec.is_highlighted = e.is_highlighted;
+        rec.stage = e.stage;
         rec.created_at = parse_iso(&e.created_at);
         rec.updated_at = parse_iso(&e.updated_at);
         rec.completed_at = e.completed_at.as_deref().map(parse_iso);
@@ -351,6 +359,7 @@ mod tests {
         s.toggle_completed(b).unwrap();
         s.set_highlighted(a, true).unwrap();
         s.set_highlighted(b, true).unwrap();
+        s.set_stage(a, Stage::Deploying).unwrap();
 
         let roots = s.roots();
         // Pane order REVERSED from document order, so the round trip proves the rank
@@ -375,6 +384,8 @@ mod tests {
         assert!(rb.completed_at.is_some());
         assert_eq!(rb.note, "a note");
         assert!(ra.is_highlighted && rb.is_highlighted);
+        assert_eq!(ra.stage, Stage::Deploying);
+        assert_eq!(rb.stage, Stage::Planning, "an unstaged node comes back at the default");
         assert_eq!(focus_order, vec![rb.id, ra.id]);
         // Fresh ids on import (never reuse the file's).
         assert_ne!(ra.id, a);
@@ -392,6 +403,7 @@ mod tests {
         let json = encode(&document(&s, &s.roots(), &HashSet::new(), &[])).unwrap();
         assert!(!json.contains("isHighlighted"));
         assert!(!json.contains("focusRank"));
+        assert!(!json.contains("\"stage\""), "the default stage is never written");
         // A stale pane id (node since deleted) writes no rank either.
         let ghost = Uuid::new_v4();
         let json = encode(&document(&s, &s.roots(), &HashSet::new(), &[ghost])).unwrap();

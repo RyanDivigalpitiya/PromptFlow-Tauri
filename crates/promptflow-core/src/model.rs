@@ -49,6 +49,62 @@ impl NodeKind {
     }
 }
 
+/// Where a piece of work is in its lifecycle — the focus pane's stage selector. Every
+/// node carries one, but only a PINNED (⌘⇧F) node shows it; un-pinning keeps the value,
+/// so re-pinning brings the row back at the stage it left at. A new node always starts at
+/// `Planning` — the default is never inherited from the node it was split from.
+///
+/// Raw strings are lowercase and are what SQLite, the sync wire and the export file all
+/// carry. DECODING IS LENIENT: an unknown string (a newer peer that added a stage) reads
+/// back as `Planning` rather than failing the whole node, the same forward-compatibility
+/// stance the wire module takes on unknown keys — a strict enum here would turn one new
+/// stage into a node that cannot be pulled at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "String")]
+pub enum Stage {
+    #[default]
+    #[serde(rename = "planning")]
+    Planning,
+    #[serde(rename = "executing")]
+    Executing,
+    #[serde(rename = "testing")]
+    Testing,
+    #[serde(rename = "deploying")]
+    Deploying,
+}
+
+impl Stage {
+    pub fn from_raw(s: &str) -> Self {
+        match s {
+            "executing" => Self::Executing,
+            "testing" => Self::Testing,
+            "deploying" => Self::Deploying,
+            _ => Self::Planning,
+        }
+    }
+
+    pub fn raw(self) -> &'static str {
+        match self {
+            Self::Planning => "planning",
+            Self::Executing => "executing",
+            Self::Testing => "testing",
+            Self::Deploying => "deploying",
+        }
+    }
+
+    /// For `skip_serializing_if`: the default stage is never written to the wire or the
+    /// export file, so every stage-free document stays byte-identical to before.
+    pub fn is_default(&self) -> bool {
+        *self == Self::Planning
+    }
+}
+
+impl From<String> for Stage {
+    fn from(s: String) -> Self {
+        Self::from_raw(&s)
+    }
+}
+
 /// One outline node — the flat record shape shared by the store, SQLite, and the
 /// frontend mirror. The tree is expressed by `parent` + `position` (gapped sibling
 /// ordering, exactly like the SwiftUI app's SwiftData model).
@@ -61,7 +117,7 @@ impl NodeKind {
 /// TWO merge clocks, both ms-epoch UTC (see the sync protocol):
 ///   * `updated_at` — the CONTENT clock: text, note, bold/italic/underline ranges.
 ///   * `structure_updated_at` — parent, position, kind, is_completed, completed_at,
-///     is_highlighted.
+///     is_highlighted, stage.
 /// Creation sets both to `created_at`. Splitting them is what keeps a move or a
 /// completion from carrying stale text over concurrent typing on another device.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -75,6 +131,10 @@ pub struct NodeRec {
     pub kind: NodeKind,
     pub is_completed: bool,
     pub is_highlighted: bool,
+    /// The focus pane's stage. `serde(default)` so snapshots from before it existed
+    /// still deserialize.
+    #[serde(default)]
+    pub stage: Stage,
     pub is_collapsed: bool,
     /// Bold character ranges over `text` as flat `[location, length, …]` pairs.
     pub bold_ranges: Vec<i64>,
@@ -107,6 +167,7 @@ impl NodeRec {
             kind,
             is_completed: false,
             is_highlighted: false,
+            stage: Stage::Planning,
             is_collapsed: false,
             bold_ranges: Vec::new(),
             italic_ranges: Vec::new(),
