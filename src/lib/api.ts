@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { Delta, MutationOut, NodeKind, Snapshot } from "./types";
+import type { Delta, MutationOut, NodeKind, Snapshot, Stage } from "./types";
 
 /** Typed wrappers over the Rust store commands. Every mutation's delta arrives back
  * through `onDelta` (broadcast to every window); the return value carries only the
@@ -82,6 +82,9 @@ export const api = {
 
   setHighlighted: (node: string, on: boolean) =>
     invoke<MutationOut>("set_highlighted", { node, on }),
+
+  setStage: (node: string, stage: Stage) =>
+    invoke<MutationOut>("set_stage", { node, stage }),
 
   indentBlock: (ids: string[], hideCompleted: boolean) =>
     invoke<MutationOut>("indent_block", { ids, hideCompleted }),

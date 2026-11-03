@@ -120,6 +120,15 @@
      ease-in-out instead of that near-step curve. */
   --focus-pane-anim-dur: 280ms;
   --focus-pane-anim-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  /* The focus pane's STAGE selector — the lit fill sliding to the clicked segment. Its own
+     clock, NOT --focus-pane-anim-*: that one opens a whole strip, this is a click under the
+     pointer that has to answer at once, so it is an ease-OUT (most of the travel in the
+     first third, then a soft landing). A one-step and a three-step move share the duration,
+     so the longer one is simply faster — a segmented control's thumb is read as arriving
+     at a place, not as travelling a distance, so that is right here where it was wrong for
+     the Tab glide. Transform only, so it composites. */
+  --stage-anim-dur: 240ms;
+  --stage-anim-ease: cubic-bezier(0.25, 0.8, 0.25, 1);
   /* A divider's actions opening between the handle and the rule. Its own clock, and
      deliberately NOT --collapse-anim-dur: this is a pointer-driven reveal that has to
      feel instant under the cursor, and that var gets dialled past 500ms to eyeball the
@@ -2009,8 +2018,21 @@ body {
   margin-right: 11px;
 }
 
+.focus-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+/* Shrink-to-fit inside the body column, so only the TEXT is the click-to-reveal target —
+   the empty width beside a short title is not, and neither is the stage selector below.
+   `max-width` is what still lets a long title ellipsize: a fit-content flex item would
+   otherwise size to its nowrap text and overflow the pane. */
 .focus-content {
   min-width: 0;
+  max-width: 100%;
   cursor: pointer;
   display: flex;
   flex-direction: column;
@@ -2047,6 +2069,140 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* ---- Stage selector ----
+   Four equal columns over a faint track, with ONE lit fill (`.focus-stage-thumb`) that
+   slides between them — see `StageBar` in FocusPane.tsx for why it is one element. The
+   track's `overflow: hidden` + radius is what rounds the fill's outer corners at the ends
+   and leaves them square in between; the fill itself is a plain rectangle. Every value is
+   em of the bar's own font, so the whole control tracks ⌘+/⌘−.
+
+   THREE widths, all container queries on the bar itself (measured in WebKit, in the bar's
+   em: the longest label, "Deploying", is 4.91em; "Deploy" is 3.40em; each cell adds its
+   1em of padding):
+     ≥ 24em  one row, full labels — the mockup. Four cells of 5.91em = 23.65em.
+     < 24em  a 2×2 grid, full labels. The sidebar dock at its DEFAULT 280px gives the bar
+             ~15.5em, which no single row can serve: even abbreviated, four equal cells
+             need 17.6em. The sidebar has height to spare and no width, so it wraps.
+     < 12em  2×2 with abbreviated labels, for the dock's narrowest widths.
+   Below that the labels ellipsize — the last resort, at a 180px dock. */
+.focus-stages {
+  align-self: stretch;
+  max-width: 30em;
+  margin-top: 0.6em;
+  font-size: 0.78em;
+  /* The layout switches on the BAR's width, not the pane's: the bar is capped and the
+     docks differ. A container query only reaches DESCENDANTS, which is why the grid is the
+     inner `.focus-stage-track` and not this box. */
+  container-type: inline-size;
+}
+
+.focus-stage-track {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-radius: 0.6em;
+  background: rgba(255, 255, 255, 0.055);
+  overflow: hidden;
+}
+
+/* Exactly one column wide, so `translateX(index × 100%)` — a percentage of its OWN width —
+   is one segment per step at any pane width, with nothing measured. An abspos child of a
+   grid sizes against the grid's padding box, which equals the four columns because the
+   track has no padding and no border. */
+.focus-stage-thumb {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 25%;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.1);
+  transform: translate(
+    calc(var(--stage-x, 0) * 100%),
+    calc(var(--stage-y, 0) * 100%)
+  );
+  transition: transform var(--stage-anim-dur) var(--stage-anim-ease);
+  pointer-events: none;
+  --stage-x: var(--stage-index);
+  --stage-y: 0;
+}
+
+/* A resize drag or a dock switch changes the bar's width, which can flip it between the
+   one-row and 2×2 layouts — a change of the thumb's COMPUTED transform, so it would slide.
+   It must not: the thumb is not going anywhere, the grid is. The shell already carries
+   `.resizing` for the drag and `.no-anim` for the switch frame. Measured in WebKit with
+   this rule removed: the drag DOES slide the fill (so `.resizing` is load-bearing), while
+   the dock switch does not — WebKit starts no transition across that commit — so the
+   `.no-anim` half is insurance against an engine that does, not a fix for one that did. */
+.focus-pane-shell.no-anim .focus-stage-thumb,
+.focus-pane-shell.resizing .focus-stage-thumb {
+  transition: none;
+}
+
+/* `position: relative` is load-bearing: the thumb is positioned, and positioned boxes
+   paint ABOVE in-flow ones, so without it the fill would cover the labels. Both positioned
+   at `z-index: auto` paint in DOM order instead, and the thumb comes first.
+   Hover follows the row-hover rule: the brighter label arrives instantly and fades out. */
+.focus-stage {
+  position: relative;
+  min-width: 0;
+  appearance: none;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.45);
+  padding: 0.5em;
+  cursor: pointer;
+  transition: color 200ms ease;
+}
+
+.focus-stage:hover {
+  color: rgba(255, 255, 255, 0.72);
+  transition-duration: 0s;
+}
+
+.focus-stage.current {
+  color: var(--text);
+  cursor: default;
+}
+
+/* The ellipsis lives on the label spans, not the button: a WebKit button lays its content
+   out in an anonymous inner box that `text-overflow` on the button never reaches. */
+.focus-stage-long,
+.focus-stage-short {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.focus-stage-short {
+  display: none;
+}
+
+@container (max-width: 24em) {
+  .focus-stage-track {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .focus-stage-thumb {
+    width: 50%;
+    height: 50%;
+    --stage-x: var(--stage-col);
+    --stage-y: var(--stage-row);
+  }
+}
+
+@container (max-width: 12em) {
+  .focus-stage-long {
+    display: none;
+  }
+
+  .focus-stage-short {
+    display: block;
+  }
 }
 
 /* Horizontal drop marker painted at the target row gap during a handle drag. */

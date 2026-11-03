@@ -8,8 +8,8 @@ import {
   useSyncExternalStore,
 } from "react";
 import { walkCurrentTask } from "../lib/currentTask";
-import type { NodeRec } from "../lib/types";
-import { revealNode } from "../state/controller";
+import { STAGES, type NodeRec, type Stage } from "../lib/types";
+import { revealNode, setStage } from "../state/controller";
 import { useFocusPane } from "../state/focusPane";
 import {
   mirror,
@@ -25,12 +25,12 @@ import {
   useWindowState,
 } from "../state/windowState";
 
-/** The collapsible strip mirroring the highlighted (⌘⇧F) nodes — read-only rows:
+/** The collapsible strip mirroring the highlighted (⌘⇧F) nodes:
  * ⠿ handle · numbered accent disc · bold accent title, the first line of its NOTE when
- * it has one, and the node's CURRENT TASK.
- * Clicking a row REVEALS its current task in the outline (the pinned node itself when
- * it has none); the handle drag reorders the device-local priority order and shows a
- * drop marker while dragging. */
+ * it has one, the node's CURRENT TASK, and its STAGE selector along the bottom.
+ * Clicking the text REVEALS its current task in the outline (the pinned node itself when
+ * it has none); clicking a stage sets it; the handle drag reorders the device-local
+ * priority order and shows a drop marker while dragging. */
 
 /** Re-render whenever `id`'s node record changes (text/style/kind), so a focus row's
  * title tracks live edits from THIS or any other window — the pane's own structure
@@ -88,6 +88,70 @@ function firstNoteLine(note: string): string | null {
   return null;
 }
 
+/** Planning ▸ Executing ▸ Testing ▸ Deploying — a segmented control whose lit fill
+ * SLIDES to the clicked segment.
+ *
+ * The fill is ONE element (`.focus-stage-thumb`) translated by whole segment widths, never
+ * a background on the current button: a per-button background can only swap, it cannot
+ * travel. Its offset is a count of its OWN width (and height), and since it is exactly one
+ * cell big that is one segment per step at any pane width with no measuring. It is a plain
+ * rectangle; the track's rounded `overflow: hidden` clip is what rounds its outer corners
+ * at the ends and leaves them square in between, exactly as in the mockup.
+ *
+ * All three coordinates are handed to CSS — the row index for the one-row bar, and the
+ * column/row for the 2×2 grid it wraps into when the bar is narrow (the sidebar dock) —
+ * because which layout applies is a CONTAINER query, i.e. CSS's decision, not React's.
+ *
+ * Driven by the stage VALUE (the row's own `useNodeRec` subscription repaints it), so a
+ * click, ⌘Z, and a stage set in another window all slide with one implementation — and
+ * because a transition needs a resolved previous value, a row mounting (the pane opening,
+ * a node being pinned) paints the fill in place instead of sliding in from Planning.
+ *
+ * mousedown `preventDefault`s so a stage click never steals focus from an outline editor:
+ * a stage is metadata about the row, not a navigation, and the caret should stay put. */
+function StageBar({ nodeId, stage }: { nodeId: string; stage: Stage }) {
+  const current = Math.max(
+    0,
+    STAGES.findIndex((s) => s.id === stage),
+  );
+  return (
+    // Two boxes because a container query cannot restyle the container itself: the outer
+    // one is measured, the inner track is what wraps into 2×2.
+    <div className="focus-stages">
+      <div
+        className="focus-stage-track"
+        role="radiogroup"
+        aria-label="Stage"
+        style={
+          {
+            ["--stage-index" as string]: current,
+            ["--stage-col" as string]: current % 2,
+            ["--stage-row" as string]: Math.floor(current / 2),
+          } as React.CSSProperties
+        }
+      >
+        <span className="focus-stage-thumb" aria-hidden="true" />
+        {STAGES.map((s, i) => (
+          <button
+            key={s.id}
+            type="button"
+            role="radio"
+            aria-checked={i === current}
+            aria-label={s.label}
+            tabIndex={-1}
+            className={"focus-stage" + (i === current ? " current" : "")}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => void setStage(nodeId, s.id)}
+          >
+            <span className="focus-stage-long">{s.label}</span>
+            <span className="focus-stage-short">{s.short}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function FocusRow({
   id,
   index,
@@ -110,10 +174,7 @@ function FocusRow({
   const note = firstNoteLine(rec.note);
   return (
     <div className="focus-row">
-      <span
-        className="focus-handle"
-        onMouseDown={(e) => onHandleDown(e, id)}
-      >
+      <span className="focus-handle" onMouseDown={(e) => onHandleDown(e, id)}>
         ⠿
       </span>
       <span
@@ -123,15 +184,18 @@ function FocusRow({
       >
         {index + 1}
       </span>
-      <span className="focus-content" onClick={() => revealNode(target)}>
-        <span className="focus-title" style={{ color: accent }}>
-          {rec.text || "Untitled"}
+      <div className="focus-body">
+        <span className="focus-content" onClick={() => revealNode(target)}>
+          <span className="focus-title" style={{ color: accent }}>
+            {rec.text || "Untitled"}
+          </span>
+          {note && <span className="focus-note">{note}</span>}
+          {task && (
+            <span className="focus-task">{task.text || "Untitled"}</span>
+          )}
         </span>
-        {note && <span className="focus-note">{note}</span>}
-        {task && (
-          <span className="focus-task">{task.text || "Untitled"}</span>
-        )}
-      </span>
+        <StageBar nodeId={id} stage={rec.stage} />
+      </div>
     </div>
   );
 }
@@ -211,8 +275,7 @@ export function FocusPane() {
       const rows = [...container.querySelectorAll(".focus-row")];
       if (rows.length === 0) return 0;
       const cRect = container.getBoundingClientRect();
-      const row =
-        gap < rows.length ? rows[gap] : rows[rows.length - 1];
+      const row = gap < rows.length ? rows[gap] : rows[rows.length - 1];
       const r = row.getBoundingClientRect();
       const edge = gap < rows.length ? r.top : r.bottom;
       return edge - cRect.top + container.scrollTop;
@@ -236,8 +299,7 @@ export function FocusPane() {
   }
 
   // The grip resizes whichever edge the current dock exposes.
-  const onResizeDown =
-    layout === "sidebar" ? onSidebarResize : onTopResize;
+  const onResizeDown = layout === "sidebar" ? onSidebarResize : onTopResize;
 
   /** Sidebar resize: drive the width var directly on the shell (bypassing React so it
    * tracks the pointer 1:1) with the drawer transition suppressed via `.resizing`, then
@@ -249,7 +311,8 @@ export function FocusPane() {
     if (!shell) return;
     const startX = e.clientX;
     const startW = useWindowState.getState().focusSidebarWidth;
-    const widthAt = (ev: MouseEvent) => clampSidebarWidth(startW + (ev.clientX - startX));
+    const widthAt = (ev: MouseEvent) =>
+      clampSidebarWidth(startW + (ev.clientX - startX));
     shell.classList.add("resizing");
     const onMove = (ev: MouseEvent) => {
       shell.style.setProperty("--focus-sidebar-width", `${widthAt(ev)}px`);
@@ -292,12 +355,18 @@ export function FocusPane() {
       const last = rows[rows.length - 1] as HTMLElement;
       const paneTop = pane.getBoundingClientRect().top;
       return (
-        last.getBoundingClientRect().bottom - paneTop + pane.scrollTop + PANE_PAD_BOTTOM
+        last.getBoundingClientRect().bottom -
+        paneTop +
+        pane.scrollTop +
+        PANE_PAD_BOTTOM
       );
     };
     let snapped = false;
     const heightAt = (ev: MouseEvent): number => {
-      let h = Math.max(FOCUS_TOP_MIN, Math.min(maxH, startH + (ev.clientY - startY)));
+      let h = Math.max(
+        FOCUS_TOP_MIN,
+        Math.min(maxH, startH + (ev.clientY - startY)),
+      );
       const c = contentHeight();
       snapped = Math.abs(h - c) <= SNAP_PX;
       if (snapped) h = c;

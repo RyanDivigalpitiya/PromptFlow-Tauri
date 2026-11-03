@@ -82,6 +82,9 @@ const node = (id, parent, position, text, kind, extra = {}) => ({
   kind,
   isCompleted: false,
   isHighlighted: false,
+  // Every record the Rust store sends carries a stage (NodeRec serializes it always), so
+  // the fixture does too — a missing key would test a shape the app never receives.
+  stage: "planning",
   isCollapsed: false,
   boldRanges: [],
   italicRanges: [],
@@ -1852,6 +1855,315 @@ const afterReset = await mp.evaluate(() => ({
   resetDisabled: document.querySelector(".settings-tpl button").disabled,
 }));
 
+// ---- 10. Focus pane: the STAGE selector -------------------------------------
+// Each pinned row ends in Planning ▸ Executing ▸ Testing ▸ Deploying, and the lit fill
+// SLIDES to the clicked stage. The store half (one undo step, the structure clock, no
+// inheritance on split, export) is `cargo test`'s; the two meet at `set_stage {node,
+// stage}`. What only the engine can answer is all here: that the fill is ONE element
+// sitting exactly on the current cell at rest, that a click does NOT move it (the UI shows
+// store state only — the stub records the command and applies nothing), that the delta
+// coming back makes it TRAVEL with the --stage-anim clock rather than jump, that it never
+// slides in on mount, that hover is instant-in/fade-out, and that the sidebar dock wraps
+// the bar into 2×2 rather than truncating it. Its own page and fixture, like 5–9.
+const STAGE_NODES = [
+  node("st1", null, 0, "Ship the stage selector", "checkbox", {
+    isHighlighted: true,
+    note: "Bullet Note Here",
+  }),
+  node("st1a", "st1", 0, "Write the CSS", "checkbox"),
+  node("st2", null, 1024, "Already testing", "checkbox", {
+    isHighlighted: true,
+    stage: "testing",
+  }),
+  node("st3", null, 2048, "Out for deploy", "bulletPoint", {
+    isHighlighted: true,
+    stage: "deploying",
+  }),
+  // NOT pinned, but staged: a node keeps its stage while it is out of the pane, and
+  // shows it — without sliding in — the moment it is pinned.
+  node("st4", null, 3072, "Staged while unpinned", "checkbox", { stage: "executing" }),
+];
+const stRec = Object.fromEntries(STAGE_NODES.map((n) => [n.id, n]));
+const sp = await b.newPage({
+  viewport: { width: 1000, height: 700 },
+  deviceScaleFactor: 2,
+  colorScheme: "dark",
+});
+sp.on("pageerror", (e) => errors.push(String(e)));
+sp.on("console", (m) => {
+  if (m.type() === "error") errors.push(m.text());
+});
+await sp.addInitScript(tauriStub, { rev: 1, nodes: STAGE_NODES, canUndo: false, canRedo: false });
+await sp.addInitScript(
+  (seed) => {
+    localStorage.setItem("pf.win.main", JSON.stringify(seed.win));
+    localStorage.setItem("pf.focusOrder", JSON.stringify(seed.order));
+  },
+  {
+    win: {
+      collapsed: [],
+      hideCompleted: false,
+      fontSize: 16,
+      drill: null,
+      focusPaneExpanded: true,
+      focusPaneLayout: "top",
+      // The dock's real default, so the 2×2 check below is the layout people get.
+      focusSidebarWidth: 280,
+      focusTopHeight: "auto",
+    },
+    order: ["st1", "st2", "st3"],
+  },
+);
+await sp.goto(URL_, { waitUntil: "domcontentloaded" });
+await sp.waitForSelector(".focus-stage-track", { timeout: 15000 });
+await sp.addStyleTag({ content: "html,body{background:#151515 !important}" });
+await sp.waitForTimeout(450); // past the pane's open animation
+
+/** Every stage bar as laid out: each cell's box relative to its track (so one row vs 2×2
+ * is a matter of how many distinct x/y there are), which label is SHOWING and whether it
+ * is clipped, and the thumb's VISUAL box — getBoundingClientRect includes the transform,
+ * so this is where the fill actually paints, not where its layout box sits. */
+const stageBars = () =>
+  sp.evaluate(() =>
+    [...document.querySelectorAll(".focus-row")].map((row) => {
+      const track = row.querySelector(".focus-stage-track");
+      const tr = track.getBoundingClientRect();
+      const thumbEl = track.querySelector(".focus-stage-thumb");
+      const th = thumbEl.getBoundingClientRect();
+      const title = row.querySelector(".focus-title").getBoundingClientRect();
+      const r2 = (v) => +v.toFixed(2);
+      return {
+        title: row.querySelector(".focus-title").textContent,
+        alignedWithTitle: r2(tr.left - title.left),
+        track: { w: r2(tr.width), h: r2(tr.height) },
+        thumb: { x: r2(th.left - tr.left), y: r2(th.top - tr.top), w: r2(th.width), h: r2(th.height) },
+        running: thumbEl.getAnimations().length,
+        cells: [...track.querySelectorAll(".focus-stage")].map((btn) => {
+          const r = btn.getBoundingClientRect();
+          const label = [...btn.children].find((c) => getComputedStyle(c).display !== "none");
+          return {
+            x: r2(r.left - tr.left),
+            y: r2(r.top - tr.top),
+            w: r2(r.width),
+            h: r2(r.height),
+            text: label.textContent,
+            clipped: label.scrollWidth > label.clientWidth,
+            ellipsis: getComputedStyle(label).textOverflow === "ellipsis",
+            current: btn.classList.contains("current"),
+            checked: btn.getAttribute("aria-checked") === "true",
+            color: getComputedStyle(btn).color,
+          };
+        }),
+      };
+    }),
+  );
+/** The report's `eq`, which is declared after this section runs. */
+const near = (a, b, tol = 0.6) => Math.abs(a - b) <= tol;
+const alphaOf = (c) => {
+  const m = /^rgba?\(([^)]+)\)$/.exec(c ?? "");
+  if (!m) return null;
+  const parts = m[1].split(",").map((x) => parseFloat(x));
+  return parts.length === 4 ? parts[3] : 1;
+};
+/** The bar is in the shape it claims: `cols` distinct x, `rows` distinct y, equal cells,
+ * exactly one current cell that is also the one aria-checked, the fill sitting EXACTLY on
+ * it, no label clipped (or, at the dock's last-resort width, clipped only behind a real
+ * ellipsis), and the current label brighter than every other. Read it with the pointer
+ * OFF the bar and the label fades settled, or the colour clause measures a hover or a
+ * fade in flight. */
+const barOk = (bar, stageIdx, cols, rows, clipOk = false) => {
+  const xs = new Set(bar.cells.map((c) => Math.round(c.x)));
+  const ys = new Set(bar.cells.map((c) => Math.round(c.y)));
+  const cur = bar.cells[stageIdx];
+  const others = bar.cells.filter((_, i) => i !== stageIdx);
+  return (
+    xs.size === cols &&
+    ys.size === rows &&
+    bar.cells.every((c) => near(c.w, cur.w) && near(c.h, cur.h)) &&
+    bar.cells.filter((c) => c.current).length === 1 &&
+    cur.current &&
+    cur.checked &&
+    near(bar.thumb.x, cur.x) &&
+    near(bar.thumb.y, cur.y) &&
+    near(bar.thumb.w, cur.w) &&
+    near(bar.thumb.h, cur.h) &&
+    bar.cells.every((c) => !c.clipped || (clipOk && c.ellipsis)) &&
+    others.every((c) => alphaOf(c.color) < alphaOf(cur.color) - 0.2)
+  );
+};
+const stageCalls = () =>
+  sp.evaluate(() => window.__PF_QA_CALLS.filter((c) => c.cmd === "set_stage").map((c) => c.args));
+const barBtn = (row, label) =>
+  sp.locator(".focus-row").nth(row).locator(`.focus-stage[aria-label="${label}"]`);
+/** Land a stage on the tree as the store would and sample the slide it causes: pause the
+ * thumb's transition and scrub it, so the samples are exact rather than whatever real time
+ * a screenshot or a rAF happened to land on. Returns the fill's (x, y) per 20ms. */
+const stageSlide = (row, id, stage, origin, shotAt = null) =>
+  sp.evaluate(
+    async ({ row, n, origin, shotAt }) => {
+      window.__PF_QA_DELTA([{ type: "upsert", node: n }], origin);
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const track = document.querySelectorAll(".focus-row")[row].querySelector(".focus-stage-track");
+      const thumb = track.querySelector(".focus-stage-thumb");
+      const anims = thumb.getAnimations();
+      anims.forEach((a) => a.pause());
+      const tr = track.getBoundingClientRect();
+      const t = anims[0]?.effect.getTiming();
+      const frames = [];
+      for (let ms = 0; ms <= (t?.duration ?? 0); ms += 20) {
+        anims.forEach((a) => (a.currentTime = ms));
+        const r = thumb.getBoundingClientRect();
+        frames.push({ ms, x: +(r.left - tr.left).toFixed(2), y: +(r.top - tr.top).toFixed(2) });
+      }
+      // Optionally leave it paused mid-flight for a screenshot of the travelling fill.
+      // Otherwise settle EVERYTHING — the labels' own 200ms colour fades too, which run in
+      // real time and would otherwise still be mid-fade when the next check reads them.
+      if (shotAt != null) anims.forEach((a) => (a.currentTime = shotAt));
+      else document.getAnimations().forEach((a) => a.finish());
+      return {
+        count: anims.length,
+        prop: anims[0]?.transitionProperty ?? null,
+        dur: t?.duration ?? null,
+        frames,
+      };
+    },
+    { row, n: { ...stRec[id], isHighlighted: true, stage }, origin, shotAt },
+  );
+const monotone = (vs) =>
+  vs.every((v, i) => i === 0 || v >= vs[i - 1] - 0.01) ||
+  vs.every((v, i) => i === 0 || v <= vs[i - 1] + 0.01);
+
+const stRest = await stageBars();
+await shot("focus-stages-top", sp.locator(".focus-pane-shell"));
+
+// Focus an OUTLINE editor first, so the click below can prove it leaves the caret alone.
+await sp.locator(".node-row", { hasText: "Out for deploy" }).first().locator(".node-text-static").click();
+await sp.waitForTimeout(150);
+const editingBefore = await sp.evaluate(() => document.activeElement?.closest(".node-row")?.textContent ?? null);
+await barBtn(0, "Executing").click();
+await sp.waitForTimeout(150);
+const editingAfterClick = await sp.evaluate(() => document.activeElement?.closest(".node-row")?.textContent ?? null);
+await sp.mouse.move(5, 690); // off the bar, so the colour clause isn't reading a hover
+await sp.waitForTimeout(260);
+const stClick = {
+  calls: await stageCalls(),
+  // Nothing moves until the store answers: the stub applies nothing, so the fill must
+  // still be on Planning — any movement here would be a local, un-synced mutation.
+  barAfterClick: (await stageBars())[0],
+  editingAfter: editingAfterClick,
+};
+// The answer arrives as this window's own delta, and the fill travels one cell.
+const slideOwn = await stageSlide(0, "st1", "executing", "main");
+const stAfterOwn = (await stageBars())[0];
+// Clicking the stage that is already lit costs nothing — not even an invoke.
+await barBtn(0, "Executing").click();
+await sp.mouse.move(5, 690);
+await sp.waitForTimeout(100);
+const callsAfterReclick = (await stageCalls()).length;
+// From ANOTHER window (or ⌘Z — the same delta path): two cells, same clock.
+const slidePeer = await stageSlide(0, "st1", "deploying", "w1", 100);
+await shot("focus-stages-midslide", sp.locator(".focus-row").first());
+await sp.evaluate(() =>
+  document.querySelectorAll(".focus-stage-thumb").forEach((t) => t.getAnimations().forEach((a) => a.finish())),
+);
+
+// Hover: the row-hover rule, read as COMPUTED durations in both states — "it lights up on
+// hover" passes for a symmetric fade, a jump-cut and the right thing alike.
+const hoverBtn = barBtn(1, "Planning");
+const hb = await hoverBtn.boundingBox();
+await sp.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+await sp.waitForTimeout(50);
+const hoverIn = await hoverBtn.evaluate((el) => ({
+  dur: getComputedStyle(el).transitionDuration,
+  color: getComputedStyle(el).color,
+}));
+await sp.mouse.move(5, 690);
+await sp.waitForTimeout(50);
+const hoverOut = await hoverBtn.evaluate((el) => getComputedStyle(el).transitionDuration);
+
+// Pinning a node that was staged while unpinned: its row arrives at THAT stage, with the
+// fill already in place — no slide in from Planning.
+await sp.evaluate((n) => window.__PF_QA_DELTA([{ type: "upsert", node: n }]), {
+  ...stRec.st4,
+  isHighlighted: true,
+});
+await sp.waitForTimeout(80);
+const stPinned = (await stageBars()).find((b) => b.title === "Staged while unpinned");
+
+// Sidebar dock at its default 280px: the bar is too narrow for one row and wraps into
+// 2×2 with the FULL words, and the switch itself slides nothing. (That last check passes
+// with or without the `.no-anim` suppression today — this WebKit starts no transition
+// across the switch commit — so it pins the OUTCOME, not the clause. The resize drags
+// below are the ones that fail without their `.resizing` clause.)
+await sp.locator('button[aria-label="Switch focus pane layout"]').click();
+await sp.waitForTimeout(30);
+const runningAfterSwitch = (await stageBars()).reduce((n, b) => n + b.running, 0);
+await sp.waitForTimeout(450);
+const stSidebar = await stageBars();
+await shot("focus-stages-sidebar", sp.locator(".focus-pane-shell"));
+// A diagonal move in the grid: Deploying (1,1) → Planning (0,0), both axes on one clock.
+await sp.mouse.move(990, 690); // off the pane: the switcher click left the pointer in the TopBar
+const slideGrid = await stageSlide(2, "st3", "planning", "main");
+const stGridAfter = (await stageBars())[2];
+
+// Resize drags that cross the layout thresholds re-shape the grid under the fill, which
+// is a change of its COMPUTED transform — it must not play as a slide.
+const dragHandle = async (dx) => {
+  const h = await sp.locator(".focus-resize-handle").boundingBox();
+  const x = h.x + h.width / 2;
+  const y = h.y + h.height / 2;
+  await sp.mouse.move(x, y);
+  await sp.mouse.down();
+  for (let i = 1; i <= 6; i++) await sp.mouse.move(x + (dx * i) / 6, y);
+  await sp.mouse.up();
+  await sp.waitForTimeout(30);
+};
+await dragHandle(220); // 280 → 500: wide enough for one row again
+const runningAfterWiden = (await stageBars()).reduce((n, b) => n + b.running, 0);
+const stWide = await stageBars();
+await dragHandle(-320); // → the dock's 180px minimum
+const runningAfterNarrow = (await stageBars()).reduce((n, b) => n + b.running, 0);
+const stNarrow = await stageBars();
+await shot("focus-stages-narrow", sp.locator(".focus-pane-shell"));
+
+const STAGE_IDX = { planning: 0, executing: 1, testing: 2, deploying: 3 };
+const slideOk = (sl, axis, from, to) => {
+  const vs = sl.frames.map((f) => f[axis]);
+  const interior = vs.filter((v) => Math.min(from, to) + 0.5 < v && v < Math.max(from, to) - 0.5);
+  return (
+    sl.count === 1 &&
+    sl.prop === "transform" &&
+    near(vs[0], from) &&
+    near(vs.at(-1), to) &&
+    monotone(vs) &&
+    new Set(interior.map((v) => Math.round(v))).size >= 5
+  );
+};
+const cellOf = (bar, i) => bar.cells[i];
+const stageChecks = [
+  ["stages: one bar per pinned row, none for the unpinned-but-staged node", stRest.length === 3],
+  ["stages: top dock is ONE row of four equal cells, fill exactly on the record's stage", barOk(stRest[0], 0, 4, 1) && barOk(stRest[1], 2, 4, 1) && barOk(stRest[2], 3, 4, 1)],
+  ["stages: the bar starts on the title's column (the mockup's alignment)", stRest.every((b) => Math.abs(b.alignedWithTitle) <= 0.5)],
+  ["stages: nothing slides on mount", stRest.every((b) => b.running === 0)],
+  ["stages: a click sends set_stage {node, stage}", JSON.stringify(stClick.calls) === '[{"node":"st1","stage":"executing"}]'],
+  ["stages: …and moves NOTHING until the store answers (no local mutation)", barOk(stClick.barAfterClick, 0, 4, 1)],
+  ["stages: …and leaves the outline editor's caret where it was", editingBefore !== null && stClick.editingAfter === editingBefore],
+  ["stages: the answer SLIDES the fill one cell on --stage-anim-dur (240ms)", slideOk(slideOwn, "x", cellOf(stRest[0], 0).x, cellOf(stRest[0], 1).x) && slideOwn.dur === 240],
+  ["stages: the slide eases OUT (over half the travel in its first third)", (() => { const f = slideOwn.frames.find((q) => q.ms === 80); const end = cellOf(stRest[0], 1).x; return f && f.x > end * 0.5; })()],
+  ["stages: …and lands with the new stage lit and checked", barOk(stAfterOwn, 1, 4, 1)],
+  ["stages: re-clicking the lit stage sends nothing", callsAfterReclick === 1],
+  ["stages: a peer window's change slides two cells on the same clock", slideOk(slidePeer, "x", cellOf(stRest[0], 1).x, cellOf(stRest[0], 3).x) && slidePeer.dur === 240],
+  ["stages: hover arrives INSTANTLY (0s while hovered)", hoverIn.dur === "0s" && alphaOf(hoverIn.color) > 0.6],
+  ["stages: …and fades out (0.2s once un-hovered)", hoverOut === "0.2s"],
+  ["stages: pinning a staged node shows ITS stage, with no slide-in", !!stPinned && barOk(stPinned, STAGE_IDX.executing, 4, 1) && stPinned.running === 0],
+  ["stages: the dock switch slides nothing", runningAfterSwitch === 0],
+  ["stages: the 280px sidebar wraps to 2×2 with the FULL words, fill on its cell", barOk(stSidebar[0], 3, 2, 2) && barOk(stSidebar[1], 2, 2, 2) && stSidebar.every((b) => b.cells.every((c) => !["Plan", "Exec", "Test", "Deploy"].includes(c.text)))],
+  ["stages: a grid move travels BOTH axes on one clock (Deploying → Planning)", slideOk(slideGrid, "x", cellOf(stSidebar[2], 3).x, 0) && slideOk(slideGrid, "y", cellOf(stSidebar[2], 3).y, 0)],
+  ["stages: …and lands on Planning", barOk(stGridAfter, 0, 2, 2)],
+  ["stages: widening the dock back to one row slides nothing", runningAfterWiden === 0 && barOk(stWide[0], 3, 4, 1)],
+  ["stages: the 180px dock keeps 2×2 and abbreviates (only an ellipsis past that)", runningAfterNarrow === 0 && barOk(stNarrow[0], 3, 2, 2, true) && JSON.stringify(stNarrow[0].cells.map((c) => c.text)) === '["Plan","Exec","Test","Deploy"]'],
+];
+
 // ---- Report ------------------------------------------------------------------
 const eq = (a, b, tol = 0.6) => Math.abs(a - b) <= tol;
 const distinct = (xs) => new Set(xs.filter((v) => v != null)).size;
@@ -2045,6 +2357,7 @@ const checks = [
   ["settings: renaming writes the override to the BACKEND settings table", renamed.sent?.cmd === "set_prompt_template_name" && renamed.sent.args.template === "New-Feature-Discuss-Plan" && renamed.sent.args.name === "New Feature: Discuss & Plan"],
   ["settings: …and Reset comes alive", renamed.resetDisabled === false],
   ["settings: Reset clears the override and the derived name comes back", afterReset.sent?.args.name === "" && afterReset.value === "New Feature Discuss Plan" && afterReset.resetDisabled === true],
+  ...stageChecks,
   ["no page errors", errors.length === 0],
 ];
 console.log("\nrest    :", JSON.stringify(rest));
@@ -2070,6 +2383,11 @@ console.log("  lines :", JSON.stringify(folded.lines));
 console.log("  indent:", foldStep.map((s) => s.toFixed(2)).join(" / "), "px per level");
 console.log("  slide :", JSON.stringify(foldSlide));
 console.log("  trace :", foldTrace.filter((f) => f.on).map((f) => `${f.t}:${f.y}`).join(" "), "| then", foldFinalY);
+console.log("stages  :", JSON.stringify(stRest.map((b) => ({ track: b.track, thumb: b.thumb, cells: b.cells.map((c) => `${c.text}@${c.x},${c.y}`) }))));
+console.log("  slide :", slideOwn.frames.map((f) => `${f.ms}:${f.x}`).join(" "));
+console.log("  grid  :", slideGrid.frames.map((f) => `${f.ms}:${f.x},${f.y}`).join(" "));
+console.log("  hover :", JSON.stringify({ hoverIn, hoverOut }), "| calls", JSON.stringify(stClick.calls));
+console.log("  docks :", JSON.stringify({ sidebar: stSidebar[0].track, wide: stWide[0].track, narrow: stNarrow[0].track }));
 if (errors.length) console.log("errors  :", errors.slice(0, 5));
 console.log();
 let failed = 0;

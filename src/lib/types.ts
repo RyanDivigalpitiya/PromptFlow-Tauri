@@ -1,6 +1,19 @@
 /** Raw kind strings match the SwiftUI app's `NodeKind` (and the export JSON). */
 export type NodeKind = "bulletPoint" | "checkbox" | "promptDraft" | "line";
 
+/** The focus pane's stage selector (`Stage` in promptflow-core). Every node carries one;
+ * only a pinned (⌘⇧F) node shows it. A new node always starts at "planning". */
+export type Stage = "planning" | "executing" | "testing" | "deploying";
+
+/** Display order and labels. `short` is what the selector falls back to when the pane is
+ * too narrow for the full words (the sidebar dock at its default width). */
+export const STAGES: readonly { id: Stage; label: string; short: string }[] = [
+  { id: "planning", label: "Planning", short: "Plan" },
+  { id: "executing", label: "Executing", short: "Exec" },
+  { id: "testing", label: "Testing", short: "Test" },
+  { id: "deploying", label: "Deploying", short: "Deploy" },
+];
+
 /** One outline node — the flat record mirrored from the Rust store. */
 export interface NodeRec {
   id: string;
@@ -11,6 +24,7 @@ export interface NodeRec {
   kind: NodeKind;
   isCompleted: boolean;
   isHighlighted: boolean;
+  stage: Stage;
   /** Import/export seed only — live collapse state is per-window. */
   isCollapsed: boolean;
   /** Flat [location, length, …] pairs over `text`. */

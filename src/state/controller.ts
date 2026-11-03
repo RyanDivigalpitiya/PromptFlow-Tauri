@@ -8,7 +8,7 @@ export function dbg(msg: string) {
 }
 import type { KeyDecision } from "../lib/keys";
 import { toMarkdown } from "../lib/runs";
-import { inheritableKind, type NodeKind } from "../lib/types";
+import { inheritableKind, type NodeKind, type Stage } from "../lib/types";
 import { runCollapseAnim, runRowsAnim } from "./collapseAnim";
 import { mirror } from "./mirror";
 import { markCompleting } from "./rowAnim";
@@ -460,6 +460,14 @@ export async function toggleHighlight(nodeId: string) {
   const node = mirror.get(nodeId);
   if (!node || node.kind === "line") return;
   await api.setHighlighted(nodeId, !node.isHighlighted);
+}
+
+/** The focus pane's stage selector. Re-selecting the current stage is a no-op here as
+ * well as in the store, so a click on the lit segment never costs an invoke. */
+export async function setStage(nodeId: string, stage: Stage) {
+  const node = mirror.get(nodeId);
+  if (!node || node.stage === stage) return;
+  await api.setStage(nodeId, stage);
 }
 
 export async function moveFocused(nodeId: string, offset: -1 | 1) {
