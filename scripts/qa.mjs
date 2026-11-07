@@ -220,10 +220,35 @@ function tauriStub(snapshot) {
         return [
           {
             id: "New-Feature-Discuss-Plan",
+            file: "New-Feature-Discuss-Plan.md",
             defaultName: "New Feature Discuss Plan",
             name: "New Feature Discuss Plan",
           },
         ];
+      // What a rescan answers after a file was added and one edited, so the section can
+      // assert the list grows and the status line reports it. The scan itself is
+      // `cargo test`'s; the two meet at this shape.
+      if (cmd === "refresh_prompt_templates")
+        return {
+          templates: [
+            {
+              id: "Launch%20Checklist",
+              file: "Launch Checklist.md",
+              defaultName: "Launch Checklist",
+              name: "Launch Checklist",
+            },
+            {
+              id: "New-Feature-Discuss-Plan",
+              file: "New-Feature-Discuss-Plan.md",
+              defaultName: "New Feature Discuss Plan",
+              name: "New Feature Discuss Plan",
+            },
+          ],
+          added: 1,
+          edited: 1,
+          removed: 0,
+          skipped: [{ file: "notes.md", reason: "empty" }],
+        };
       return { newNode: null, expand: [], moved: false };
     },
   };
@@ -1855,6 +1880,64 @@ const afterReset = await mp.evaluate(() => ({
   resetDisabled: document.querySelector(".settings-tpl button").disabled,
 }));
 
+/** The folder buttons. Finder and the scan are Rust's, so this pins what the webview is
+ * responsible for: each button fires its own command and names no path, nothing happens
+ * until Refresh is pressed, and the answer reaches the list and the status line. */
+const tplButton = (label) => mp.locator(".settings-panel .mini-btn", { hasText: label });
+const tplCalls = (cmd) =>
+  mp.evaluate((c) => window.__PF_QA_CALLS.filter((x) => x.cmd === c), cmd);
+const tplBefore = await mp.evaluate(() => ({
+  rows: document.querySelectorAll(".settings-tpl").length,
+  status: document.querySelector(".settings-tpl-status")?.textContent ?? null,
+}));
+const tplScansBefore = (await tplCalls("refresh_prompt_templates")).length;
+await tplButton("Open Folder in Finder").click();
+await mp.waitForTimeout(100);
+const tplOpen = {
+  calls: await tplCalls("open_prompt_templates_folder"),
+  scans: (await tplCalls("refresh_prompt_templates")).length,
+};
+await tplButton("Refresh").click();
+await mp.waitForTimeout(150);
+const tplAfter = await mp.evaluate(() => {
+  const rows = [...document.querySelectorAll(".settings-tpl")];
+  const status = document.querySelector(".settings-tpl-status");
+  const actions = [...document.querySelectorAll(".settings-actions")].find((a) =>
+    a.textContent.includes("Open Folder in Finder"),
+  );
+  const section = [...document.querySelectorAll(".settings-section")].find(
+    (x) => x.textContent === "Prompt Templates",
+  );
+  const syncSection = [...document.querySelectorAll(".settings-section")].find(
+    (x) => x.textContent === "Sync",
+  );
+  const follows = (a, b) =>
+    !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+  return {
+    labels: rows.map((r) => r.closest(".settings-row").querySelector("span").textContent),
+    values: rows.map((r) => r.querySelector("input").value),
+    status: status?.textContent ?? null,
+    role: status?.getAttribute("role") ?? null,
+    statusColor: status ? getComputedStyle(status).color : null,
+    footnoteColor: getComputedStyle(document.querySelector(".settings-footnote")).color,
+    inSection: !!actions && follows(section, actions) && follows(actions, syncSection),
+    statusAfterButtons: !!status && follows(actions, status) && follows(status, syncSection),
+  };
+});
+const tplScans = await tplCalls("refresh_prompt_templates");
+await mp.locator(".settings-actions", { hasText: "Open Folder in Finder" }).scrollIntoViewIfNeeded();
+await shot("settings-templates-refreshed", mp.locator(".settings-panel"));
+// The line belongs to the sheet: reopening must not show a stale answer as if it were new.
+await mp.locator(".settings-head .bar-btn").click();
+await mp.waitForTimeout(100);
+await mp.locator('button[title="Settings"]').click();
+await mp.waitForSelector(".settings-panel", { timeout: 5000 });
+await mp.waitForTimeout(150);
+const tplReopened = await mp.evaluate(
+  () => document.querySelector(".settings-tpl-status")?.textContent ?? null,
+);
+await mp.locator(".settings-head .bar-btn").click();
+
 // ---- 10. Focus pane: the STAGE selector -------------------------------------
 // Each pinned row ends in Planning ▸ Building ▸ Testing ▸ Deploying, and the lit fill
 // SLIDES to the clicked stage. The second segment is a SLOT holding two stages: clicking it
@@ -2409,12 +2492,23 @@ const checks = [
   ["enter: a heading line still just breaks", enterOnHeading.text === "## \na\n- b\n\nc"],
   ["enter: mid-item it splits, both halves bulleted", enterMidItem.text === "## a\n- \n- b\n\nc"],
   // --- settings: prompt templates ---
-  ["settings: a Prompt Templates section lists the compiled-in templates", tplPanel.sections.includes("Prompt Templates") && tplPanel.rows === 1],
-  ["settings: the row is named by its FILE, and shows the name the menu uses", tplPanel.label === "New-Feature-Discuss-Plan" && tplPanel.value === "New Feature Discuss Plan"],
+  ["settings: a Prompt Templates section lists the folder's templates", tplPanel.sections.includes("Prompt Templates") && tplPanel.rows === 1],
+  ["settings: the row is named by its FILE, and shows the name the menu uses", tplPanel.label === "New-Feature-Discuss-Plan.md" && tplPanel.value === "New Feature Discuss Plan"],
   ["settings: Reset is dead while the name is still the derived default", tplPanel.resetDisabled === true],
   ["settings: renaming writes the override to the BACKEND settings table", renamed.sent?.cmd === "set_prompt_template_name" && renamed.sent.args.template === "New-Feature-Discuss-Plan" && renamed.sent.args.name === "New Feature: Discuss & Plan"],
   ["settings: …and Reset comes alive", renamed.resetDisabled === false],
   ["settings: Reset clears the override and the derived name comes back", afterReset.sent?.args.name === "" && afterReset.value === "New Feature Discuss Plan" && afterReset.resetDisabled === true],
+  ["templates folder: the buttons sit inside the Prompt Templates section", tplAfter.inSection],
+  ["templates folder: no status line before anything has been asked", tplBefore.status === null],
+  ["templates folder: Open Folder fires its command and names no path", tplOpen.calls.length === 1 && Object.keys(tplOpen.calls[0].args ?? {}).length === 0],
+  ["templates folder: …and does not rescan", tplOpen.scans === tplScansBefore],
+  ["templates folder: Refresh rescans exactly once", tplScans.length === tplScansBefore + 1],
+  ["templates folder: the new file gets a row, labelled by its real file name", tplBefore.rows === 1 && tplAfter.labels.join("|") === "Launch Checklist.md|New-Feature-Discuss-Plan.md"],
+  ["templates folder: …and its derived name is in the field", tplAfter.values[0] === "Launch Checklist"],
+  ["templates folder: the status line reports what was found, skips included", tplAfter.status === "1 new, 1 edited. 2 templates. Skipped notes.md (empty)."],
+  ["templates folder: …directly under the buttons, announced as a status", tplAfter.statusAfterButtons && tplAfter.role === "status"],
+  ["templates folder: …brighter than the footnote", tplAfter.statusColor !== tplAfter.footnoteColor],
+  ["templates folder: reopening the sheet drops the old status line", tplReopened === null],
   ...stageChecks,
   ["no page errors", errors.length === 0],
 ];

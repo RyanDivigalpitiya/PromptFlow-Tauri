@@ -126,27 +126,45 @@ export const api = {
   popupRowMenu: (node: string, x: number, y: number) =>
     invoke<void>("popup_row_menu", { node, x, y }),
 
-  /** Fill a prompt from a compiled-in template. `template` is the BARE id — the row
+  /** Fill a prompt from a template, as of the last scan. `template` is the BARE id — the row
    * menu's action is `tpl-<id>` and the controller strips that prefix. Replaces the
    * node's text as ONE undo step (the store's `apply_template`, deliberately not
    * `set_text`, which would coalesce into a typing burst). */
   applyPromptTemplate: (node: string, template: string) =>
     invoke<MutationOut>("apply_prompt_template", { node, template }),
 
-  /** The Settings ▸ Prompt Templates rows: id, the file-name-derived default, and the
-   * name the ⋯ menu currently shows. */
+  /** The Settings ▸ Prompt Templates rows: id, file, the file-name-derived default, and
+   * the name the ⋯ menu currently shows. */
   promptTemplates: () => invoke<PromptTemplateInfo[]>("prompt_templates"),
 
   /** Rename a template for this device; an empty name clears the override. Stored in the
    * BACKEND settings table, not localStorage, because the menu is built in Rust. */
   setPromptTemplateName: (template: string, name: string) =>
     invoke<void>("set_prompt_template_name", { template, name }),
+
+  /** Read the templates folder again. This is the only thing that picks up a change on
+   * disk: every window's next ⋯ menu then uses the new table. */
+  refreshPromptTemplates: () =>
+    invoke<PromptTemplatesRefresh>("refresh_prompt_templates"),
+
+  /** Open the templates folder itself in Finder (creating it if it has been deleted). */
+  openPromptTemplatesFolder: () => invoke<void>("open_prompt_templates_folder"),
 };
 
 export interface PromptTemplateInfo {
   id: string;
+  file: string;
   defaultName: string;
   name: string;
+}
+
+export interface PromptTemplatesRefresh {
+  templates: PromptTemplateInfo[];
+  added: number;
+  edited: number;
+  removed: number;
+  /** `.md` files the scan could not use, and why. */
+  skipped: { file: string; reason: string }[];
 }
 
 export function onDelta(cb: (delta: Delta) => void): Promise<UnlistenFn> {

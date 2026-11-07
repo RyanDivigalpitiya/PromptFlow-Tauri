@@ -1,5 +1,6 @@
 use crate::model::{NodeKind, Stage};
 use crate::store::{Delta, MutationOut, Snapshot, Store};
+use crate::templates::TemplatesState;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use uuid::Uuid;
@@ -696,6 +697,7 @@ pub fn popup_row_menu(
     app: AppHandle,
     window: WebviewWindow,
     state: State<StoreState>,
+    templates: State<TemplatesState>,
     node: Uuid,
     x: f64,
     y: f64,
@@ -709,7 +711,8 @@ pub fn popup_row_menu(
         let kind = store.get(node).ok_or("node not found")?.kind;
         let has_children = !store.ordered_children(node).is_empty();
         let ov = crate::templates::overrides(store.get_setting(crate::templates::NAMES_KEY));
-        row_menu_items(kind, has_children, &crate::templates::list(&ov))
+        let table = templates.0.lock().unwrap();
+        row_menu_items(kind, has_children, &crate::templates::list(&table, &ov))
     };
     let label = window.label().to_string();
     let win = window.clone();
@@ -753,34 +756,88 @@ pub fn popup_row_menu(
     Ok(())
 }
 
-/// Fill a prompt from a compiled-in template. The body is resolved with NO lock held; the
-/// mutation is the store's `apply_template`, which is deliberately not `set_text` (see its
-/// doc comment: undo coalescing, cleared runs, cleared completion).
+/// Fill a prompt from a template, as of the last scan. The mutation is the store's
+/// `apply_template`, which is deliberately not `set_text` (see its doc comment: undo
+/// coalescing, cleared runs, cleared completion).
 #[tauri::command]
 pub fn apply_prompt_template(
     app: AppHandle,
     window: WebviewWindow,
     state: State<StoreState>,
+    templates: State<TemplatesState>,
     node: Uuid,
     template: String,
 ) -> Result<MutationOut, String> {
-    let body = crate::templates::by_id(&template)
+    let body = crate::templates::by_id(&templates.0.lock().unwrap(), &template)
         .ok_or_else(|| format!("no such prompt template: {template}"))?
         .body
-        .to_string();
+        .clone();
     let r = state.lock().unwrap().apply_template(node, body);
     run_mutation(&app, &window, r)
 }
 
-/// The Settings ▸ Prompt Templates list: each template's id, its file-name-derived
+/// The Settings ▸ Prompt Templates list: each template's id, file, file-name-derived
 /// default, and the name the menu currently shows.
 #[tauri::command]
 pub fn prompt_templates(
     state: State<StoreState>,
+    templates: State<TemplatesState>,
 ) -> Result<Vec<crate::templates::TemplateInfo>, String> {
-    let store = state.lock().unwrap();
-    let ov = crate::templates::overrides(store.get_setting(crate::templates::NAMES_KEY));
-    Ok(crate::templates::list(&ov))
+    let ov = crate::templates::overrides(
+        state.lock().unwrap().get_setting(crate::templates::NAMES_KEY),
+    );
+    Ok(crate::templates::list(&templates.0.lock().unwrap(), &ov))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplatesRefreshOut {
+    pub templates: Vec<crate::templates::TemplateInfo>,
+    pub added: usize,
+    pub edited: usize,
+    pub removed: usize,
+    pub skipped: Vec<crate::templates::SkippedFile>,
+}
+
+/// Settings ▸ Prompt Templates ▸ Refresh: read the folder again. Replacing the table is
+/// all a window needs, since each ⋯ menu reads it when it opens; a Settings sheet open in
+/// ANOTHER window keeps its rows until it is next opened, as it does for a rename. The
+/// files are read before any lock is taken, and a failed read returns here with the
+/// table untouched, so it can't empty the menu.
+#[tauri::command]
+pub fn refresh_prompt_templates(
+    paths: State<AppPaths>,
+    state: State<StoreState>,
+    templates: State<TemplatesState>,
+) -> Result<TemplatesRefreshOut, String> {
+    let scan = crate::templates::scan(&crate::templates::dir_for(&paths.0))
+        .map_err(|e| e.to_string())?;
+    let ov = crate::templates::overrides(
+        state.lock().unwrap().get_setting(crate::templates::NAMES_KEY),
+    );
+    let mut table = templates.0.lock().unwrap();
+    let change = crate::templates::change_between(&table, &scan.templates);
+    *table = scan.templates;
+    Ok(TemplatesRefreshOut {
+        templates: crate::templates::list(&table, &ov),
+        added: change.added,
+        edited: change.edited,
+        removed: change.removed,
+        skipped: scan.skipped,
+    })
+}
+
+/// Open the templates folder itself in Finder. A command rather than the opener plugin's
+/// JS `openPath`, which needs a path scope in the capability file that could not cover a
+/// `PROMPTFLOW_STORE` dev folder; this way the webview also never names a path at all.
+#[tauri::command]
+pub fn open_prompt_templates_folder(app: AppHandle, paths: State<AppPaths>) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = crate::templates::dir_for(&paths.0);
+    crate::templates::ensure_dir(&dir).map_err(|e| e.to_string())?;
+    app.opener()
+        .open_path(dir.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 /// Rename a template for this device. An empty name REMOVES the override, which is what
@@ -810,9 +867,36 @@ mod tests {
     fn tpl(id: &str, name: &str) -> TemplateInfo {
         TemplateInfo {
             id: id.into(),
+            file: format!("{id}.md"),
             default_name: name.into(),
             name: name.into(),
         }
+    }
+
+    /// The keys `PromptTemplatesRefresh` in api.ts reads. qa.mjs stubs this same shape, so
+    /// a mismatch here would pass there and blank the list in the real app.
+    #[test]
+    fn the_refresh_answer_has_the_shape_the_settings_sheet_reads() {
+        let out = TemplatesRefreshOut {
+            templates: vec![tpl("a", "A")],
+            added: 1,
+            edited: 2,
+            removed: 3,
+            skipped: vec![crate::templates::SkippedFile {
+                file: "b.md".into(),
+                reason: "empty".into(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&out).unwrap(),
+            serde_json::json!({
+                "templates": [{ "id": "a", "file": "a.md", "defaultName": "A", "name": "A" }],
+                "added": 1,
+                "edited": 2,
+                "removed": 3,
+                "skipped": [{ "file": "b.md", "reason": "empty" }],
+            })
+        );
     }
 
     #[test]

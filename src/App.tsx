@@ -214,7 +214,7 @@ export default function App() {
   // Native row (⋯) menu selections arrive as events from Rust — run them here.
   useEffect(() => {
     const un = onRowMenuAction((action, node) => {
-      // Bare `void`: a rejection here (a template id the binary no longer has, a store
+      // Bare `void`: a rejection here (a template id that is no longer in the table, a store
       // error) would otherwise be an unhandled promise, which only reaches the dev
       // terminal via main.tsx's listener. Log it explicitly instead.
       void performRowMenuAction(action, node).catch((e) =>

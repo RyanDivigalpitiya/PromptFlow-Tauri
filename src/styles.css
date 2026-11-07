@@ -1747,6 +1747,13 @@ body {
   flex: none;
 }
 
+/* What the last Refresh found. Brighter than the footnote under it, because this is the
+   answer to something just asked. */
+.settings-tpl-status {
+  color: var(--text-dim);
+  font-size: 0.85em;
+}
+
 /* "· set" beside a secret's label: the ONLY thing the panel ever learns about a stored
    credential. The values themselves never leave the Keychain for the webview. */
 .settings-row-stack em {

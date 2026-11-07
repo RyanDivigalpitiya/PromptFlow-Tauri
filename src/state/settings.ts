@@ -1,5 +1,9 @@
 import { create } from "zustand";
-import { api, type PromptTemplateInfo } from "../lib/api";
+import {
+  api,
+  type PromptTemplateInfo,
+  type PromptTemplatesRefresh,
+} from "../lib/api";
 import { invoke } from "@tauri-apps/api/core";
 import { OutlineLayout, Theme } from "../lib/layout";
 
@@ -37,11 +41,12 @@ const defaults: Persisted = {
 interface SettingsState extends Persisted {
   autoArchive: boolean;
   settingsOpen: boolean;
-  /** The compiled-in prompt templates, with the display name each one currently shows. */
+  /** The prompt templates as of the last scan, with the name each one currently shows. */
   templates: PromptTemplateInfo[];
   set(patch: Partial<Persisted>): void;
   setAutoArchive(on: boolean): void;
   setTemplateName(id: string, name: string, reset?: boolean): void;
+  refreshTemplates(): Promise<PromptTemplatesRefresh>;
   openSettings(open: boolean): void;
   loadBackend(): Promise<void>;
 }
@@ -88,6 +93,11 @@ export const useSettings = create<SettingsState>((set, get) => ({
       ),
     });
     void api.setPromptTemplateName(id, reset ? "" : name);
+  },
+  async refreshTemplates() {
+    const out = await api.refreshPromptTemplates();
+    set({ templates: out.templates });
+    return out;
   },
   openSettings(open) {
     set({ settingsOpen: open });

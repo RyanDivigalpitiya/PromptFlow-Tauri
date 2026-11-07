@@ -207,6 +207,14 @@ pub fn run() {
             }
             app.manage(Mutex::new(store) as StoreState);
             app.manage(commands::AppPaths(path.clone()));
+            // An unreadable folder costs the ⋯ menu its templates, and nothing else.
+            let table = templates::scan(&templates::dir_for(&path))
+                .map(|scan| scan.templates)
+                .unwrap_or_else(|e| {
+                    eprintln!("prompt templates: {e}");
+                    Vec::new()
+                });
+            app.manage(templates::TemplatesState(Mutex::new(table)));
 
             // Auto-archive sweep (deferred a few seconds so windows can load first):
             // completed units older than the retention age out to a JSON archive, then
@@ -360,6 +368,8 @@ pub fn run() {
             commands::apply_prompt_template,
             commands::prompt_templates,
             commands::set_prompt_template_name,
+            commands::refresh_prompt_templates,
+            commands::open_prompt_templates_folder,
             commands::sync_get_config,
             commands::sync_set_config,
             commands::sync_status,
