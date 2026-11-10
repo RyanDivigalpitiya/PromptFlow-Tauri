@@ -17,7 +17,7 @@ fn stamp_content(r: &mut NodeRec) {
 }
 
 /// Stamp the STRUCTURE clock: parent, position, kind, is_completed, completed_at,
-/// is_highlighted, stage.
+/// is_highlighted, stage, prefers_executing.
 fn stamp_structure(r: &mut NodeRec) {
     r.structure_updated_at = now_ms();
 }
@@ -1174,6 +1174,13 @@ impl Store {
     /// click on one device can never carry stale text over concurrent typing on another
     /// (the T7 race, which the merge vectors pin for this field too). One commit, so one
     /// ⌘Z steps it back; re-selecting the current stage emits nothing.
+    ///
+    /// It also keeps `prefers_executing` — the Building/Executing slot's remembered choice
+    /// — in the same commit, so one ⌘Z restores both. Read off whichever end of the move
+    /// sits in that slot, the NEW stage winning: entering or flipping within the slot
+    /// records what it lands on, and LEAVING it records what it leaves, which is what keeps
+    /// the choice of a node stored at Executing before the field existed. A move between
+    /// two stages outside the slot leaves the memory alone.
     pub fn set_stage(
         &mut self,
         node: Uuid,
@@ -1183,9 +1190,15 @@ impl Store {
         if self.nodes[&node].stage == stage {
             return Ok((self.empty_delta(), MutationOut::default()));
         }
+        let choice = stage
+            .building_slot_choice()
+            .or(self.nodes[&node].stage.building_slot_choice());
         self.begin();
         self.edit(node, |r| {
             r.stage = stage;
+            if let Some(executing) = choice {
+                r.prefers_executing = executing;
+            }
             stamp_structure(r);
         });
         let delta = self.commit(None)?;
@@ -3072,6 +3085,11 @@ mod tests {
         for id in [split.new_node, sib.new_node, child.new_node] {
             assert_eq!(s.get(id.unwrap()).unwrap().stage, Stage::Planning);
         }
+        // …nor the remembered Executing choice.
+        s.set_stage(a, Stage::Executing).unwrap();
+        s.set_stage(a, Stage::Deploying).unwrap();
+        let (_, sib) = s.insert_sibling_after(a, NodeKind::Checkbox).unwrap();
+        assert!(!s.get(sib.new_node.unwrap()).unwrap().prefers_executing);
         assert_eq!(s.get(a).unwrap().stage, Stage::Deploying, "the source keeps its own");
     }
 
@@ -3100,6 +3118,55 @@ mod tests {
         assert_eq!(persist::load_all(&s.db).unwrap()[&a].stage, Stage::Executing);
         s.undo().unwrap();
         assert_eq!(s.get(a).unwrap().stage, Stage::Building, "one ⌘Z undoes just the flip");
+    }
+
+    /// The Building/Executing choice OUTLIVES the slot: Executing → Testing → Planning keeps
+    /// remembering Executing, Building forgets it again, and ⌘Z steps the memory back with
+    /// the stage — one undo step for both, never one for each.
+    #[test]
+    fn the_building_slot_remembers_its_last_choice() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::Checkbox).unwrap();
+        let a = a.new_node.unwrap();
+        let at = |s: &Store| {
+            let r = s.get(a).unwrap();
+            (r.stage, r.prefers_executing)
+        };
+        assert_eq!(at(&s), (Stage::Planning, false), "a new node has never chosen Executing");
+        s.set_stage(a, Stage::Building).unwrap();
+        assert_eq!(at(&s), (Stage::Building, false));
+        s.set_stage(a, Stage::Executing).unwrap();
+        assert_eq!(at(&s), (Stage::Executing, true));
+        s.set_stage(a, Stage::Testing).unwrap();
+        assert_eq!(at(&s), (Stage::Testing, true), "leaving the slot keeps the choice");
+        s.set_stage(a, Stage::Planning).unwrap();
+        assert_eq!(at(&s), (Stage::Planning, true), "…across any number of moves outside it");
+        assert!(persist::load_all(&s.db).unwrap()[&a].prefers_executing, "and it persists");
+        s.set_stage(a, Stage::Building).unwrap();
+        assert_eq!(at(&s), (Stage::Building, false), "choosing Building again forgets it");
+        s.undo().unwrap();
+        assert_eq!(at(&s), (Stage::Planning, true), "one ⌘Z restores the stage AND the memory");
+        s.undo().unwrap();
+        s.undo().unwrap();
+        assert_eq!(at(&s), (Stage::Executing, true));
+        s.undo().unwrap();
+        assert_eq!(at(&s), (Stage::Building, false));
+    }
+
+    /// A node stored at Executing before the memory existed has `prefers_executing` false.
+    /// While it is in the slot that is harmless (the stage itself is what reads), and the
+    /// first move out records what it LEAVES — so it keeps Executing with no migration.
+    #[test]
+    fn a_node_left_at_executing_before_the_memory_keeps_it_on_leaving() {
+        let mut s = mem_store();
+        let (_, a) = s.append_root(NodeKind::Checkbox).unwrap();
+        let a = a.new_node.unwrap();
+        s.set_stage(a, Stage::Executing).unwrap();
+        // What a pre-field row loads as: the stage, and no memory.
+        s.nodes.get_mut(&a).unwrap().prefers_executing = false;
+        s.set_stage(a, Stage::Deploying).unwrap();
+        let r = s.get(a).unwrap();
+        assert_eq!((r.stage, r.prefers_executing), (Stage::Deploying, true));
     }
 
     // MARK: Sync client (the outbox, and the remote-apply path)

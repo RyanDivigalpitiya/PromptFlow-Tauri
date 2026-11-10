@@ -85,6 +85,7 @@ const node = (id, parent, position, text, kind, extra = {}) => ({
   // Every record the Rust store sends carries a stage (NodeRec serializes it always), so
   // the fixture does too — a missing key would test a shape the app never receives.
   stage: "planning",
+  prefersExecuting: false,
   isCollapsed: false,
   boldRanges: [],
   italicRanges: [],
@@ -2203,6 +2204,34 @@ await sp.mouse.move(5, 690);
 await sp.waitForTimeout(50);
 const hoverOut = await hoverBtn.evaluate((el) => getComputedStyle(el).transitionDuration);
 
+// The Building/Executing choice OUTLIVES the slot. The store records it on the node
+// (`prefersExecuting`, set by `set_stage` — cargo's `the_building_slot_remembers_its_last_
+// choice`); staged here as that test's literals, the UI must read it back: at Testing having
+// left Executing, the second segment still says Executing and a click lands there.
+const remember = async (stage, prefersExecuting) => {
+  await sp.evaluate((n) => window.__PF_QA_DELTA([{ type: "upsert", node: n }]), {
+    ...stRec.st1,
+    isHighlighted: true,
+    stage,
+    prefersExecuting,
+  });
+  await sp.waitForTimeout(30);
+  await sp.evaluate(() => document.getAnimations().forEach((a) => a.finish()));
+  return (await stageBars())[0];
+};
+const remembered = await remember("testing", true);
+const rememberCallMark = (await stageCalls()).length;
+// By POSITION, not label: the label is what's under test, and a wrong one should fail the
+// check below rather than leave nothing to click.
+await sp.locator(".focus-row").first().locator(".focus-stage").nth(1).click();
+await sp.mouse.move(5, 690);
+await sp.waitForTimeout(260);
+const rememberedClick = (await stageCalls()).slice(rememberCallMark);
+const rememberedAfterClick = (await stageBars())[0];
+// …and once Building is the last choice again, it reads Building. (This is also st1's
+// state before the block — Deploying, nothing remembered — which the checks below assume.)
+const forgotten = await remember("deploying", false);
+
 // Pinning a node that was staged while unpinned: its row arrives at THAT stage, with the
 // fill already in place — no slide in from Planning.
 await sp.evaluate((n) => window.__PF_QA_DELTA([{ type: "upsert", node: n }]), {
@@ -2387,6 +2416,9 @@ const stageChecks = [
   ["stages: …and clicking it again flips back to Building, the same way", flipOk(flipBack, "building", "Building")],
   ["stages: the lit segment's cursor is a pointer only where a click flips it", litCursors.cycling === "pointer" && litCursors.single === "default"],
   ["stages: a peer window's change slides two cells on the same clock", slideOk(slidePeer, "x", cellOf(stRest[0], 1).x, cellOf(stRest[0], 3).x) && slidePeer.dur === 240],
+  ["stages: the Building/Executing choice outlives the slot — at Testing the second segment still reads Executing", barOk(remembered, 2, 4, 1) && remembered.cells[1].text === "Executing"],
+  ["stages: …and clicking it lands on Executing, not the slot's default (and moves nothing until the store answers)", JSON.stringify(rememberedClick) === '[{"node":"st1","stage":"executing"}]' && barOk(rememberedAfterClick, 2, 4, 1)],
+  ["stages: a node whose last choice was Building reads Building again", barOk(forgotten, 3, 4, 1) && forgotten.cells[1].text === "Building"],
   ["stages: hover arrives INSTANTLY (0s while hovered)", hoverIn.dur === "0s" && alphaOf(hoverIn.color) > 0.6],
   ["stages: …and fades out (0.2s once un-hovered)", hoverOut === "0.2s"],
   ["stages: pinning a staged node shows ITS stage (Executing, not the default), with no slide-in", !!stPinned && barOk(stPinned, STAGE_IDX.executing, 4, 1) && stPinned.cells[1].text === "Executing" && stPinned.running === 0],

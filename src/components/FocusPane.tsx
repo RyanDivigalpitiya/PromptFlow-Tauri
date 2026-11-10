@@ -8,7 +8,13 @@ import {
   useSyncExternalStore,
 } from "react";
 import { walkCurrentTask } from "../lib/currentTask";
-import { STAGE_SLOTS, stageSlot, type NodeRec, type Stage } from "../lib/types";
+import {
+  slotRest,
+  STAGE_SLOTS,
+  stageSlot,
+  type NodeRec,
+  type Stage,
+} from "../lib/types";
 import { revealNode, setStage } from "../state/controller";
 import { useFocusPane } from "../state/focusPane";
 import {
@@ -96,8 +102,9 @@ function firstNoteLine(note: string): string | null {
  * the LIT segment steps to the slot's next stage, which is how Building becomes Executing
  * and back. The fill does not move for that — same slot, same index, same transform — and
  * cannot change width either, since every cell is one `minmax(0, 1fr)` column whatever its
- * label says; only the label swaps. An unlit segment always reads its slot's DEFAULT and a
- * click lands there, so leaving Executing and coming back reads Building again.
+ * label says; only the label swaps. An unlit segment reads the choice the node last made in
+ * it (`slotRest`) and a click lands there, so leaving Executing for Testing and coming back
+ * reads Executing again — the store remembers it, so it syncs and undoes with the stage.
  *
  * The fill is ONE element (`.focus-stage-thumb`) translated by whole segment widths, never
  * a background on the current button: a per-button background can only swap, it cannot
@@ -117,7 +124,15 @@ function firstNoteLine(note: string): string | null {
  *
  * mousedown `preventDefault`s so a stage click never steals focus from an outline editor:
  * a stage is metadata about the row, not a navigation, and the caret should stay put. */
-function StageBar({ nodeId, stage }: { nodeId: string; stage: Stage }) {
+function StageBar({
+  nodeId,
+  stage,
+  prefersExecuting,
+}: {
+  nodeId: string;
+  stage: Stage;
+  prefersExecuting: boolean;
+}) {
   const current = stageSlot(stage);
   return (
     // Two boxes because a container query cannot restyle the container itself: the outer
@@ -138,11 +153,15 @@ function StageBar({ nodeId, stage }: { nodeId: string; stage: Stage }) {
         <span className="focus-stage-thumb" aria-hidden="true" />
         {STAGE_SLOTS.map((slot, i) => {
           const lit = i === current;
-          // The lit slot reads the node's own stage; every other reads its default.
-          const shown = (lit && slot.find((o) => o.id === stage)) || slot[0];
+          // The lit slot reads the node's own stage; every other reads the choice the node
+          // last made there.
+          const shown = lit
+            ? (slot.find((o) => o.id === stage) ?? slot[0])
+            : slotRest(slot, prefersExecuting);
           // A lit slot steps to its next option — itself, i.e. no invoke at all, for a
-          // one-stage slot (`setStage` drops an unchanged value).
-          const next = lit ? slot[(slot.indexOf(shown) + 1) % slot.length] : slot[0];
+          // one-stage slot (`setStage` drops an unchanged value). An unlit one lands on
+          // what it reads.
+          const next = lit ? slot[(slot.indexOf(shown) + 1) % slot.length] : shown;
           const cycles = lit && slot.length > 1;
           return (
             <button
@@ -235,7 +254,11 @@ function FocusRow({
           inert={stagesHidden}
         >
           <div className="focus-stages-clip">
-            <StageBar nodeId={id} stage={rec.stage} />
+            <StageBar
+              nodeId={id}
+              stage={rec.stage}
+              prefersExecuting={rec.prefersExecuting === true}
+            />
           </div>
         </div>
       </div>

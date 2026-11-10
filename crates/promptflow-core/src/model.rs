@@ -65,6 +65,8 @@ impl NodeKind {
 /// "Executing" and back. They are distinct stored values rather than a label preference
 /// so that the choice belongs to the node (synced, undoable, exported) exactly as the stage
 /// itself does. Declaration order is NOT slot order; the frontend's `STAGE_SLOTS` owns that.
+/// The choice OUTLIVES the slot: `NodeRec::prefers_executing` remembers which of the two the
+/// node last held, so moving on to Testing and back lands on Executing again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(from = "String")]
 pub enum Stage {
@@ -107,6 +109,22 @@ impl Stage {
     pub fn is_default(&self) -> bool {
         *self == Self::Planning
     }
+
+    /// The Building/Executing slot's choice this stage MAKES — `Some(true)` for Executing,
+    /// `Some(false)` for Building, `None` for every stage outside that slot. What
+    /// `prefers_executing` is set from.
+    pub fn building_slot_choice(self) -> Option<bool> {
+        match self {
+            Self::Building => Some(false),
+            Self::Executing => Some(true),
+            _ => None,
+        }
+    }
+}
+
+/// For `skip_serializing_if` on a flag whose `false` must never be written.
+pub fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl From<String> for Stage {
@@ -127,7 +145,7 @@ impl From<String> for Stage {
 /// TWO merge clocks, both ms-epoch UTC (see the sync protocol):
 ///   * `updated_at` — the CONTENT clock: text, note, bold/italic/underline ranges.
 ///   * `structure_updated_at` — parent, position, kind, is_completed, completed_at,
-///     is_highlighted, stage.
+///     is_highlighted, stage, prefers_executing.
 /// Creation sets both to `created_at`. Splitting them is what keeps a move or a
 /// completion from carrying stale text over concurrent typing on another device.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -145,6 +163,15 @@ pub struct NodeRec {
     /// still deserialize.
     #[serde(default)]
     pub stage: Stage,
+    /// Which of the stage selector's Building/Executing pair this node last HELD — so the
+    /// second segment keeps reading Executing while the node is at Testing, and a click on
+    /// it lands there. Written only by `set_stage`, from whichever end of a transition sits
+    /// in that slot (the new stage wins), which is also what lets a node stored at
+    /// Executing before this field existed keep its choice the first time it moves on.
+    /// While the node IS in the slot the stage itself is authoritative; this only speaks
+    /// for it when the node is elsewhere. Structure group, beside `stage`; never inherited.
+    #[serde(default)]
+    pub prefers_executing: bool,
     pub is_collapsed: bool,
     /// Bold character ranges over `text` as flat `[location, length, …]` pairs.
     pub bold_ranges: Vec<i64>,
@@ -178,6 +205,7 @@ impl NodeRec {
             is_completed: false,
             is_highlighted: false,
             stage: Stage::Planning,
+            prefers_executing: false,
             is_collapsed: false,
             bold_ranges: Vec::new(),
             italic_ranges: Vec::new(),

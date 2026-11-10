@@ -343,6 +343,9 @@ fn a_stage_crosses_and_survives_concurrent_typing() {
     assert_eq!(studio.node(a).unwrap().stage, Stage::Planning);
 
     tick();
+    // Through Executing on the way, so the remembered Building/Executing choice has to
+    // cross with the stage it was left behind by.
+    mac.with(|s| s.set_stage(a, Stage::Executing).unwrap());
     mac.with(|s| s.set_stage(a, Stage::Testing).unwrap());
     // The studio, not knowing, retypes the same node.
     studio.with(|s| {
@@ -355,6 +358,7 @@ fn a_stage_crosses_and_survives_concurrent_typing() {
     for dev in [&mac, &studio] {
         let n = dev.node(a).unwrap();
         assert_eq!(n.stage, Stage::Testing, "{}: the stage survived the typing", dev.name);
+        assert!(n.prefers_executing, "{}: the Executing choice crossed with it", dev.name);
         assert_eq!(n.text, "retyped on the studio", "{}: the typing survived the stage", dev.name);
     }
 }

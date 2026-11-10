@@ -13,9 +13,10 @@ export interface StageOption {
   short: string;
 }
 
-/** The selector's four SLOTS in display order. A slot can hold more than one stage: its
- * FIRST option is what the segment reads and what a click lands on, and clicking the
- * segment again while it is lit steps to the next option (wrapping). Only the second slot
+/** The selector's four SLOTS in display order. A slot can hold more than one stage:
+ * clicking the segment while it is lit steps to the next option (wrapping), and while the
+ * node is ELSEWHERE the segment reads — and a click lands on — the option the node last
+ * chose there (`slotRest`), its FIRST option until it has chosen. Only the second slot
  * uses this today — Building, or Executing — and the two are distinct stored values, so
  * the choice belongs to the node, synced and undoable like the stage itself. A slot is one
  * equal grid column whatever its label says, so the fill never changes width. */
@@ -36,6 +37,17 @@ export function stageSlot(stage: Stage): number {
   return Math.max(0, i);
 }
 
+/** What an UNLIT slot reads and where a click on it lands: the choice the node last made
+ * in it, so Executing survives a trip to Testing and back. The store keeps that choice in
+ * `prefersExecuting` (set by `set_stage` itself, in the same undo step); every other slot
+ * holds one stage and reads it. */
+export function slotRest(
+  slot: readonly StageOption[],
+  prefersExecuting: boolean,
+): StageOption {
+  return (prefersExecuting && slot.find((o) => o.id === "executing")) || slot[0];
+}
+
 /** One outline node — the flat record mirrored from the Rust store. */
 export interface NodeRec {
   id: string;
@@ -47,6 +59,9 @@ export interface NodeRec {
   isCompleted: boolean;
   isHighlighted: boolean;
   stage: Stage;
+  /** Which of Building/Executing the node last held — what the selector's second segment
+   * reads while the node is at another stage. The store writes it; nothing here does. */
+  prefersExecuting: boolean;
   /** Import/export seed only — live collapse state is per-window. */
   isCollapsed: boolean;
   /** Flat [location, length, …] pairs over `text`. */

@@ -58,6 +58,10 @@ pub struct NodeExport {
     /// un-pinned node's stage is real data and has to survive a backup.
     #[serde(default, skip_serializing_if = "Stage::is_default")]
     pub stage: Stage,
+    /// The stage selector's remembered Building/Executing choice — written only when the
+    /// node chose Executing, on the same rule, and kept with the stage for the same reason.
+    #[serde(rename = "prefersExecuting", default, skip_serializing_if = "is_false")]
+    pub prefers_executing: bool,
     pub position: i64,
     #[serde(rename = "createdAt")]
     pub created_at: String,
@@ -121,6 +125,7 @@ fn export_node(
             None
         },
         stage: rec.stage,
+        prefers_executing: rec.prefers_executing,
         position: rec.position,
         created_at: iso(rec.created_at),
         updated_at: iso(rec.updated_at),
@@ -193,6 +198,7 @@ pub fn to_records(doc: &OutlineDocument) -> Imported {
         rec.underline_ranges = e.underline_ranges.clone();
         rec.is_highlighted = e.is_highlighted;
         rec.stage = e.stage;
+        rec.prefers_executing = e.prefers_executing;
         rec.created_at = parse_iso(&e.created_at);
         rec.updated_at = parse_iso(&e.updated_at);
         rec.completed_at = e.completed_at.as_deref().map(parse_iso);
@@ -359,6 +365,8 @@ mod tests {
         s.toggle_completed(b).unwrap();
         s.set_highlighted(a, true).unwrap();
         s.set_highlighted(b, true).unwrap();
+        // Executing, then on to Deploying: the stage AND the remembered choice both travel.
+        s.set_stage(a, Stage::Executing).unwrap();
         s.set_stage(a, Stage::Deploying).unwrap();
 
         let roots = s.roots();
@@ -385,7 +393,9 @@ mod tests {
         assert_eq!(rb.note, "a note");
         assert!(ra.is_highlighted && rb.is_highlighted);
         assert_eq!(ra.stage, Stage::Deploying);
+        assert!(ra.prefers_executing, "the Building/Executing choice survives a backup");
         assert_eq!(rb.stage, Stage::Planning, "an unstaged node comes back at the default");
+        assert!(!rb.prefers_executing);
         assert_eq!(focus_order, vec![rb.id, ra.id]);
         // Fresh ids on import (never reuse the file's).
         assert_ne!(ra.id, a);
@@ -404,6 +414,7 @@ mod tests {
         assert!(!json.contains("isHighlighted"));
         assert!(!json.contains("focusRank"));
         assert!(!json.contains("\"stage\""), "the default stage is never written");
+        assert!(!json.contains("prefersExecuting"), "nor a choice nobody made");
         // A stale pane id (node since deleted) writes no rank either.
         let ghost = Uuid::new_v4();
         let json = encode(&document(&s, &s.roots(), &HashSet::new(), &[ghost])).unwrap();

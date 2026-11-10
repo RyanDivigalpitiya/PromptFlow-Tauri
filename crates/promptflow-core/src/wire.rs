@@ -9,7 +9,7 @@
 //! keys, so a newer peer may add fields without breaking an older one. Do not add
 //! `deny_unknown_fields` anywhere in this module.
 
-use crate::model::{NodeKind, NodeRec, Stage};
+use crate::model::{is_false, NodeKind, NodeRec, Stage};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -46,6 +46,12 @@ pub struct WireNode {
     /// that sets stages syncs through it.)
     #[serde(default, skip_serializing_if = "Stage::is_default")]
     pub stage: Stage,
+    /// Structure group, beside `stage` (see `NodeRec::prefers_executing`). Same additive
+    /// rule: `false` is never written, so a node that never chose Executing encodes exactly
+    /// as before — and an older hub would DROP a `true` on its way through, so it needs the
+    /// same redeploy `stage` does.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub prefers_executing: bool,
     #[serde(default)]
     pub bold_ranges: Vec<i64>,
     #[serde(default)]
@@ -56,7 +62,7 @@ pub struct WireNode {
     /// Content clock: text, note, and the three style-range arrays.
     pub updated_at: i64,
     /// Structure clock: parent, position, kind, is_completed, completed_at,
-    /// is_highlighted, stage.
+    /// is_highlighted, stage, prefers_executing.
     pub structure_updated_at: i64,
     #[serde(default)]
     pub completed_at: Option<i64>,
@@ -88,6 +94,7 @@ impl WireNode {
         self.completed_at = src.completed_at;
         self.is_highlighted = src.is_highlighted;
         self.stage = src.stage;
+        self.prefers_executing = src.prefers_executing;
         self.structure_updated_at = src.structure_updated_at;
     }
 }
@@ -104,6 +111,7 @@ impl From<&NodeRec> for WireNode {
             is_completed: r.is_completed,
             is_highlighted: r.is_highlighted,
             stage: r.stage,
+            prefers_executing: r.prefers_executing,
             bold_ranges: r.bold_ranges.clone(),
             italic_ranges: r.italic_ranges.clone(),
             underline_ranges: r.underline_ranges.clone(),
@@ -136,6 +144,7 @@ impl From<&WireNode> for NodeRec {
             is_completed: w.is_completed,
             is_highlighted: w.is_highlighted,
             stage: w.stage,
+            prefers_executing: w.prefers_executing,
             is_collapsed: false,
             bold_ranges: w.bold_ranges.clone(),
             italic_ranges: w.italic_ranges.clone(),

@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   is_completed  INTEGER NOT NULL DEFAULT 0,
   is_highlighted INTEGER NOT NULL DEFAULT 0,
   stage         TEXT NOT NULL DEFAULT 'planning',
+  prefers_executing INTEGER NOT NULL DEFAULT 0,
   is_collapsed  INTEGER NOT NULL DEFAULT 0,
   bold_ranges   TEXT NOT NULL DEFAULT '[]',
   italic_ranges TEXT NOT NULL DEFAULT '[]',
@@ -91,12 +92,19 @@ fn init(db: &Connection) -> Result<(), String> {
         "ALTER TABLE nodes ADD COLUMN stage TEXT NOT NULL DEFAULT 'planning'",
         [],
     );
+    // The remembered Building/Executing choice. Every existing row reads back as "never
+    // chose Executing" — and a row already AT Executing still keeps its choice, because
+    // `set_stage` records it from the stage being left. No backfill, no clock moves.
+    let _ = db.execute(
+        "ALTER TABLE nodes ADD COLUMN prefers_executing INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     Ok(())
 }
 
 pub fn load_all(db: &Connection) -> Result<HashMap<Uuid, NodeRec>, String> {
     let mut stmt = db
-        .prepare("SELECT id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges, created_at, updated_at, completed_at, structure_updated_at, stage FROM nodes")
+        .prepare("SELECT id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges, created_at, updated_at, completed_at, structure_updated_at, stage, prefers_executing FROM nodes")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
@@ -122,6 +130,7 @@ pub fn load_all(db: &Connection) -> Result<HashMap<Uuid, NodeRec>, String> {
                 is_completed: row.get::<_, i64>(6)? != 0,
                 is_highlighted: row.get::<_, i64>(7)? != 0,
                 stage: Stage::from_raw(&row.get::<_, String>(16)?),
+                prefers_executing: row.get::<_, i64>(17)? != 0,
                 is_collapsed: row.get::<_, i64>(8)? != 0,
                 bold_ranges: serde_json::from_str(&bold_json).unwrap_or_default(),
                 italic_ranges: serde_json::from_str(&italic_json).unwrap_or_default(),
@@ -196,8 +205,8 @@ pub fn apply_plan(db: &mut Connection, plan: ApplyPlan<'_>) -> Result<(), String
     {
         let mut upsert = tx
             .prepare_cached(
-                "INSERT INTO nodes (id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges, created_at, updated_at, completed_at, structure_updated_at, stage)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                "INSERT INTO nodes (id, parent, position, text, note, kind, is_completed, is_highlighted, is_collapsed, bold_ranges, italic_ranges, underline_ranges, created_at, updated_at, completed_at, structure_updated_at, stage, prefers_executing)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                  ON CONFLICT(id) DO UPDATE SET
                    parent=excluded.parent, position=excluded.position, text=excluded.text,
                    note=excluded.note, kind=excluded.kind, is_completed=excluded.is_completed,
@@ -205,7 +214,8 @@ pub fn apply_plan(db: &mut Connection, plan: ApplyPlan<'_>) -> Result<(), String
                    bold_ranges=excluded.bold_ranges, italic_ranges=excluded.italic_ranges,
                    underline_ranges=excluded.underline_ranges, created_at=excluded.created_at,
                    updated_at=excluded.updated_at, completed_at=excluded.completed_at,
-                   structure_updated_at=excluded.structure_updated_at, stage=excluded.stage",
+                   structure_updated_at=excluded.structure_updated_at, stage=excluded.stage,
+                   prefers_executing=excluded.prefers_executing",
             )
             .map_err(|e| e.to_string())?;
         let mut delete = tx
@@ -241,6 +251,7 @@ pub fn apply_plan(db: &mut Connection, plan: ApplyPlan<'_>) -> Result<(), String
                             r.completed_at,
                             r.structure_updated_at,
                             r.stage.raw(),
+                            r.prefers_executing as i64,
                         ])
                         .map_err(|e| e.to_string())?;
                 }
@@ -501,6 +512,7 @@ mod tests {
         let loaded = load_all(&db).unwrap();
         let rec = &loaded[&Uuid::nil()];
         assert_eq!(rec.stage, Stage::Planning);
+        assert!(!rec.prefers_executing, "and has never chosen Executing");
         assert_eq!(rec.structure_updated_at, 1000, "the migration moves no clock");
     }
 
@@ -508,9 +520,12 @@ mod tests {
     fn a_stage_survives_a_reload() {
         let mut db = open_in_memory().unwrap();
         let mut rec = NodeRec::new("staged".into(), NodeKind::Checkbox, None, 0);
-        rec.stage = Stage::Executing;
+        rec.stage = Stage::Testing;
+        rec.prefers_executing = true;
         let id = rec.id;
         apply_plan(&mut db, ApplyPlan::local(vec![(id, Some(&rec))], false, false)).unwrap();
-        assert_eq!(load_all(&db).unwrap()[&id].stage, Stage::Executing);
+        let back = &load_all(&db).unwrap()[&id];
+        assert_eq!(back.stage, Stage::Testing);
+        assert!(back.prefers_executing, "the remembered choice survives a reload too");
     }
 }
