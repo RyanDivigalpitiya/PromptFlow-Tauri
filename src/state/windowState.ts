@@ -60,6 +60,12 @@ interface WindowState {
   focusSidebarWidth: number;
   /** The top-strip height: "auto" (content-fit) or a dragged px — per window. */
   focusTopHeight: FocusTopHeight;
+  /** Pinned nodes whose focus-pane STAGE selector is hidden (clicking the row's numbered
+   * disc toggles it) — per window, like `collapsed`, because it is the same kind of thing:
+   * how much of a row THIS window shows, not a fact about the node. Kept across an un-pin
+   * (the node keeps its stage while out of the pane, and re-pinning should look the way it
+   * was left) and pruned only when the node is deleted. */
+  focusStagesHidden: Set<string>;
 
   toggleCollapse(id: string): void;
   setCollapsed(id: string, value: boolean): void;
@@ -89,6 +95,7 @@ interface WindowState {
   toggleFocusPaneLayout(): void;
   setFocusSidebarWidth(w: number): void;
   setFocusTopHeight(h: FocusTopHeight): void;
+  toggleFocusStages(id: string): void;
   /** Drop references to deleted nodes (fired from the mirror's delete hook). */
   purgeDeleted(ids: Set<string>): void;
 }
@@ -106,6 +113,7 @@ interface PersistedShape {
   focusPaneLayout?: FocusPaneLayout;
   focusSidebarWidth?: number;
   focusTopHeight?: FocusTopHeight;
+  focusStagesHidden?: string[];
 }
 
 const DEFAULT_PERSISTED: PersistedShape = {
@@ -142,6 +150,9 @@ function sanitizePersisted(raw: unknown): PersistedShape {
     focusSidebarWidth: num(o.focusSidebarWidth),
     focusTopHeight:
       o.focusTopHeight === "auto" ? "auto" : num(o.focusTopHeight),
+    focusStagesHidden: Array.isArray(o.focusStagesHidden)
+      ? o.focusStagesHidden.filter((x): x is string => typeof x === "string")
+      : undefined,
   };
 }
 
@@ -177,6 +188,7 @@ export const useWindowState = create<WindowState>((set, get) => ({
   focusPaneLayout: initial.focusPaneLayout ?? "top",
   focusSidebarWidth: clampSidebarWidth(initial.focusSidebarWidth ?? 280),
   focusTopHeight: clampTopHeight(initial.focusTopHeight ?? "auto"),
+  focusStagesHidden: new Set(initial.focusStagesHidden ?? []),
 
   toggleCollapse(id) {
     const next = new Set(get().collapsed);
@@ -298,6 +310,12 @@ export const useWindowState = create<WindowState>((set, get) => ({
   setFocusTopHeight(h) {
     set({ focusTopHeight: clampTopHeight(h) });
   },
+  toggleFocusStages(id) {
+    const next = new Set(get().focusStagesHidden);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    set({ focusStagesHidden: next });
+  },
 
   purgeDeleted(ids) {
     const s = get();
@@ -319,7 +337,7 @@ export const useWindowState = create<WindowState>((set, get) => ({
       if (back.length !== s.back.length) patch.back = back;
       if (forward.length !== s.forward.length) patch.forward = forward;
     }
-    // Prune deleted ids out of `collapsed` and `keepVisible` too. `collapsed` is
+    // Prune deleted ids out of `collapsed`, `focusStagesHidden` and `keepVisible` too. `collapsed` is
     // serialized to localStorage on every change, so a collapsed parent that is later
     // deleted would otherwise linger in the set — and the persisted blob — forever,
     // growing without bound over a document's edit history.
@@ -327,6 +345,11 @@ export const useWindowState = create<WindowState>((set, get) => ({
       const next = new Set(s.collapsed);
       for (const id of ids) next.delete(id);
       patch.collapsed = next;
+    }
+    if ([...s.focusStagesHidden].some((id) => ids.has(id))) {
+      const next = new Set(s.focusStagesHidden);
+      for (const id of ids) next.delete(id);
+      patch.focusStagesHidden = next;
     }
     if ([...s.keepVisible].some((id) => ids.has(id))) {
       const next = new Set(s.keepVisible);
@@ -351,6 +374,7 @@ useWindowState.subscribe((s) => {
       focusPaneLayout: s.focusPaneLayout,
       focusSidebarWidth: s.focusSidebarWidth,
       focusTopHeight: s.focusTopHeight,
+      focusStagesHidden: [...s.focusStagesHidden],
     };
     try {
       const json = JSON.stringify(payload);

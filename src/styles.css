@@ -2110,8 +2110,33 @@ body {
              17.6em. The sidebar has height to spare and no width, so it wraps.
      < 12em  2×2 with abbreviated labels, for the dock's narrowest widths.
    Below that the labels ellipsize — the last resort, at a 180px dock. */
-.focus-stages {
+/* A row's disc shows or hides its stage selector, and the bar CLOSES rather than snapping:
+   the auto-height drawer trick the pane itself opens with, on the pane's own clock. What
+   moves is a distance opening or closing — the row, and in the top dock the pane beneath
+   it — which is what that ease-in-out is for, not the stage fill's ease-out answer to a
+   click. The bar's top margin lives INSIDE the clip (`overflow: hidden` makes the clip a
+   BFC, so the margin can't escape it), so a hidden bar takes its gap with it; on the
+   drawer it would sit outside the 0fr track and leave the row taller than a bar-less one.
+   `minmax(0, 1fr)` so the one column is the drawer's width and nothing's min-content. */
+.focus-stages-drawer {
   align-self: stretch;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--focus-pane-anim-dur)
+    var(--focus-pane-anim-ease);
+}
+
+.focus-stages-drawer.open {
+  grid-template-rows: 1fr;
+}
+
+.focus-stages-clip {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.focus-stages {
   max-width: 30em;
   margin-top: 0.6em;
   font-size: 0.7em;

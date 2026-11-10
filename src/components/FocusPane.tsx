@@ -29,8 +29,9 @@ import {
  * ⠿ handle · numbered accent disc · bold accent title, the first line of its NOTE when
  * it has one, the node's CURRENT TASK, and its STAGE selector along the bottom.
  * Clicking the text REVEALS its current task in the outline (the pinned node itself when
- * it has none); clicking a stage sets it; the handle drag reorders the device-local
- * priority order and shows a drop marker while dragging. */
+ * it has none); clicking the disc shows or hides that row's stage selector; clicking a
+ * stage sets it; the handle drag reorders the device-local priority order and shows a
+ * drop marker while dragging. */
 
 /** Re-render whenever `id`'s node record changes (text/style/kind), so a focus row's
  * title tracks live edits from THIS or any other window — the pane's own structure
@@ -180,6 +181,7 @@ function FocusRow({
 }) {
   const rec = useNodeRec(id);
   const task = useCurrentTask(id);
+  const stagesHidden = useWindowState((s) => s.focusStagesHidden.has(id));
   if (!rec) return null;
   // The whole row navigates to the CURRENT TASK — that is the node the row is pointing
   // at. With nothing left to do under it, it falls back to the pinned node itself.
@@ -196,10 +198,18 @@ function FocusRow({
         <span className="focus-handle" onMouseDown={(e) => onHandleDown(e, id)}>
           ⠿
         </span>
+        {/* The disc toggles THIS row's stage selector; the text beside it is what
+            navigates. Its mousedown `preventDefault`s for the stage buttons' reason: showing
+            or hiding a row's detail is not a navigation, so an outline editor keeps its
+            caret. */}
         <span
           className="focus-index"
+          role="button"
+          aria-expanded={!stagesHidden}
+          aria-label={stagesHidden ? "Show stages" : "Hide stages"}
           style={{ ["--focus-accent" as string]: accent } as React.CSSProperties}
-          onClick={() => revealNode(target)}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => useWindowState.getState().toggleFocusStages(id)}
         >
           {index + 1}
         </span>
@@ -214,7 +224,20 @@ function FocusRow({
             <span className="focus-task">{task.text || "Untitled"}</span>
           )}
         </span>
-        <StageBar nodeId={id} stage={rec.stage} />
+        {/* The auto-height drawer trick (grid rows 0fr↔1fr), so hiding the bar CLOSES the
+            row rather than snapping it shut — and, in the top dock, the pane under it with
+            it. Stays mounted while hidden: the close needs the bar on screen, and a mount
+            has no previous value to transition from, so a row that arrives hidden (the
+            pane opening, a re-pin) paints shut in place. `inert` takes the clipped buttons
+            out of hit-testing and the a11y tree the moment it is hidden. */}
+        <div
+          className={"focus-stages-drawer" + (stagesHidden ? "" : " open")}
+          inert={stagesHidden}
+        >
+          <div className="focus-stages-clip">
+            <StageBar nodeId={id} stage={rec.stage} />
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -2249,7 +2249,101 @@ const runningAfterNarrow = (await stageBars()).reduce((n, b) => n + b.running, 0
 const stNarrow = await stageBars();
 await shot("focus-stages-narrow", sp.locator(".focus-pane-shell"));
 
+// The DISC toggles its own row's stage bar. Back in the top dock, where the pane is
+// content-fit and so has to close with the row. The drawer's transition is paused and
+// scrubbed like the fill's, so the frames are exact.
+await sp.locator('button[aria-label="Switch focus pane layout"]').click();
+await sp.mouse.move(990, 690);
+await sp.waitForTimeout(450);
+/** Per row: its height, the stage clip's, the pane's; the disc's state; and whether the
+ * bar's own centre is still THIS row's click target or only clipped paint. */
+const discGeom = () =>
+  sp.evaluate(() => {
+    const r2 = (v) => +v.toFixed(2);
+    const pane = r2(document.querySelector(".focus-pane").getBoundingClientRect().height);
+    return [...document.querySelectorAll(".focus-row")].map((row) => {
+      const disc = row.querySelector(".focus-index");
+      const track = row.querySelector(".focus-stage-track");
+      const t = track.getBoundingClientRect();
+      const at = document.elementFromPoint(t.left + t.width / 2, t.top + t.height / 2);
+      return {
+        title: row.querySelector(".focus-title").textContent,
+        row: r2(row.getBoundingClientRect().height),
+        clip: r2(row.querySelector(".focus-stages-clip").getBoundingClientRect().height),
+        // Row bottom past the TEXT's bottom: the bar, its gap and the row's 12px padding.
+        tail: r2(row.getBoundingClientRect().bottom - row.querySelector(".focus-content").getBoundingClientRect().bottom),
+        pane,
+        inert: row.querySelector(".focus-stages-drawer").inert,
+        running: row.querySelector(".focus-stages-drawer").getAnimations().length,
+        expanded: disc.getAttribute("aria-expanded"),
+        label: disc.getAttribute("aria-label"),
+        hit: at?.closest(".focus-stage-track") === track,
+      };
+    });
+  });
+const discToggle = async (label) => {
+  await sp.locator(".focus-row").first().locator(`.focus-index[aria-label="${label}"]`).click();
+  return sp.evaluate(() => {
+    const drawer = document.querySelector(".focus-row .focus-stages-drawer");
+    const clip = drawer.querySelector(".focus-stages-clip");
+    const anims = drawer.getAnimations();
+    anims.forEach((a) => a.pause());
+    const t = anims[0]?.effect.getTiming();
+    const frames = [];
+    for (let ms = 0; ms <= (t?.duration ?? 0); ms += 20) {
+      anims.forEach((a) => (a.currentTime = ms));
+      frames.push(+clip.getBoundingClientRect().height.toFixed(2));
+    }
+    document.getAnimations().forEach((a) => a.finish());
+    return { count: anims.length, prop: anims[0]?.transitionProperty ?? null, dur: t?.duration ?? null, frames };
+  });
+};
+const activeRow = () => sp.evaluate(() => document.activeElement?.closest(".node-row")?.textContent ?? null);
+await sp.locator(".node-row", { hasText: "Out for deploy" }).first().locator(".node-text-static").click();
+await sp.waitForTimeout(150);
+const discEditingBefore = await activeRow();
+const discShown = await discGeom();
+const discCallMark = await sp.evaluate(() => window.__PF_QA_CALLS.length);
+const discHide = await discToggle("Hide stages");
+const discHidden = await discGeom();
+const discEditingAfter = await activeRow();
+const discCalls = await sp.evaluate(
+  (m) => window.__PF_QA_CALLS.slice(m).map((c) => c.cmd).filter((c) => c !== "log_msg" && !c.startsWith("plugin:")),
+  discCallMark,
+);
+await sp.waitForTimeout(300); // past windowState's 250ms persist debounce
+const discPersisted = await sp.evaluate(() => JSON.parse(localStorage.getItem("pf.win.main") ?? "{}").focusStagesHidden);
+await shot("focus-stages-hidden", sp.locator(".focus-pane-shell"));
+const discShow = await discToggle("Show stages");
+const discReshown = await discGeom();
+const discBarBack = (await stageBars())[0];
+// Hidden, then un-pinned and pinned again: the row comes back the way it was left — shut,
+// and painted shut rather than closing on arrival.
+await discToggle("Hide stages");
+const st1Title = stRec.st1.text;
+await sp.evaluate((n) => window.__PF_QA_DELTA([{ type: "upsert", node: n }]), { ...stRec.st1, stage: "deploying", isHighlighted: false });
+await sp.waitForTimeout(80);
+const discUnpinned = !(await discGeom()).some((g) => g.title === st1Title);
+await sp.evaluate((n) => window.__PF_QA_DELTA([{ type: "upsert", node: n }]), { ...stRec.st1, stage: "deploying", isHighlighted: true });
+await sp.waitForTimeout(30);
+const discRepinned = (await discGeom()).find((g) => g.title === st1Title);
+
 const STAGE_IDX = { planning: 0, building: 1, executing: 1, testing: 2, deploying: 3 };
+/** A drawer's sampled heights run `from` → `to`, one way only, through real intermediate
+ * values (a snap would be two values and nothing between). */
+const drawerOk = (d, from, to) => {
+  const f = d.frames;
+  const interior = f.filter((v) => Math.min(from, to) + 0.5 < v && v < Math.max(from, to) - 0.5);
+  return (
+    d.count === 1 &&
+    d.prop === "grid-template-rows" &&
+    d.dur === 280 &&
+    near(f[0], from) &&
+    near(f.at(-1), to) &&
+    monotone(f) &&
+    new Set(interior.map((v) => Math.round(v))).size >= 5
+  );
+};
 const slideOk = (sl, axis, from, to) => {
   const vs = sl.frames.map((f) => f[axis]);
   const interior = vs.filter((v) => Math.min(from, to) + 0.5 < v && v < Math.max(from, to) - 0.5);
@@ -2303,6 +2397,16 @@ const stageChecks = [
   ["stages: …and lands on Planning", barOk(stGridAfter, 0, 2, 2)],
   ["stages: widening the dock back to one row slides nothing", runningAfterWiden === 0 && barOk(stWide[0], 3, 4, 1)],
   ["stages: the 180px dock keeps 2×2 and abbreviates (only an ellipsis past that)", runningAfterNarrow === 0 && barOk(stNarrow[0], 3, 2, 2, true) && JSON.stringify(stNarrow[0].cells.map((c) => c.text)) === '["Plan","Build","Test","Deploy"]' && barOf(stNarrow, "Staged while unpinned")?.cells[1].text === "Exec"],
+  ["stage toggle: every disc starts as a Hide stages button over an open, clickable bar", discShown.length === 4 && discShown.every((g) => g.expanded === "true" && g.label === "Hide stages" && !g.inert && g.clip > 10 && g.hit)],
+  ["stage toggle: clicking a disc CLOSES its row's bar on --focus-pane-anim-dur (280ms) — a drawer, not a snap", drawerOk(discHide, discShown[0].clip, 0)],
+  ["stage toggle: …the row loses exactly the bar and its gap, and the top-dock pane shrinks by the same", near(discHidden[0].clip, 0, 0.01) && near(discShown[0].row - discHidden[0].row, discShown[0].clip) && near(discShown[0].pane - discHidden[0].pane, discShown[0].clip)],
+  ["stage toggle: …leaving the row ending at its text plus its own 12px padding, as if it had no bar", near(discHidden[0].tail, 12, 0.01)],
+  ["stage toggle: …only that row — every other bar stays open at its height", discHidden.slice(1).every((g, i) => near(g.row, discShown[i + 1].row, 0.01) && near(g.clip, discShown[i + 1].clip, 0.01) && !g.inert && g.hit)],
+  ["stage toggle: …the hidden bar is inert and no click target, and the disc now says Show stages", discHidden[0].inert && !discHidden[0].hit && discHidden[0].expanded === "false" && discHidden[0].label === "Show stages"],
+  ["stage toggle: …sends nothing to the store and leaves the outline editor's caret where it was", discCalls.length === 0 && discEditingBefore !== null && discEditingAfter === discEditingBefore],
+  ["stage toggle: the hidden set persists with the window's state", JSON.stringify(discPersisted) === '["st1"]'],
+  ["stage toggle: clicking again OPENS it on the same clock, to the same height, the fill still on its stage", drawerOk(discShow, 0, discShown[0].clip) && near(discReshown[0].row, discShown[0].row, 0.01) && !discReshown[0].inert && discReshown[0].hit && barOk(discBarBack, 3, 4, 1)],
+  ["stage toggle: a hidden bar survives an un-pin and re-pin, and the row arrives shut instead of closing", discUnpinned && !!discRepinned && near(discRepinned.clip, 0, 0.01) && discRepinned.running === 0 && discRepinned.inert],
 ];
 
 // ---- Report ------------------------------------------------------------------
