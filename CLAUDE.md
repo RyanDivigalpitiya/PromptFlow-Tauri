@@ -69,7 +69,7 @@ npm run dev & node scripts/qa.mjs [outDir]   # headless visual QA in WebKit (see
   geometry + per-frame transition values, writes PNGs, reaches `:hover`/`:focus`, real
   keys and real mouse drags (it is how the multi-select sweep is covered), touches no
   window. Sections that need their own tree open a SECOND page with its own fixture
-  (the completion, parent-glyph, focus-pane, prompt-fold and stage-selector sections each do) — the sweep
+  (the completion, parent-glyph, focus-pane, prompt-fold, stage-selector and focus-dock sections each do) — the sweep
   tests anchor on "the last row" and on the
   empty background under the list, so growing the main fixture breaks them. Where a check
   can only see the INVOKE a gesture fires (⌘B / ⌘3 over a block), that is what it asserts,
@@ -137,7 +137,7 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   `pf.win.<label>` — focus, back/forward history, and keepVisible are session-only, and
   a new field does NOT persist unless added to `PersistedShape`. The same payload also
   writes `pf.lastWindowState`, the DEVICE seed a fresh ⌘N window inherits. Other
-  device-local keys: `pf.appearance` (settings), `pf.focusOrder` (focus-pane order). The
+  device-local keys: `pf.appearance` (settings), `pf.focusOrder` (focus-pane order), `pf.focusDockSwitcher` (the hidden dock switcher's override — see DOCKING). The
   backend `settings` table holds only `autoArchive` — backend-stored because the sweep
   runs in Rust at launch with no frontend involvement (deferred ~4s so windows load
   first; they then receive its `auto-archive` delta).
@@ -192,7 +192,8 @@ window "main" ── React + zustand mirror ──┐            ┌── windo
   main-thread, but the pane is a few rows and the outline below only recomputes its virtual
   RANGE (rows stay absolutely positioned), so it holds. The numbered disc is `1.84em` = an
   ODD 17px at base font, so its centre is a pixel, not a seam.
-  DOCKING (`focusPaneLayout`, the TopBar switcher next to ★): the pane + outline share the
+  **The desktop app ships SIDEBAR-ONLY: the dock switcher is hidden, not deleted** (`FOCUS_DOCK_SWITCHER` in `windowState.ts`). The TopBar's focus button is the left-sidebar glyph (`DockGlyph`, where ★ used to be) and only shows/hides the pane; `focusPaneLayout` is forced to `sidebar` at launch whatever a window persisted, because a window left in the top dock would otherwise be stranded there with no way out, and `toggleFocusPaneLayout` no-ops. Everything below about the TOP dock is kept working on purpose — it is the reference for the iPadOS port — and the device-local key `pf.focusDockSwitcher` = `"1"` (read once at launch) brings back the old ★ + switcher pair. qa.mjs sets that key on the two pages that walk both docks (sections 7 and 10) and leaves it off in section 11, which pins the shipping default. Don't strip the top-dock code or its checks as dead without asking Ryan.
+  DOCKING (`focusPaneLayout`, the TopBar switcher — hidden, see above): the pane + outline share the
   `.app-body` GRID, whose `grid-template-areas` restacks — `top` stacks them (strip above
   outline), `sidebar` puts them side by side (focus left, outline pushed right). Both stay
   mounted across a switch, so the outline never remounts. In `sidebar` the shell animates

@@ -4,7 +4,11 @@ import { setHideCompleted } from "../state/controller";
 import { mirror, nodeVersion, subscribeNode } from "../state/mirror";
 import { useSettings } from "../state/settings";
 import { useSync } from "../state/sync";
-import { useWindowState } from "../state/windowState";
+import {
+  FOCUS_DOCK_SWITCHER,
+  type FocusPaneLayout,
+  useWindowState,
+} from "../state/windowState";
 
 /** Toolbar icons ride ⌘+/⌘− but CAPPED so the buttons never outgrow the fixed
  * 44px strip — the traffic lights can't move at runtime, so the row's midline
@@ -52,6 +56,53 @@ function SyncIndicator({ scale }: { scale: number }) {
         <line x1="2.4" y1="12.2" x2="11.6" y2="2.4" strokeWidth="1.3" />
       </svg>
     </button>
+  );
+}
+
+/** A window-panel glyph whose filled region is where the focus pane docks — the left
+ * column (sidebar) or the top strip (top). The sidebar form is the focus button's icon;
+ * the switcher, when offered, shows the CURRENT dock with it. */
+function DockGlyph({ dock, size }: { dock: FocusPaneLayout; size: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.1"
+    >
+      <rect x="1.6" y="1.6" width="10.8" height="10.8" rx="2.2" />
+      {dock === "sidebar" ? (
+        <>
+          <rect
+            x="1.6"
+            y="1.6"
+            width="4.1"
+            height="10.8"
+            rx="2.2"
+            fill="currentColor"
+            fillOpacity="0.4"
+            stroke="none"
+          />
+          <line x1="5.7" y1="1.6" x2="5.7" y2="12.4" />
+        </>
+      ) : (
+        <>
+          <rect
+            x="1.6"
+            y="1.6"
+            width="10.8"
+            height="4.1"
+            rx="2.2"
+            fill="currentColor"
+            fillOpacity="0.4"
+            stroke="none"
+          />
+          <line x1="1.6" y1="5.7" x2="12.4" y2="5.7" />
+        </>
+      )}
+    </svg>
   );
 }
 
@@ -122,65 +173,41 @@ export function TopBar() {
         {drill && <DrillTitle id={drill} />}
       </div>
       <div className="topbar-right">
-        <button
-          className={"bar-btn" + (focusPane ? " active" : "")}
-          onClick={() => s().toggleFocusPane()}
-          title="Focus pane (⌥⇧F)"
-        >
-          ★
-        </button>
-        <button
-          className="bar-btn"
-          onClick={() => s().toggleFocusPaneLayout()}
-          title={
-            focusLayout === "sidebar"
-              ? "Dock focus pane to top"
-              : "Dock focus pane to left"
-          }
-          aria-label="Switch focus pane layout"
-        >
-          {/* Panel glyph whose filled region shows where the focus pane currently docks —
-              left column (sidebar) or top strip (top). Clicking flips it. */}
-          <svg
-            width={14 * ts}
-            height={14 * ts}
-            viewBox="0 0 14 14"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.1"
+        {FOCUS_DOCK_SWITCHER ? (
+          <>
+            {/* The two-button form — show/hide, plus the dock switcher. Hidden in this app
+                (see FOCUS_DOCK_SWITCHER) but kept as the reference for the iPadOS port. */}
+            <button
+              className={"bar-btn" + (focusPane ? " active" : "")}
+              onClick={() => s().toggleFocusPane()}
+              title="Focus pane (⌥⇧F)"
+            >
+              ★
+            </button>
+            <button
+              className="bar-btn"
+              onClick={() => s().toggleFocusPaneLayout()}
+              title={
+                focusLayout === "sidebar"
+                  ? "Dock focus pane to top"
+                  : "Dock focus pane to left"
+              }
+              aria-label="Switch focus pane layout"
+            >
+              <DockGlyph dock={focusLayout} size={14 * ts} />
+            </button>
+          </>
+        ) : (
+          <button
+            className={"bar-btn" + (focusPane ? " active" : "")}
+            onClick={() => s().toggleFocusPane()}
+            title={focusPane ? "Hide focus sidebar (⌥⇧F)" : "Show focus sidebar (⌥⇧F)"}
+            aria-label="Focus sidebar"
+            aria-pressed={focusPane}
           >
-            <rect x="1.6" y="1.6" width="10.8" height="10.8" rx="2.2" />
-            {focusLayout === "sidebar" ? (
-              <>
-                <rect
-                  x="1.6"
-                  y="1.6"
-                  width="4.1"
-                  height="10.8"
-                  rx="2.2"
-                  fill="currentColor"
-                  fillOpacity="0.4"
-                  stroke="none"
-                />
-                <line x1="5.7" y1="1.6" x2="5.7" y2="12.4" />
-              </>
-            ) : (
-              <>
-                <rect
-                  x="1.6"
-                  y="1.6"
-                  width="10.8"
-                  height="4.1"
-                  rx="2.2"
-                  fill="currentColor"
-                  fillOpacity="0.4"
-                  stroke="none"
-                />
-                <line x1="1.6" y1="5.7" x2="12.4" y2="5.7" />
-              </>
-            )}
-          </svg>
-        </button>
+            <DockGlyph dock="sidebar" size={14 * ts} />
+          </button>
+        )}
         <button
           className={"bar-btn" + (hideCompleted ? " active" : "")}
           onClick={() => setHideCompleted(!hideCompleted)}

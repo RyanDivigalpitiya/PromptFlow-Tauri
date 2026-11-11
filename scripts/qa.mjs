@@ -995,11 +995,15 @@ await fp.addInitScript(tauriStub, {
   canRedo: false,
 });
 // The pane open, and BOTH ancestors of Child 1 collapsed, so a reveal has something to
-// open. `pf.focusOrder` is seeded too — the numbering is device-local, not derived.
+// open. `pf.focusOrder` is seeded too — the numbering is device-local, not derived. The
+// dock SWITCHER is turned on (`pf.focusDockSwitcher`): the app hides it and always docks
+// left, but the top dock is kept as the iPadOS port's reference, and this section covers
+// both docks. The shipping default has its own section (11).
 await fp.addInitScript(
   (seed) => {
     localStorage.setItem("pf.win.main", JSON.stringify(seed.win));
     localStorage.setItem("pf.focusOrder", JSON.stringify(seed.order));
+    localStorage.setItem("pf.focusDockSwitcher", "1");
   },
   {
     win: {
@@ -1980,10 +1984,12 @@ sp.on("console", (m) => {
   if (m.type() === "error") errors.push(m.text());
 });
 await sp.addInitScript(tauriStub, { rev: 1, nodes: STAGE_NODES, canUndo: false, canRedo: false });
+// The dock switcher on, as for the focus pane section: this one walks both docks too.
 await sp.addInitScript(
   (seed) => {
     localStorage.setItem("pf.win.main", JSON.stringify(seed.win));
     localStorage.setItem("pf.focusOrder", JSON.stringify(seed.order));
+    localStorage.setItem("pf.focusDockSwitcher", "1");
   },
   {
     win: {
@@ -2441,6 +2447,79 @@ const stageChecks = [
   ["stage toggle: a hidden bar survives an un-pin and re-pin, and the row arrives shut instead of closing", discUnpinned && !!discRepinned && near(discRepinned.clip, 0, 0.01) && discRepinned.running === 0 && discRepinned.inert],
 ];
 
+// ---- 11. Focus pane: the SHIPPING dock — a left sidebar, shown/hidden from the TopBar -
+// The app hides the top ⇄ sidebar switcher (`FOCUS_DOCK_SWITCHER`, off unless
+// `pf.focusDockSwitcher` is "1"), so the pane always docks left and the TopBar's one focus
+// button — the left-sidebar glyph, where ★ was — only shows and hides it. Sections 7 and
+// 10 turn the switcher ON to keep the retained top dock covered; this page leaves it off,
+// and starts from a window that PERSISTED the top dock, which must not strand it there.
+const dk = await b.newPage({
+  viewport: { width: 1000, height: 700 },
+  deviceScaleFactor: 2,
+  colorScheme: "dark",
+});
+dk.on("pageerror", (e) => errors.push(String(e)));
+dk.on("console", (m) => {
+  if (m.type() === "error") errors.push(m.text());
+});
+await dk.addInitScript(tauriStub, { rev: 1, nodes: STAGE_NODES, canUndo: false, canRedo: false });
+await dk.addInitScript(() => {
+  localStorage.setItem("pf.win.main", JSON.stringify({
+    collapsed: [], hideCompleted: false, fontSize: 16, drill: null,
+    focusPaneExpanded: false, focusPaneLayout: "top", focusSidebarWidth: 280,
+    focusTopHeight: "auto",
+  }));
+  localStorage.setItem("pf.focusOrder", JSON.stringify(["st1", "st2", "st3"]));
+});
+await dk.goto(URL_, { waitUntil: "domcontentloaded" });
+await dk.waitForSelector(".node-row", { timeout: 15000 });
+await dk.addStyleTag({ content: "html,body{background:#101014 !important}" });
+await dk.waitForTimeout(300);
+const dockGeom = () =>
+  dk.evaluate(() => {
+    const btn = document.querySelector('.topbar button[aria-label="Focus sidebar"]');
+    const shell = document.querySelector(".focus-pane-shell");
+    const fill = btn?.querySelector('svg rect[fill="currentColor"]');
+    return {
+      sidebar: document.querySelector(".app-body").classList.contains("sidebar"),
+      switchers: document.querySelectorAll('button[aria-label="Switch focus pane layout"]').length,
+      stars: [...document.querySelectorAll(".topbar button")].filter((x) => x.textContent.includes("★")).length,
+      hasButton: !!btn,
+      text: btn?.textContent.trim() ?? null,
+      // The filled region of the glyph: the left COLUMN (4.1 wide, full height) is the
+      // sidebar form; the top form fills a full-width 4.1-tall strip instead.
+      glyph: fill ? `${fill.getAttribute("width")}x${fill.getAttribute("height")}` : null,
+      pressed: btn?.getAttribute("aria-pressed") ?? null,
+      active: btn?.classList.contains("active") ?? null,
+      title: btn?.getAttribute("title") ?? null,
+      open: shell.classList.contains("open"),
+      shellW: +shell.getBoundingClientRect().width.toFixed(2),
+      outlineLeft: +document.querySelector(".outline-scroll").getBoundingClientRect().left.toFixed(2),
+    };
+  });
+const dockRest = await dockGeom();
+const dockBtn = dk.locator('.topbar button[aria-label="Focus sidebar"]');
+await dockBtn.click();
+await dk.waitForTimeout(450); // past --focus-pane-anim-dur and the 250ms persist debounce
+const dockOpen = await dockGeom();
+const dockPersisted = await dk.evaluate(() => JSON.parse(localStorage.getItem("pf.win.main") ?? "{}").focusPaneLayout);
+await shot("focus-dock-open", dk.locator(".app-shell"));
+await dockBtn.click();
+await dk.waitForTimeout(450);
+const dockClosed = await dockGeom();
+await dk.keyboard.press("Alt+Shift+KeyF");
+await dk.waitForTimeout(450);
+const dockKey = await dockGeom();
+const dockChecks = [
+  ["dock: a window persisted in the TOP dock opens as the sidebar — nothing could move it back", dockRest.sidebar && !dockRest.open && near(dockRest.shellW, 0) && near(dockRest.outlineLeft, 0)],
+  ["dock: the TopBar carries no dock switcher and no ★", dockRest.switchers === 0 && dockRest.stars === 0],
+  ["dock: the focus button is the left-sidebar glyph, unpressed", dockRest.hasButton && dockRest.text === "" && dockRest.glyph === "4.1x10.8" && dockRest.pressed === "false" && !dockRest.active],
+  ["dock: clicking it SHOWS the sidebar at its width, pushing the outline right", dockOpen.open && dockOpen.sidebar && near(dockOpen.shellW, 280) && near(dockOpen.outlineLeft, 280) && dockOpen.pressed === "true" && dockOpen.active && dockOpen.title === "Hide focus sidebar (⌥⇧F)"],
+  ["dock: …and the window now persists the sidebar dock", dockPersisted === "sidebar"],
+  ["dock: clicking it again HIDES the sidebar", !dockClosed.open && near(dockClosed.shellW, 0) && near(dockClosed.outlineLeft, 0) && dockClosed.pressed === "false" && dockClosed.title === "Show focus sidebar (⌥⇧F)"],
+  ["dock: ⌥⇧F toggles the same sidebar", dockKey.open && dockKey.sidebar && near(dockKey.shellW, 280) && dockKey.pressed === "true"],
+];
+
 // ---- Report ------------------------------------------------------------------
 const eq = (a, b, tol = 0.6) => Math.abs(a - b) <= tol;
 const distinct = (xs) => new Set(xs.filter((v) => v != null)).size;
@@ -2646,6 +2725,7 @@ const checks = [
   ["templates folder: …brighter than the footnote", tplAfter.statusColor !== tplAfter.footnoteColor],
   ["templates folder: reopening the sheet drops the old status line", tplReopened === null],
   ...stageChecks,
+  ...dockChecks,
   ["no page errors", errors.length === 0],
 ];
 console.log("\nrest    :", JSON.stringify(rest));
@@ -2677,6 +2757,7 @@ console.log("  grid  :", slideGrid.frames.map((f) => `${f.ms}:${f.x},${f.y}`).jo
 console.log("  hover :", JSON.stringify({ hoverIn, hoverOut }), "| calls", JSON.stringify(stClick.calls));
 console.log("  docks :", JSON.stringify({ sidebar: stSidebar[0].track, wide: stWide[0].track, narrow: stNarrow[0].track }));
 console.log("  lead  :", JSON.stringify({ leadTop, leadSidebar }), "(px from the title's centre)");
+console.log("dock    :", JSON.stringify({ dockRest, dockOpen, dockClosed, dockKey, dockPersisted }));
 if (errors.length) console.log("errors  :", errors.slice(0, 5));
 console.log();
 let failed = 0;

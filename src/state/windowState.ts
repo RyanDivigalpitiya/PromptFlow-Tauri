@@ -19,6 +19,20 @@ export type FocusField = "main" | "note";
 /** Focus pane docking: the current top strip, or a left-anchored resizable sidebar. */
 export type FocusPaneLayout = "top" | "sidebar";
 
+/** Whether this window offers the top ⇄ sidebar dock SWITCHER. Off: the pane always docks
+ * as the left sidebar, whatever a window persisted, and the TopBar's focus button only
+ * shows/hides it. The top dock is NOT deleted — it is kept, working and covered by qa.mjs,
+ * as the reference for the iPadOS port — it is just unreachable here. The device-local key
+ * `pf.focusDockSwitcher` = "1" brings the switcher back (read once, at launch); qa.mjs sets
+ * it on the two pages that exercise both docks. */
+export const FOCUS_DOCK_SWITCHER = (() => {
+  try {
+    return localStorage.getItem("pf.focusDockSwitcher") === "1";
+  } catch {
+    return false;
+  }
+})();
+
 export const FOCUS_SIDEBAR_MIN = 180;
 export const FOCUS_SIDEBAR_MAX = 640;
 export function clampSidebarWidth(w: number): number {
@@ -52,9 +66,10 @@ interface WindowState {
   exemptPruneOnce: string | null;
   /** Just-completed nodes briefly held on screen under hide-completed. */
   keepVisible: Set<string>;
-  /** The focus pane strip (⌥⇧F / the ⭐ button) — per window. */
+  /** The focus pane (⌥⇧F / the TopBar's sidebar button) — per window. */
   focusPaneExpanded: boolean;
-  /** Where the focus pane docks: top strip or left sidebar — per window. */
+  /** Where the focus pane docks: top strip or left sidebar — per window. Always "sidebar"
+   * unless `FOCUS_DOCK_SWITCHER` is on. */
   focusPaneLayout: FocusPaneLayout;
   /** The left-sidebar width in px (resizable, persisted) — per window. */
   focusSidebarWidth: number;
@@ -185,7 +200,9 @@ export const useWindowState = create<WindowState>((set, get) => ({
   exemptPruneOnce: null,
   keepVisible: new Set(),
   focusPaneExpanded: initial.focusPaneExpanded ?? false,
-  focusPaneLayout: initial.focusPaneLayout ?? "top",
+  // A window persisted in the top dock must not be stranded there with no switcher to
+  // leave it, so the persisted value is honoured only while the switcher is offered.
+  focusPaneLayout: FOCUS_DOCK_SWITCHER ? (initial.focusPaneLayout ?? "top") : "sidebar",
   focusSidebarWidth: clampSidebarWidth(initial.focusSidebarWidth ?? 280),
   focusTopHeight: clampTopHeight(initial.focusTopHeight ?? "auto"),
   focusStagesHidden: new Set(initial.focusStagesHidden ?? []),
@@ -300,6 +317,7 @@ export const useWindowState = create<WindowState>((set, get) => ({
     set({ focusPaneExpanded: !get().focusPaneExpanded });
   },
   toggleFocusPaneLayout() {
+    if (!FOCUS_DOCK_SWITCHER) return;
     set({
       focusPaneLayout: get().focusPaneLayout === "top" ? "sidebar" : "top",
     });
