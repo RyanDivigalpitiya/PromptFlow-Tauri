@@ -2029,6 +2029,39 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
+    // MARK: Prompt templates (device-local rows in the same file — see templates.rs)
+
+    /// Every template, sorted by name. A read error is logged and reads as none, so a
+    /// broken table costs the menus their templates and nothing else.
+    pub fn templates(&self) -> Vec<crate::templates::Template> {
+        crate::templates::load(&self.db).unwrap_or_else(|e| {
+            eprintln!("prompt templates: {e}");
+            Vec::new()
+        })
+    }
+
+    pub fn template(&self, id: &str) -> Result<Option<crate::templates::Template>, String> {
+        crate::templates::get(&self.db, id)
+    }
+
+    pub fn save_template(
+        &mut self,
+        id: Option<&str>,
+        name: &str,
+        body: &str,
+    ) -> Result<crate::templates::Template, String> {
+        crate::templates::save(&self.db, id, name, body, now_ms())
+    }
+
+    pub fn delete_template(&mut self, id: &str) -> Result<(), String> {
+        crate::templates::delete(&self.db, id)
+    }
+
+    /// Fill an empty table from the shipped defaults, once per store (see `templates::seed`).
+    pub fn seed_templates(&mut self) -> Result<usize, String> {
+        crate::templates::seed(&self.db, now_ms())
+    }
+
     fn ensure(&self, id: Uuid) -> Result<(), String> {
         if self.nodes.contains_key(&id) {
             Ok(())

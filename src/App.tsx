@@ -2,8 +2,14 @@ import { useEffect, useState } from "react";
 import { FocusPane } from "./components/FocusPane";
 import { OutlineView } from "./components/OutlineView";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { TemplateEditor } from "./components/TemplateEditor";
 import { TopBar } from "./components/TopBar";
-import { api, onFocusOrderAdopt, onRowMenuAction } from "./lib/api";
+import {
+  api,
+  onFocusOrderAdopt,
+  onRowMenuAction,
+  onTemplatesMenuAction,
+} from "./lib/api";
 import { endAnimNow } from "./state/collapseAnim";
 import { useFocusPane } from "./state/focusPane";
 import {
@@ -21,6 +27,10 @@ import {
 import { mirror, startMirror, subscribeStructure } from "./state/mirror";
 import { selectionIds, useSelection } from "./state/selection";
 import { useSettings } from "./state/settings";
+import {
+  handleTemplatesMenuAction,
+  templateEditorOpen,
+} from "./state/templateEditor";
 import { useWindowState } from "./state/windowState";
 
 /** Keys while a NODE selection is live (nothing is first responder then) — the
@@ -224,6 +234,16 @@ export default function App() {
     return () => void un.then((f) => f());
   }, []);
 
+  // The TopBar Templates menu is native too; its choice opens the template editor.
+  useEffect(() => {
+    const un = onTemplatesMenuAction((action) => {
+      void handleTemplatesMenuAction(action).catch((e) =>
+        dbg(`templates-menu-action ${action} failed: ${String(e)}`),
+      );
+    });
+    return () => void un.then((f) => f());
+  }, []);
+
   // An outline import restores the focus-pane order in EVERY window (see api.ts on why
   // a peer window left to its own reconcile would clobber it).
   useEffect(() => {
@@ -287,11 +307,26 @@ export default function App() {
   // Window-level shortcuts (the OutlineView keyboardShortcuts / commands port).
   useEffect(() => {
     const onSelKey = (e: KeyboardEvent) => {
+      // The template editor is modal: no node selection acts behind it.
+      if (templateEditorOpen()) return;
       handleSelectionKey(e);
     };
     window.addEventListener("keydown", onSelKey, true);
     const onKey = (e: KeyboardEvent) => {
       const s = useWindowState.getState();
+      if (templateEditorOpen()) {
+        // The template editor is modal, so the outline behind it takes none of these —
+        // except the font size, which scales the editor too. ⌘Z is SWALLOWED rather
+        // than ignored: left unhandled it falls through to the native Edit ▸ Undo,
+        // which would undo the outline the user cannot see. (The editor's own fields
+        // claim their ⌘Z before it gets here.)
+        if (!e.metaKey || e.ctrlKey || e.altKey) return;
+        if (e.key === "z" || e.key === "Z") {
+          e.preventDefault();
+          return;
+        }
+        if (e.shiftKey || !["=", "+", "-", "0"].includes(e.key)) return;
+      }
       // ⌥⇧F toggles the focus pane. It carries no ⌘, so it must resolve BEFORE the
       // ⌘ gate below. Matched on e.code, NEVER e.key: macOS rewrites the character
       // under Option (⌥⇧F yields "Ï"), so e.key has no usable identity here — and
@@ -385,6 +420,7 @@ export default function App() {
         <OutlineView />
       </div>
       <SettingsPanel />
+      <TemplateEditor />
     </div>
   );
 }

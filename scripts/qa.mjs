@@ -217,39 +217,23 @@ function tauriStub(snapshot) {
           pending: 0,
           blockedDeletes: null,
         };
+      // The templates table, as `templates::Template` serializes it. A section that
+      // needs a particular body passes `templates` in with its fixture.
       if (cmd === "prompt_templates")
-        return [
-          {
-            id: "New-Feature-Discuss-Plan",
-            file: "New-Feature-Discuss-Plan.md",
-            defaultName: "New Feature Discuss Plan",
-            name: "New Feature Discuss Plan",
-          },
-        ];
-      // What a rescan answers after a file was added and one edited, so the section can
-      // assert the list grows and the status line reports it. The scan itself is
-      // `cargo test`'s; the two meet at this shape.
-      if (cmd === "refresh_prompt_templates")
-        return {
-          templates: [
-            {
-              id: "Launch%20Checklist",
-              file: "Launch Checklist.md",
-              defaultName: "Launch Checklist",
-              name: "Launch Checklist",
-            },
+        return (
+          snapshot.templates ?? [
             {
               id: "New-Feature-Discuss-Plan",
-              file: "New-Feature-Discuss-Plan.md",
-              defaultName: "New Feature Discuss Plan",
-              name: "New Feature Discuss Plan",
+              name: "New Feature: Discuss & Plan",
+              body: "# New Feature: Discuss & Plan\n\n- one",
             },
-          ],
-          added: 1,
-          edited: 1,
-          removed: 0,
-          skipped: [{ file: "notes.md", reason: "empty" }],
-        };
+          ]
+        );
+      // A save answers with the row as stored, which is how a NEW template learns its
+      // id — so the stub mints one when none was sent, as the backend does.
+      if (cmd === "save_prompt_template")
+        return { id: args.id ?? "qa-new-template", name: args.name.trim(), body: args.body };
+      if (cmd === "delete_prompt_template" || cmd === "popup_templates_menu") return null;
       return { newNode: null, expand: [], moved: false };
     },
   };
@@ -1507,6 +1491,9 @@ await mp.addInitScript(tauriStub, {
   nodes: MD_NODES,
   canUndo: false,
   canRedo: false,
+  // The template the editor section opens holds MD_TEXT — the same string prompt m2
+  // does — so the two renderings can be compared line for line.
+  templates: [{ id: "New-Feature-Discuss-Plan", name: "New Feature: Discuss & Plan", body: MD_TEXT }],
 });
 await mp.addInitScript(() =>
   localStorage.setItem(
@@ -1851,97 +1838,218 @@ const enterKeepsIndent = await tabAt(8, ["Tab", "Enter", "z"]);
 const enterOnHeading = await tabAt(3, ["Enter"]);
 const enterMidItem = await tabAt(7, ["Enter"]);
 
-/** Settings ▸ Prompt Templates: the names the ⋯ menu shows are editable here, and the
- * override is written to the BACKEND settings table (not localStorage) because the menu
- * is built in Rust and cannot see the webview's storage. */
-await mp.locator('button[title="Settings"]').click();
-await mp.waitForSelector(".settings-panel", { timeout: 5000 });
-await mp.waitForTimeout(250);
-const tplPanel = await mp.evaluate(() => {
-  const row = document.querySelector(".settings-tpl");
-  const input = row?.querySelector("input");
-  return {
-    sections: [...document.querySelectorAll(".settings-section")].map((x) => x.textContent),
-    rows: document.querySelectorAll(".settings-tpl").length,
-    label: row?.closest(".settings-row")?.querySelector("span")?.textContent ?? null,
-    value: input?.value ?? null,
-    placeholder: input?.getAttribute("placeholder") ?? null,
-    resetDisabled: row?.querySelector("button")?.disabled ?? null,
-  };
-});
-await mp.locator(".settings-tpl input").fill("New Feature: Discuss & Plan");
-await mp.waitForTimeout(150);
-const renamed = await mp.evaluate(() => ({
-  sent: window.__PF_QA_CALLS.filter((c) => c.cmd === "set_prompt_template_name").at(-1),
-  resetDisabled: document.querySelector(".settings-tpl button").disabled,
-  value: document.querySelector(".settings-tpl input").value,
-}));
-await shot("settings-templates", mp.locator(".settings-panel"));
-await mp.locator(".settings-tpl button").click();
-await mp.waitForTimeout(150);
-const afterReset = await mp.evaluate(() => ({
-  sent: window.__PF_QA_CALLS.filter((c) => c.cmd === "set_prompt_template_name").at(-1),
-  value: document.querySelector(".settings-tpl input").value,
-  resetDisabled: document.querySelector(".settings-tpl button").disabled,
-}));
-
-/** The folder buttons. Finder and the scan are Rust's, so this pins what the webview is
- * responsible for: each button fires its own command and names no path, nothing happens
- * until Refresh is pressed, and the answer reaches the list and the status line. */
-const tplButton = (label) => mp.locator(".settings-panel .mini-btn", { hasText: label });
+/** The template editor (TopBar ▸ Templates). The dropdown is a native NSMenu, invisible
+ * here like the ⋯ one, so the testable halves are the invoke the button fires and what
+ * the app does with the selection Rust routes back (`templates-menu-action`, staged with
+ * __PF_QA_EVENT). The table itself — seeding, save/update/delete, validation, the menu's
+ * contents — is `cargo test`'s (`templates::tests`); the suites meet at the command names
+ * and the `{id, name, body}` shape.
+ *
+ * What only the engine can answer is the point of the feature: that the editor renders a
+ * template EXACTLY as the prompt it will become, so the template under edit is MD_TEXT —
+ * the same string prompt m2 holds — and the two DOMs are compared line by line. */
 const tplCalls = (cmd) =>
   mp.evaluate((c) => window.__PF_QA_CALLS.filter((x) => x.cmd === c), cmd);
-const tplBefore = await mp.evaluate(() => ({
-  rows: document.querySelectorAll(".settings-tpl").length,
-  status: document.querySelector(".settings-tpl-status")?.textContent ?? null,
-}));
-const tplScansBefore = (await tplCalls("refresh_prompt_templates")).length;
-await tplButton("Open Folder in Finder").click();
-await mp.waitForTimeout(100);
-const tplOpen = {
-  calls: await tplCalls("open_prompt_templates_folder"),
-  scans: (await tplCalls("refresh_prompt_templates")).length,
+const tplDialogs = [];
+mp.on("dialog", (d) => {
+  tplDialogs.push(d.message());
+  // Accepted only when a step arms it; otherwise dismissed, i.e. "keep editing".
+  if (mp.__acceptNextDialog) {
+    mp.__acceptNextDialog = false;
+    void d.accept();
+  } else void d.dismiss();
+});
+await mp.keyboard.press("Escape");
+await mp.waitForTimeout(60);
+const tplButton = mp.locator('.topbar-right button[aria-label="Templates"]');
+const tplButtonInfo = await tplButton.evaluate((btn) => {
+  const right = [...btn.parentElement.querySelectorAll("button")].map(
+    (b) => b.getAttribute("aria-label") ?? b.getAttribute("title"),
+  );
+  return { order: right, svg: !!btn.querySelector("svg") };
+});
+await shot("topbar-templates", mp.locator(".topbar-right"));
+await tplButton.click();
+await mp.waitForTimeout(80);
+const tplPopup = (await tplCalls("popup_templates_menu")).at(-1);
+const tplButtonRect = await tplButton.evaluate((b) => {
+  const r = b.getBoundingClientRect();
+  return { left: r.left, bottom: r.bottom };
+});
+
+const openTpl = async (action) => {
+  await mp.evaluate((a) => window.__PF_QA_EVENT("templates-menu-action", { action: a }), action);
+  await mp.waitForSelector(".tpl-sheet", { timeout: 5000 });
+  await mp.waitForTimeout(150);
 };
-await tplButton("Refresh").click();
-await mp.waitForTimeout(150);
-const tplAfter = await mp.evaluate(() => {
-  const rows = [...document.querySelectorAll(".settings-tpl")];
-  const status = document.querySelector(".settings-tpl-status");
-  const actions = [...document.querySelectorAll(".settings-actions")].find((a) =>
-    a.textContent.includes("Open Folder in Finder"),
-  );
-  const section = [...document.querySelectorAll(".settings-section")].find(
-    (x) => x.textContent === "Prompt Templates",
-  );
-  const syncSection = [...document.querySelectorAll(".settings-section")].find(
-    (x) => x.textContent === "Sync",
-  );
-  const follows = (a, b) =>
-    !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+/** The editor's model text, read the way the app reads it: the serializer's rules are
+ * not reachable from here, so this mirrors its one load-bearing case — the sentinel <br>
+ * is not a newline. */
+const tplText = () =>
+  mp.evaluate(() => {
+    const el = document.querySelector(".tpl-editor");
+    let out = "";
+    const walk = (n) => {
+      if (n.nodeType === 3) out += n.nodeValue;
+      else if (n.nodeName === "BR") {
+        if (!n.hasAttribute("data-pf-sentinel")) out += "\n";
+      } else n.childNodes.forEach(walk);
+    };
+    el.childNodes.forEach(walk);
+    return out;
+  });
+
+await openTpl("edit-New-Feature-Discuss-Plan");
+const tplOpened = await mp.evaluate(() => {
+  const sel = getSelection();
+  const ed = document.querySelector(".tpl-editor");
   return {
-    labels: rows.map((r) => r.closest(".settings-row").querySelector("span").textContent),
-    values: rows.map((r) => r.querySelector("input").value),
-    status: status?.textContent ?? null,
-    role: status?.getAttribute("role") ?? null,
-    statusColor: status ? getComputedStyle(status).color : null,
-    footnoteColor: getComputedStyle(document.querySelector(".settings-footnote")).color,
-    inSection: !!actions && follows(section, actions) && follows(actions, syncSection),
-    statusAfterButtons: !!status && follows(actions, status) && follows(status, syncSection),
+    title: document.querySelector("#tpl-sheet-title")?.textContent,
+    name: document.querySelector(".tpl-name")?.value,
+    focused: document.activeElement === ed,
+    caretAtStart:
+      sel.rangeCount > 0 && sel.getRangeAt(0).collapsed && ed.contains(sel.anchorNode)
+        ? (() => {
+            const r = document.createRange();
+            r.setStart(ed, 0);
+            r.setEnd(sel.anchorNode, sel.anchorOffset);
+            return r.toString().length === 0;
+          })()
+        : null,
+    deleteShown: [...document.querySelectorAll(".tpl-btn")].some((b) => b.textContent.startsWith("Delete")),
   };
 });
-const tplScans = await tplCalls("refresh_prompt_templates");
-await mp.locator(".settings-actions", { hasText: "Open Folder in Finder" }).scrollIntoViewIfNeeded();
-await shot("settings-templates-refreshed", mp.locator(".settings-panel"));
-// The line belongs to the sheet: reopening must not show a stale answer as if it were new.
-await mp.locator(".settings-head .bar-btn").click();
-await mp.waitForTimeout(100);
-await mp.locator('button[title="Settings"]').click();
-await mp.waitForSelector(".settings-panel", { timeout: 5000 });
+const tplOpenedText = await tplText();
+/** Line-by-line signature: the class that decides layout, the measured hang, and every
+ * run's text, resolved size, weight and colour. The two renderers write their inline
+ * styles differently (React vs the imperative builder), so compare what they RESOLVE to. */
+const lineSig = (sel) =>
+  mp.evaluate((s) => {
+    const host = document.querySelector(s);
+    return [...host.querySelectorAll(":scope > .md-line")].map((l) => ({
+      cls: l.className,
+      hang: l.style.getPropertyValue("--md-hang"),
+      runs: [...l.querySelectorAll(":scope > span")].map((sp) => {
+        const cs = getComputedStyle(sp);
+        return [sp.textContent, cs.fontSize, cs.fontWeight, cs.color];
+      }),
+    }));
+  }, sel);
+const tplSig = await lineSig(".tpl-editor");
+// m2, the first prompt row, unfocused — the sheet took focus when it opened.
+const promptSig = await lineSig(".node-row.kind-promptDraft .md-root");
+const tplMetrics = await mp.evaluate(() => {
+  const lines = [...document.querySelectorAll(".tpl-editor > .md-line")];
+  const h = (i) => +lines[i].getBoundingClientRect().height.toFixed(2);
+  const ed = document.querySelector(".tpl-editor");
+  return { lines: lines.length, h1: h(0), plain: h(3), lineHeight: getComputedStyle(ed).lineHeight };
+});
+await shot("template-editor", mp.locator(".tpl-sheet"));
+
+/** Editing: the prompt's own rules, and an undo that is the FIELD's. Cmd+↓ is the end of
+ * the text, which is the end of a bullet line ("- 2024. That was the year"). */
+const undoBefore = (await tplCalls("undo")).length;
+await mp.keyboard.press("Meta+ArrowDown");
+await mp.keyboard.press("Enter");
+await mp.waitForTimeout(60);
+const tplAfterEnter = await tplText();
+await mp.keyboard.type("new item");
+await mp.waitForTimeout(60);
+const tplAfterType = await tplText();
+await mp.keyboard.press("Meta+z");
+await mp.waitForTimeout(60);
+const tplUndo1 = await tplText();
+await mp.keyboard.press("Meta+z");
+await mp.waitForTimeout(60);
+const tplUndo2 = await tplText();
+await mp.keyboard.press("Meta+Shift+z");
+await mp.waitForTimeout(60);
+const tplRedo = await tplText();
+// ⌘Z from the NAME field: its own undo, never the outline's.
+await mp.locator(".tpl-name").click();
+await mp.keyboard.press("Meta+z");
+await mp.waitForTimeout(60);
+const undoAfter = (await tplCalls("undo")).length;
+// Escape on a DIRTY sheet asks first; dismissing the question keeps the sheet.
+const dialogsBefore = tplDialogs.length;
+await mp.keyboard.press("Escape");
+await mp.waitForTimeout(80);
+const tplDirtyEscape = {
+  asked: tplDialogs.length === dialogsBefore + 1,
+  stillOpen: (await mp.locator(".tpl-sheet").count()) === 1,
+};
+// Save sends what is in the fields, under the id it was opened with, and closes.
+await mp.locator(".tpl-btn-primary").click();
 await mp.waitForTimeout(150);
-const tplReopened = await mp.evaluate(
-  () => document.querySelector(".settings-tpl-status")?.textContent ?? null,
+const tplSave = (await tplCalls("save_prompt_template")).at(-1);
+const tplClosedAfterSave = (await mp.locator(".tpl-sheet").count()) === 0;
+
+/** A NEW template: empty fields, the name focused, Create dead until both are filled. */
+await openTpl("new");
+const tplNew = await mp.evaluate(() => ({
+  title: document.querySelector("#tpl-sheet-title")?.textContent,
+  nameFocused: document.activeElement === document.querySelector(".tpl-name"),
+  placeholder: !!document.querySelector(".tpl-placeholder"),
+  createDisabled: document.querySelector(".tpl-btn-primary").disabled,
+  createLabel: document.querySelector(".tpl-btn-primary").textContent,
+  deleteShown: [...document.querySelectorAll(".tpl-btn")].some((b) => b.textContent.startsWith("Delete")),
+}));
+await mp.keyboard.type("Launch Checklist");
+const tplNameOnly = await mp.evaluate(() => document.querySelector(".tpl-btn-primary").disabled);
+// Enter in the name moves on to the body.
+await mp.keyboard.press("Enter");
+await mp.waitForTimeout(40);
+await mp.keyboard.type("# Launch");
+await mp.keyboard.press("Enter");
+await mp.keyboard.type("- ship it");
+await mp.waitForTimeout(80);
+const tplNewBody = await mp.evaluate(() => {
+  const lines = [...document.querySelectorAll(".tpl-editor > .md-line")];
+  return {
+    lines: lines.map((l) => l.className),
+    h1Size: lines[0] ? parseFloat(getComputedStyle(lines[0].querySelector("span")).fontSize) : null,
+    placeholder: !!document.querySelector(".tpl-placeholder"),
+    createDisabled: document.querySelector(".tpl-btn-primary").disabled,
+  };
+});
+await shot("template-editor-new", mp.locator(".tpl-sheet"));
+// ⌘S saves, like the button.
+await mp.keyboard.press("Meta+s");
+await mp.waitForTimeout(150);
+const tplCreate = (await tplCalls("save_prompt_template")).at(-1);
+const tplClosedAfterCreate = (await mp.locator(".tpl-sheet").count()) === 0;
+
+/** A CLEAN sheet closes on Escape without asking; Delete asks, then deletes by id. */
+await openTpl("edit-New-Feature-Discuss-Plan");
+const dialogsBeforeClean = tplDialogs.length;
+await mp.keyboard.press("Escape");
+await mp.waitForTimeout(80);
+const tplCleanEscape = {
+  asked: tplDialogs.length !== dialogsBeforeClean,
+  closed: (await mp.locator(".tpl-sheet").count()) === 0,
+};
+await openTpl("edit-New-Feature-Discuss-Plan");
+mp.__acceptNextDialog = true;
+await mp.locator(".tpl-btn-danger").click();
+await mp.waitForTimeout(150);
+const tplDelete = (await tplCalls("delete_prompt_template")).at(-1);
+const tplClosedAfterDelete = (await mp.locator(".tpl-sheet").count()) === 0;
+
+/** House rule: every padded box in the sheet is padded equally on all four sides — read
+ * as COMPUTED padding, never the class list. */
+await openTpl("edit-New-Feature-Discuss-Plan");
+const tplPadding = await mp.evaluate(() =>
+  [".tpl-backdrop", ".tpl-sheet", ".tpl-name", ".tpl-body", ".tpl-btn", ".tpl-btn-primary"].map(
+    (s) => {
+      const cs = getComputedStyle(document.querySelector(s));
+      const p = [cs.paddingTop, cs.paddingRight, cs.paddingBottom, cs.paddingLeft];
+      return { s, p, equal: new Set(p).size === 1 && p[0] !== "0px" };
+    },
+  ),
 );
-await mp.locator(".settings-head .bar-btn").click();
+// Leave it closed for the sections after this one.
+await mp.keyboard.press("Escape");
+await mp.waitForTimeout(80);
 
 // ---- 10. Focus pane: the STAGE selector -------------------------------------
 // Each pinned row ends in Planning ▸ Building ▸ Testing ▸ Deploying, and the lit fill
@@ -2706,24 +2814,29 @@ const checks = [
   ["enter: the new bullet keeps the indent it came from", enterKeepsIndent.text === "## a\n    - b\n    - z\n\nc"],
   ["enter: a heading line still just breaks", enterOnHeading.text === "## \na\n- b\n\nc"],
   ["enter: mid-item it splits, both halves bulleted", enterMidItem.text === "## a\n- \n- b\n\nc"],
-  // --- settings: prompt templates ---
-  ["settings: a Prompt Templates section lists the folder's templates", tplPanel.sections.includes("Prompt Templates") && tplPanel.rows === 1],
-  ["settings: the row is named by its FILE, and shows the name the menu uses", tplPanel.label === "New-Feature-Discuss-Plan.md" && tplPanel.value === "New Feature Discuss Plan"],
-  ["settings: Reset is dead while the name is still the derived default", tplPanel.resetDisabled === true],
-  ["settings: renaming writes the override to the BACKEND settings table", renamed.sent?.cmd === "set_prompt_template_name" && renamed.sent.args.template === "New-Feature-Discuss-Plan" && renamed.sent.args.name === "New Feature: Discuss & Plan"],
-  ["settings: …and Reset comes alive", renamed.resetDisabled === false],
-  ["settings: Reset clears the override and the derived name comes back", afterReset.sent?.args.name === "" && afterReset.value === "New Feature Discuss Plan" && afterReset.resetDisabled === true],
-  ["templates folder: the buttons sit inside the Prompt Templates section", tplAfter.inSection],
-  ["templates folder: no status line before anything has been asked", tplBefore.status === null],
-  ["templates folder: Open Folder fires its command and names no path", tplOpen.calls.length === 1 && Object.keys(tplOpen.calls[0].args ?? {}).length === 0],
-  ["templates folder: …and does not rescan", tplOpen.scans === tplScansBefore],
-  ["templates folder: Refresh rescans exactly once", tplScans.length === tplScansBefore + 1],
-  ["templates folder: the new file gets a row, labelled by its real file name", tplBefore.rows === 1 && tplAfter.labels.join("|") === "Launch Checklist.md|New-Feature-Discuss-Plan.md"],
-  ["templates folder: …and its derived name is in the field", tplAfter.values[0] === "Launch Checklist"],
-  ["templates folder: the status line reports what was found, skips included", tplAfter.status === "1 new, 1 edited. 2 templates. Skipped notes.md (empty)."],
-  ["templates folder: …directly under the buttons, announced as a status", tplAfter.statusAfterButtons && tplAfter.role === "status"],
-  ["templates folder: …brighter than the footnote", tplAfter.statusColor !== tplAfter.footnoteColor],
-  ["templates folder: reopening the sheet drops the old status line", tplReopened === null],
+  // --- the template editor ---
+  ["tpl: a Templates icon button sits in the TopBar's right group, before Settings", tplButtonInfo.svg && tplButtonInfo.order.indexOf("Templates") >= 0 && tplButtonInfo.order.indexOf("Templates") < tplButtonInfo.order.indexOf("Settings")],
+  ["tpl: pressing it pops the native menu under the button's leading edge", tplPopup?.args && eq(tplPopup.args.x, tplButtonRect.left) && eq(tplPopup.args.y, tplButtonRect.bottom)],
+  ["tpl: choosing a template opens the editor on it", tplOpened.title === "Edit Template" && tplOpened.name === "New Feature: Discuss & Plan" && tplOpenedText === MD_TEXT],
+  ["tpl: …focused, caret at the start", tplOpened.focused && tplOpened.caretAtStart === true],
+  ["tpl: the body renders line for line as the SAME text does in a prompt", tplSig.length === 12 && JSON.stringify(tplSig) === JSON.stringify(promptSig)],
+  ["tpl: …at the prompt's metrics (# line 32.4px, plain 21.6px)", eq(tplMetrics.h1, 32.4, 0.5) && eq(tplMetrics.plain, 21.6, 0.5)],
+  ["tpl: Enter on a bullet line carries the bullet, as in a prompt", tplAfterEnter === MD_TEXT + "\n- "],
+  ["tpl: …and typing lands after it", tplAfterType === MD_TEXT + "\n- new item"],
+  ["tpl: ⌘Z undoes the typing burst as ONE step", tplUndo1 === MD_TEXT + "\n- "],
+  ["tpl: …then the bullet, as its own step", tplUndo2 === MD_TEXT],
+  ["tpl: ⇧⌘Z redoes", tplRedo === MD_TEXT + "\n- "],
+  ["tpl: ⌘Z in the sheet never reaches the OUTLINE's undo", undoAfter === undoBefore],
+  ["tpl: Escape on unsaved changes asks first, and No keeps the sheet", tplDirtyEscape.asked && tplDirtyEscape.stillOpen],
+  ["tpl: Save sends the fields under the id it was opened with", tplSave?.args.id === "New-Feature-Discuss-Plan" && tplSave.args.name === "New Feature: Discuss & Plan" && tplSave.args.body === MD_TEXT + "\n- "],
+  ["tpl: …and closes", tplClosedAfterSave],
+  ["tpl: New Template opens empty, name focused, no Delete", tplNew.title === "New Template" && tplNew.nameFocused && tplNew.placeholder && !tplNew.deleteShown],
+  ["tpl: Create is dead until BOTH name and body have text", tplNew.createDisabled && tplNameOnly && !tplNewBody.createDisabled],
+  ["tpl: typed markdown renders as it is typed (heading, then a bullet)", JSON.stringify(tplNewBody.lines) === '["md-line","md-line md-li"]' && eq(tplNewBody.h1Size, 24, 0.2) && !tplNewBody.placeholder],
+  ["tpl: ⌘S creates it with NO id (the backend mints one)", tplCreate?.args.id === null && tplCreate.args.name === "Launch Checklist" && tplCreate.args.body === "# Launch\n- ship it" && tplClosedAfterCreate],
+  ["tpl: a clean sheet closes on Escape without asking", !tplCleanEscape.asked && tplCleanEscape.closed],
+  ["tpl: Delete asks, then deletes by id and closes", tplDelete?.args.id === "New-Feature-Discuss-Plan" && tplClosedAfterDelete],
+  ["tpl: every padded box in the sheet is padded equally on all four sides", tplPadding.every((x) => x.equal)],
   ...stageChecks,
   ...dockChecks,
   ["no page errors", errors.length === 0],
@@ -2745,6 +2858,7 @@ console.log("parents :", JSON.stringify({ bulletDone, bulletHalf, checkboxDone }
 console.log("focus   :", JSON.stringify(focusRest));
 console.log("  live  :", JSON.stringify({ afterReveal, afterComplete, afterUncomplete, afterRename, afterInsert, afterRemove, afterParentDone, afterKindFlip }));
 console.log("  dock  :", JSON.stringify(sidebarTask));
+console.log("tpl     :", JSON.stringify({ tplButtonInfo, tplPopup, tplOpened, tplMetrics, tplNew, tplNewBody, tplDirtyEscape, tplCleanEscape, tplPadding }));
 console.log("fold    :", JSON.stringify({ foldSel, foldInvoke, nestedDraftInvoke, soloSel, soloInvoke }));
 console.log("  rows  :", JSON.stringify(foldSurvivors));
 console.log("  lines :", JSON.stringify(folded.lines));

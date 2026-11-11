@@ -2,10 +2,10 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 /// Bake every `.md` in `prompt-templates/` into the binary as the DEFAULT templates: what
-/// `templates::scan` writes into a fresh templates folder. At run time the folder is the
-/// only source (see `src/templates.rs`); this table is just what fills it the first time.
-/// A file here that isn't valid UTF-8 fails the `include_str!`, which is the right place
-/// to hear about it.
+/// `templates::seed` writes into a store's `prompt_templates` table the first time it
+/// opens. At run time the table is the only source (see `src/templates.rs`); this is just
+/// what fills it once. A file here that isn't valid UTF-8 fails the `include_str!`, which
+/// is the right place to hear about it.
 fn main() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../prompt-templates");
     println!("cargo:rerun-if-changed={}", dir.display());
@@ -27,7 +27,7 @@ fn main() {
             }
         }
         Err(_) => println!(
-            "cargo:warning=prompt-templates/ not found at {} — a new templates folder will start empty",
+            "cargo:warning=prompt-templates/ not found at {} — a new store will start with no templates",
             dir.display()
         ),
     }

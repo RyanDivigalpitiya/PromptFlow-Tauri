@@ -42,6 +42,16 @@ CREATE TABLE IF NOT EXISTS outbox (
   payload   TEXT NOT NULL,    -- WireNode JSON, or {id, deletedAt}
   queued_at INTEGER NOT NULL  -- guards the clear: a row re-queued since we read it stays
 );
+-- Prompt templates, created and edited in the app (see templates.rs). Device-local like
+-- `settings`: nothing here is synced or undoable, and no node refers to a template — the
+-- ⋯ menu copies a body INTO a node, it does not link one.
+CREATE TABLE IF NOT EXISTS prompt_templates (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  body       TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 ";
 
 pub fn open(path: &std::path::Path) -> Result<Connection, String> {

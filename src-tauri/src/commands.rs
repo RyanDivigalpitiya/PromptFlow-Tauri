@@ -1,6 +1,5 @@
 use crate::model::{NodeKind, Stage};
 use crate::store::{Delta, MutationOut, Snapshot, Store};
-use crate::templates::TemplatesState;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use uuid::Uuid;
@@ -647,7 +646,7 @@ pub struct RowMenu {
 pub fn row_menu_items(
     kind: NodeKind,
     has_children: bool,
-    templates: &[crate::templates::TemplateInfo],
+    templates: &[crate::templates::Template],
 ) -> RowMenu {
     let mut items: Vec<(String, String)> = Vec::new();
     if kind != NodeKind::Line {
@@ -666,7 +665,7 @@ pub fn row_menu_items(
     }
     // Prompts only: this fills the panel's text, and the other kinds have no panel. A
     // template on a bullet would silently convert the node, which is not what a menu
-    // item called "New Feature Discuss Plan" says it does.
+    // item called "New Feature: Plan" says it does.
     let subs = if kind == NodeKind::PromptDraft {
         templates
             .iter()
@@ -697,7 +696,6 @@ pub fn popup_row_menu(
     app: AppHandle,
     window: WebviewWindow,
     state: State<StoreState>,
-    templates: State<TemplatesState>,
     node: Uuid,
     x: f64,
     y: f64,
@@ -710,9 +708,7 @@ pub fn popup_row_menu(
         let store = state.lock().unwrap();
         let kind = store.get(node).ok_or("node not found")?.kind;
         let has_children = !store.ordered_children(node).is_empty();
-        let ov = crate::templates::overrides(store.get_setting(crate::templates::NAMES_KEY));
-        let table = templates.0.lock().unwrap();
-        row_menu_items(kind, has_children, &crate::templates::list(&table, &ov))
+        row_menu_items(kind, has_children, &store.templates())
     };
     let label = window.label().to_string();
     let win = window.clone();
@@ -756,157 +752,130 @@ pub fn popup_row_menu(
     Ok(())
 }
 
-/// Fill a prompt from a template, as of the last scan. The mutation is the store's
-/// `apply_template`, which is deliberately not `set_text` (see its doc comment: undo
-/// coalescing, cleared runs, cleared completion).
+/// The TopBar's Templates menu: every template (choosing one opens it in the editor),
+/// then "New Template…". A native NSMenu for the same reasons the ⋯ menu is one — AppKit
+/// owns its dismissal, keyboard navigation and screen-edge placement. The selection comes
+/// back to the OPENING window as a `templates-menu-action` event; item ids are
+/// `pf-tpl:<window>:<action>` (see `templates::topbar_menu_items` and `lib.rs`).
+#[tauri::command]
+pub fn popup_templates_menu(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<StoreState>,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    // Read under the lock, popped without it — see `popup_row_menu`.
+    let items = crate::templates::topbar_menu_items(&state.lock().unwrap().templates());
+    let label = window.label().to_string();
+    let win = window.clone();
+    window
+        .run_on_main_thread(move || {
+            use tauri::menu::{MenuBuilder, MenuItemBuilder};
+            let result = (|| -> tauri::Result<()> {
+                let mut b = MenuBuilder::new(&app);
+                let last = items.len() - 1;
+                for (i, (action, text)) in items.iter().enumerate() {
+                    // "New Template…" is set off from the list it adds to.
+                    if i == last && i > 0 {
+                        b = b.separator();
+                    }
+                    let item =
+                        MenuItemBuilder::with_id(format!("pf-tpl:{label}:{action}"), text)
+                            .build(&app)?;
+                    b = b.item(&item);
+                }
+                win.popup_menu_at(&b.build()?, tauri::LogicalPosition::new(x, y))?;
+                Ok(())
+            })();
+            if let Err(e) = result {
+                eprintln!("popup_templates_menu: {e}");
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Fill a prompt from a template. The mutation is the store's `apply_template`, which is
+/// deliberately not `set_text` (see its doc comment: undo coalescing, cleared runs,
+/// cleared completion).
 #[tauri::command]
 pub fn apply_prompt_template(
     app: AppHandle,
     window: WebviewWindow,
     state: State<StoreState>,
-    templates: State<TemplatesState>,
     node: Uuid,
     template: String,
 ) -> Result<MutationOut, String> {
-    let body = crate::templates::by_id(&templates.0.lock().unwrap(), &template)
-        .ok_or_else(|| format!("no such prompt template: {template}"))?
-        .body
-        .clone();
-    let r = state.lock().unwrap().apply_template(node, body);
+    let r = {
+        let mut store = state.lock().unwrap();
+        let body = store
+            .template(&template)?
+            .ok_or_else(|| format!("no such prompt template: {template}"))?
+            .body;
+        store.apply_template(node, body)
+    };
     run_mutation(&app, &window, r)
 }
 
-/// The Settings ▸ Prompt Templates list: each template's id, file, file-name-derived
-/// default, and the name the menu currently shows.
+/// Every template, sorted by name, bodies included — the editor opens on one of these.
 #[tauri::command]
-pub fn prompt_templates(
+pub fn prompt_templates(state: State<StoreState>) -> Vec<crate::templates::Template> {
+    state.lock().unwrap().templates()
+}
+
+/// Create (`id` absent, or no longer in the table) or update a template; answers with the
+/// row as stored, so a new template's editor learns the id its next save must name. No
+/// event: every menu reads the table when it opens, so each window's next one is current.
+#[tauri::command]
+pub fn save_prompt_template(
     state: State<StoreState>,
-    templates: State<TemplatesState>,
-) -> Result<Vec<crate::templates::TemplateInfo>, String> {
-    let ov = crate::templates::overrides(
-        state.lock().unwrap().get_setting(crate::templates::NAMES_KEY),
-    );
-    Ok(crate::templates::list(&templates.0.lock().unwrap(), &ov))
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TemplatesRefreshOut {
-    pub templates: Vec<crate::templates::TemplateInfo>,
-    pub added: usize,
-    pub edited: usize,
-    pub removed: usize,
-    pub skipped: Vec<crate::templates::SkippedFile>,
-}
-
-/// Settings ▸ Prompt Templates ▸ Refresh: read the folder again. Replacing the table is
-/// all a window needs, since each ⋯ menu reads it when it opens; a Settings sheet open in
-/// ANOTHER window keeps its rows until it is next opened, as it does for a rename. The
-/// files are read before any lock is taken, and a failed read returns here with the
-/// table untouched, so it can't empty the menu.
-#[tauri::command]
-pub fn refresh_prompt_templates(
-    paths: State<AppPaths>,
-    state: State<StoreState>,
-    templates: State<TemplatesState>,
-) -> Result<TemplatesRefreshOut, String> {
-    let scan = crate::templates::scan(&crate::templates::dir_for(&paths.0))
-        .map_err(|e| e.to_string())?;
-    let ov = crate::templates::overrides(
-        state.lock().unwrap().get_setting(crate::templates::NAMES_KEY),
-    );
-    let mut table = templates.0.lock().unwrap();
-    let change = crate::templates::change_between(&table, &scan.templates);
-    *table = scan.templates;
-    Ok(TemplatesRefreshOut {
-        templates: crate::templates::list(&table, &ov),
-        added: change.added,
-        edited: change.edited,
-        removed: change.removed,
-        skipped: scan.skipped,
-    })
-}
-
-/// Open the templates folder itself in Finder. A command rather than the opener plugin's
-/// JS `openPath`, which needs a path scope in the capability file that could not cover a
-/// `PROMPTFLOW_STORE` dev folder; this way the webview also never names a path at all.
-#[tauri::command]
-pub fn open_prompt_templates_folder(app: AppHandle, paths: State<AppPaths>) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-    let dir = crate::templates::dir_for(&paths.0);
-    crate::templates::ensure_dir(&dir).map_err(|e| e.to_string())?;
-    app.opener()
-        .open_path(dir.to_string_lossy(), None::<&str>)
-        .map_err(|e| e.to_string())
-}
-
-/// Rename a template for this device. An empty name REMOVES the override, which is what
-/// the Reset button and an emptied field both do.
-#[tauri::command]
-pub fn set_prompt_template_name(
-    state: State<StoreState>,
-    template: String,
+    id: Option<String>,
     name: String,
-) -> Result<(), String> {
-    let mut store = state.lock().unwrap();
-    let mut ov = crate::templates::overrides(store.get_setting(crate::templates::NAMES_KEY));
-    if name.trim().is_empty() {
-        ov.remove(&template);
-    } else {
-        ov.insert(template, name.trim().to_string());
-    }
-    let json = serde_json::to_string(&ov).map_err(|e| e.to_string())?;
-    store.set_setting(crate::templates::NAMES_KEY, &json)
+    body: String,
+) -> Result<crate::templates::Template, String> {
+    state
+        .lock()
+        .unwrap()
+        .save_template(id.as_deref(), &name, &body)
+}
+
+#[tauri::command]
+pub fn delete_prompt_template(state: State<StoreState>, id: String) -> Result<(), String> {
+    state.lock().unwrap().delete_template(&id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::templates::TemplateInfo;
+    use crate::templates::Template;
 
-    fn tpl(id: &str, name: &str) -> TemplateInfo {
-        TemplateInfo {
+    fn tpl(id: &str, name: &str) -> Template {
+        Template {
             id: id.into(),
-            file: format!("{id}.md"),
-            default_name: name.into(),
             name: name.into(),
+            body: "x".into(),
         }
     }
 
-    /// The keys `PromptTemplatesRefresh` in api.ts reads. qa.mjs stubs this same shape, so
-    /// a mismatch here would pass there and blank the list in the real app.
+    /// The keys `PromptTemplate` in api.ts reads. qa.mjs stubs this same shape, so a
+    /// mismatch here would pass there and break the editor in the real app.
     #[test]
-    fn the_refresh_answer_has_the_shape_the_settings_sheet_reads() {
-        let out = TemplatesRefreshOut {
-            templates: vec![tpl("a", "A")],
-            added: 1,
-            edited: 2,
-            removed: 3,
-            skipped: vec![crate::templates::SkippedFile {
-                file: "b.md".into(),
-                reason: "empty".into(),
-            }],
-        };
+    fn a_template_has_the_shape_the_editor_reads() {
         assert_eq!(
-            serde_json::to_value(&out).unwrap(),
-            serde_json::json!({
-                "templates": [{ "id": "a", "file": "a.md", "defaultName": "A", "name": "A" }],
-                "added": 1,
-                "edited": 2,
-                "removed": 3,
-                "skipped": [{ "file": "b.md", "reason": "empty" }],
-            })
+            serde_json::to_value(tpl("a", "A")).unwrap(),
+            serde_json::json!({ "id": "a", "name": "A", "body": "x" })
         );
     }
 
     #[test]
     fn only_a_prompt_gets_the_templates_submenu() {
-        let list = vec![tpl("New-Feature-Discuss-Plan", "New Feature Discuss Plan")];
+        let list = vec![tpl("New-Feature-Plan", "New Feature: Plan")];
         assert_eq!(
             row_menu_items(NodeKind::PromptDraft, false, &list).templates,
             vec![(
-                "tpl-New-Feature-Discuss-Plan".to_string(),
-                "New Feature Discuss Plan".to_string()
+                "tpl-New-Feature-Plan".to_string(),
+                "New Feature: Plan".to_string()
             )]
         );
         for kind in [NodeKind::BulletPoint, NodeKind::Checkbox, NodeKind::Line] {
@@ -917,7 +886,7 @@ mod tests {
         }
     }
 
-    /// No templates on disk ⇒ no submenu at all, rather than an empty one to click into.
+    /// No templates ⇒ no submenu at all, rather than an empty one to click into.
     #[test]
     fn an_empty_table_produces_no_submenu() {
         assert!(row_menu_items(NodeKind::PromptDraft, false, &[]).templates.is_empty());
@@ -928,7 +897,10 @@ mod tests {
     /// no-ops on a label that does not exist. Nothing would appear to happen.
     #[test]
     fn no_action_string_contains_a_colon() {
-        let list = vec![tpl("A-B_c.1", "A & B")];
+        let list = vec![
+            tpl("A-B_c.1", "A & B"),
+            tpl("0b7e2a8c-1f0e-4f43-9a51-3f8e0c2d9b11", "Made in the app"),
+        ];
         for kind in [
             NodeKind::BulletPoint,
             NodeKind::Checkbox,
@@ -966,10 +938,10 @@ mod tests {
         );
     }
 
-    /// A `&` in a renamed template must reach AppKit doubled, or muda eats it as a
+    /// A `&` in a template's name must reach AppKit doubled, or muda eats it as a
     /// mnemonic marker and "Discuss & Plan" renders as "Discuss  Plan".
     #[test]
-    fn a_renamed_template_keeps_its_ampersand() {
+    fn a_template_name_keeps_its_ampersand() {
         let list = vec![tpl("x", "Discuss & Plan")];
         assert_eq!(
             row_menu_items(NodeKind::PromptDraft, false, &list).templates[0].1,

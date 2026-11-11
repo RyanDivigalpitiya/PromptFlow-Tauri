@@ -355,7 +355,7 @@ export async function performRowMenuAction(action: string, nodeId: string) {
   const rec = mirror.get(nodeId);
   if (!rec) return;
   // The Prompt Templates submenu. Its items are `tpl-<id>`, and the id is colon-free by
-  // construction (build.rs) because lib.rs parses the item id with splitn(4, ':'). This
+  // construction (templates.rs) because lib.rs parses the item id with splitn(4, ':'). This
   // is a PREFIX branch rather than a switch case because the set is data, not code.
   if (action.startsWith(TEMPLATE_ACTION_PREFIX)) {
     await applyTemplate(nodeId, action.slice(TEMPLATE_ACTION_PREFIX.length));

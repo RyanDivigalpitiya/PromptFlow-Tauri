@@ -205,16 +205,15 @@ pub fn run() {
                 let _ = store.insert_tree(seed::welcome_tree());
                 store.clear_history(); // the seed is not an undoable user action
             }
+            // The shipped prompt templates, written once per store (never again, so an
+            // emptied table stays empty). Not gated on PROMPTFLOW_NO_SEED, which is about
+            // the welcome OUTLINE: a dev store with no templates has nothing to test.
+            // A failure costs the menus their templates, and nothing else.
+            if let Err(e) = store.seed_templates() {
+                eprintln!("prompt templates: {e}");
+            }
             app.manage(Mutex::new(store) as StoreState);
             app.manage(commands::AppPaths(path.clone()));
-            // An unreadable folder costs the ⋯ menu its templates, and nothing else.
-            let table = templates::scan(&templates::dir_for(&path))
-                .map(|scan| scan.templates)
-                .unwrap_or_else(|e| {
-                    eprintln!("prompt templates: {e}");
-                    Vec::new()
-                });
-            app.manage(templates::TemplatesState(Mutex::new(table)));
 
             // Auto-archive sweep (deferred a few seconds so windows can load first):
             // completed units older than the retention age out to a JSON archive, then
@@ -283,6 +282,24 @@ pub fn run() {
                             tauri::EventTarget::webview_window(label),
                             "row-menu-action",
                             RowMenuAction { action, node },
+                        );
+                    }
+                }
+                // The TopBar Templates menu: id = pf-tpl:<window>:<action>, where the
+                // action is `new` or `edit-<template id>`. The action is LAST, so the
+                // splitn(3) leaves it whole.
+                s if s.starts_with("pf-tpl:") => {
+                    let mut parts = s.splitn(3, ':');
+                    let _ = parts.next(); // "pf-tpl"
+                    if let (Some(label), Some(action)) = (parts.next(), parts.next()) {
+                        #[derive(Clone, serde::Serialize)]
+                        struct TemplatesMenuAction<'a> {
+                            action: &'a str,
+                        }
+                        let _ = app.emit_to(
+                            tauri::EventTarget::webview_window(label),
+                            "templates-menu-action",
+                            TemplatesMenuAction { action },
                         );
                     }
                 }
@@ -367,9 +384,9 @@ pub fn run() {
             commands::popup_row_menu,
             commands::apply_prompt_template,
             commands::prompt_templates,
-            commands::set_prompt_template_name,
-            commands::refresh_prompt_templates,
-            commands::open_prompt_templates_folder,
+            commands::save_prompt_template,
+            commands::delete_prompt_template,
+            commands::popup_templates_menu,
             commands::sync_get_config,
             commands::sync_set_config,
             commands::sync_status,

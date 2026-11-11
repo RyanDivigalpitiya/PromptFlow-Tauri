@@ -1714,6 +1714,201 @@ body {
   font-size: 0.85em;
 }
 
+/* ---------- Template editor (TopBar ▸ Templates) ---------- */
+
+/* A modal sheet over the whole window. Above the Settings popover (z 40/50) — the two
+   can't be open together in practice, but if they were, the modal has to win. Padding is
+   equal on all four sides, like every padded box in this sheet. */
+.tpl-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.32);
+}
+
+/* The backdrop covers the TopBar, which is the window's drag handle; this strip, at the
+   TopBar's exact height, keeps the window draggable while the sheet is up. */
+.tpl-drag-strip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 44px;
+}
+
+/* Width + font-size scale with ⌘+/⌘− (font-size is inline; everything here is em). The
+   height is FIXED, not content-fit, so the body has room to write in before it has any
+   text, and the sheet doesn't resize under the pointer as a template grows. OPAQUE,
+   unlike the Settings popover's 0.97: behind a page of text it is reading text, and 3%
+   of the outline's white bled through as a legible ghost of every row under the body. */
+.tpl-sheet {
+  position: relative;
+  width: min(100%, 58em);
+  height: min(calc(100vh - 88px), 52em);
+  display: flex;
+  flex-direction: column;
+  gap: 0.85em;
+  padding: 1.1em;
+  background: rgb(30, 30, 36);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0.92em;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+}
+
+.tpl-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+}
+
+.tpl-head .bar-btn {
+  font-size: 1.23em;
+}
+
+.tpl-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.38em;
+  color: var(--text-dim);
+}
+
+.tpl-field > span {
+  font-size: 0.85em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+
+.tpl-field-body {
+  flex: 1;
+  min-height: 0;
+}
+
+.tpl-name {
+  appearance: none;
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 0.46em;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font: inherit;
+  font-size: 1.08em;
+  padding: 0.5em;
+}
+
+.tpl-name:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.34);
+}
+
+/* The body is a prompt panel's twin — same wash, same radius, the focus border a prompt
+   gets while editing — and its font-size is the OUTLINE's (inline), so the text inside
+   renders at exactly the size the prompt it fills will. Scrolls on its own; the editor
+   inside is a flex child that is at least as tall as the box, so a press anywhere below
+   the last line still lands in it. */
+.tpl-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 0.7em;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 0.5em;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text);
+  cursor: text;
+}
+
+.tpl-body:focus-within {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+/* The text itself: the row's metrics, exactly (`.node-row` line-height, `.node-text-wrap`
+   wrapping). The `.md-line` rules are unscoped, so they reach in here unchanged. */
+.tpl-editor {
+  flex: 1 0 auto;
+  outline: none;
+  caret-color: var(--accent);
+  line-height: var(--row-line-height);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
+}
+
+.tpl-placeholder {
+  position: absolute;
+  top: 0.7em;
+  left: 0.7em;
+  right: 0.7em;
+  line-height: var(--row-line-height);
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.tpl-error {
+  color: #ff8f8f;
+  font-size: 0.92em;
+}
+
+.tpl-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+}
+
+/* Fills the row, which is what pushes Cancel / Save to the trailing edge. */
+.tpl-hint {
+  flex: 1;
+  text-align: right;
+  color: var(--text-faint);
+  font-size: 0.85em;
+}
+
+/* Equal padding on all four sides, by house rule — `.mini-btn`'s 0.33em/0.83em is not
+   copied here. `line-height: 1` keeps the line box from adding its own leading above
+   and below the label, so the equal padding reads as equal ink. */
+.tpl-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.92em;
+  line-height: 1;
+  padding: 0.62em;
+  border-radius: 0.5em;
+}
+
+.tpl-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.tpl-btn:disabled {
+  opacity: 0.4;
+}
+
+.tpl-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.tpl-btn-primary:hover:not(:disabled) {
+  background: #2f6fde;
+}
+
+.tpl-btn-danger {
+  color: #ff8f8f;
+}
+
 /* ---------- Sync ---------- */
 
 /* A URL and two tokens are far too long to sit beside their label on one line, so these
@@ -1726,32 +1921,6 @@ body {
 .settings-row-stack > span {
   display: block;
   margin-bottom: 0.23em;
-}
-
-/* A template's name field and its Reset, side by side under the file name.
-   Selected as a CHILD of the stack row on purpose: `.settings-row-stack > span` is
-   (0,1,1) and blocks a bare `.settings-tpl` at (0,1,0), which silently dropped the
-   Reset onto its own line under the field. */
-.settings-row-stack > .settings-tpl {
-  display: flex;
-  align-items: center;
-  gap: 0.46em;
-}
-
-.settings-tpl > input[type="text"] {
-  flex: 1;
-  min-width: 0;
-}
-
-.settings-tpl > .mini-btn {
-  flex: none;
-}
-
-/* What the last Refresh found. Brighter than the footnote under it, because this is the
-   answer to something just asked. */
-.settings-tpl-status {
-  color: var(--text-dim);
-  font-size: 0.85em;
 }
 
 /* "· set" beside a secret's label: the ONLY thing the panel ever learns about a stored

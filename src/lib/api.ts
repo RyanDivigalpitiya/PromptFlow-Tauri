@@ -126,45 +126,37 @@ export const api = {
   popupRowMenu: (node: string, x: number, y: number) =>
     invoke<void>("popup_row_menu", { node, x, y }),
 
-  /** Fill a prompt from a template, as of the last scan. `template` is the BARE id — the row
-   * menu's action is `tpl-<id>` and the controller strips that prefix. Replaces the
-   * node's text as ONE undo step (the store's `apply_template`, deliberately not
-   * `set_text`, which would coalesce into a typing burst). */
+  /** Fill a prompt from a template. `template` is the BARE id — the row menu's action is
+   * `tpl-<id>` and the controller strips that prefix. Replaces the node's text as ONE undo
+   * step (the store's `apply_template`, deliberately not `set_text`, which would coalesce
+   * into a typing burst). */
   applyPromptTemplate: (node: string, template: string) =>
     invoke<MutationOut>("apply_prompt_template", { node, template }),
 
-  /** The Settings ▸ Prompt Templates rows: id, file, the file-name-derived default, and
-   * the name the ⋯ menu currently shows. */
-  promptTemplates: () => invoke<PromptTemplateInfo[]>("prompt_templates"),
+  /** Every template, sorted by name, bodies included. Device-local (a table in the
+   * store's SQLite file), never synced. */
+  promptTemplates: () => invoke<PromptTemplate[]>("prompt_templates"),
 
-  /** Rename a template for this device; an empty name clears the override. Stored in the
-   * BACKEND settings table, not localStorage, because the menu is built in Rust. */
-  setPromptTemplateName: (template: string, name: string) =>
-    invoke<void>("set_prompt_template_name", { template, name }),
+  /** Create (`id` null, or one that no longer exists) or update a template. Answers with
+   * the row as stored — a NEW template's id comes back here, and the editor's next save
+   * must name it or it would create a second copy. Rejects with a sentence when the name
+   * or body is unusable. */
+  savePromptTemplate: (id: string | null, name: string, body: string) =>
+    invoke<PromptTemplate>("save_prompt_template", { id, name, body }),
 
-  /** Read the templates folder again. This is the only thing that picks up a change on
-   * disk: every window's next ⋯ menu then uses the new table. */
-  refreshPromptTemplates: () =>
-    invoke<PromptTemplatesRefresh>("refresh_prompt_templates"),
+  deletePromptTemplate: (id: string) =>
+    invoke<void>("delete_prompt_template", { id }),
 
-  /** Open the templates folder itself in Finder (creating it if it has been deleted). */
-  openPromptTemplatesFolder: () => invoke<void>("open_prompt_templates_folder"),
+  /** The TopBar Templates dropdown — a native NSMenu popped at (x, y) in this window's
+   * coordinates. Its selection comes back as `templates-menu-action`. */
+  popupTemplatesMenu: (x: number, y: number) =>
+    invoke<void>("popup_templates_menu", { x, y }),
 };
 
-export interface PromptTemplateInfo {
+export interface PromptTemplate {
   id: string;
-  file: string;
-  defaultName: string;
   name: string;
-}
-
-export interface PromptTemplatesRefresh {
-  templates: PromptTemplateInfo[];
-  added: number;
-  edited: number;
-  removed: number;
-  /** `.md` files the scan could not use, and why. */
-  skipped: { file: string; reason: string }[];
+  body: string;
 }
 
 export function onDelta(cb: (delta: Delta) => void): Promise<UnlistenFn> {
@@ -177,6 +169,16 @@ export function onRowMenuAction(
 ): Promise<UnlistenFn> {
   return listen<{ action: string; node: string }>("row-menu-action", (e) =>
     cb(e.payload.action, e.payload.node),
+  );
+}
+
+/** Selection from the TopBar Templates menu, routed back to THIS window from Rust:
+ * `new`, or `edit-<template id>`. */
+export function onTemplatesMenuAction(
+  cb: (action: string) => void,
+): Promise<UnlistenFn> {
+  return listen<{ action: string }>("templates-menu-action", (e) =>
+    cb(e.payload.action),
   );
 }
 

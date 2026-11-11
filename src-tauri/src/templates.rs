@@ -1,194 +1,227 @@
-//! Prompt templates: the `.md` files in `<store dir>/Prompt Templates`, read at launch and
-//! again on Settings ▸ Prompt Templates ▸ Refresh, plus the per-device display names.
+//! Prompt templates: the scaffolds a prompt's ⋯ menu fills its panel from, created and
+//! edited IN THE APP (TopBar ▸ Templates ▸ the template editor).
 //!
-//! The folder is the only source at run time. The app holds what it last read in
-//! `TemplatesState`, so the ⋯ menu and an applied template both use that copy, and an edit
-//! on disk takes effect at Refresh and not before. Nothing watches the folder.
+//! They live in the store's own SQLite file, in the `prompt_templates` table, so a save is
+//! one statement and there is no file name to sanitize, no folder to watch and no second
+//! copy to drift. (They used to be `.md` files in `<store dir>/Prompt Templates`, edited in
+//! a desktop markdown editor and picked up by a Refresh button; that folder is no longer
+//! read or written, and is left on disk exactly as it was.)
 //!
-//! The folder sits beside the store, like `Archive`, so `PROMPTFLOW_STORE` isolates it too
-//! and a dev run can't touch the real one. `prompt-templates/` in the repo is only what
-//! fills a folder that doesn't exist yet (`build.rs` compiles it in as `DEFAULTS`): an
-//! existing folder is never written to, so an edit or a deleted default stays that way.
+//! NOT synced: like the rest of the `settings` table they are this Mac's, and the hub's
+//! wire format has no place for them.
 //!
-//! Names are DERIVED from the file name and overridable in Settings. The override map
-//! lives in the backend `settings` table, NOT localStorage, because the ⋯ menu is built in
-//! Rust and localStorage is invisible from here — which also means a rename takes effect
-//! in every window the next time the menu opens, with no delta and no broadcast.
+//! `prompt-templates/` in the repo is what fills an EMPTY table, once: `build.rs` compiles
+//! it in as `DEFAULTS`, and `seed` writes it the first time a store opens with this code.
+//! Keyed on a settings flag rather than on the table being empty, so deleting every
+//! template stays deleted — the same rule the folder followed.
 
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-
-pub struct Template {
-    pub id: String,
-    pub file: String,
-    pub default_name: String,
-    pub body: String,
-}
+use std::collections::HashMap;
 
 include!(concat!(env!("OUT_DIR"), "/templates_generated.rs"));
 
-/// The templates as of the last scan. Its own lock, not a field on the store: every
-/// keystroke waits on the store's mutex, and this has nothing to do with the outline.
-pub struct TemplatesState(pub Mutex<Vec<Template>>);
-
-/// The settings-table key holding the `{id: name}` override map, as JSON.
-pub const NAMES_KEY: &str = "promptTemplateNames";
-
-/// Larger than this is not a prompt, and would land in a single node's text.
-const MAX_BYTES: u64 = 256 * 1024;
-/// Longer derived names are cut, so one long file name can't stretch the whole submenu.
-const MAX_NAME_CHARS: usize = 48;
-
-/// One row of the Settings ▸ Prompt Templates list.
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct TemplateInfo {
-    pub id: String,
-    /// The file on disk, which is what the row is labelled with.
-    pub file: String,
-    /// The file-name-derived default, shown as the input's placeholder.
-    pub default_name: String,
-    /// What the menu actually says: the override when set, else the default.
-    pub name: String,
-}
-
-/// A `.md` file the scan could not use. Reported rather than dropped, or a template that
-/// never appears just looks like Refresh doesn't work.
+/// One template, as the editor, the TopBar menu and the ⋯ submenu all see it.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SkippedFile {
-    pub file: String,
-    pub reason: String,
+pub struct Template {
+    /// Opaque and COLON-FREE by construction: a seeded default's is its file stem (checked
+    /// by `every_default_has_a_safe_id`), a new one's is a UUID. Menu item ids embed it
+    /// and `lib.rs` splits them on ':' — see `menu_action`.
+    pub id: String,
+    pub name: String,
+    pub body: String,
 }
 
-pub struct Scan {
-    pub templates: Vec<Template>,
-    pub skipped: Vec<SkippedFile>,
-}
+/// Set once the defaults have been written, so an emptied table is never refilled.
+pub const SEEDED_KEY: &str = "promptTemplatesSeeded";
+/// The folder era's `{id: name}` rename map. Read once, by `seed`, so a template the user
+/// renamed keeps that name; never written again, and left in place.
+pub const LEGACY_NAMES_KEY: &str = "promptTemplateNames";
 
-/// What a Refresh found, by id. An edit shows nothing in the list, so these counts are the
-/// only proof it was picked up.
-#[derive(Debug, Default, PartialEq)]
-pub struct Change {
-    pub added: usize,
-    pub edited: usize,
-    pub removed: usize,
-}
+/// Larger than this is not a prompt, and it all lands in a single node's text.
+pub const MAX_BODY_BYTES: usize = 256 * 1024;
+/// Long enough for "New Feature: Discuss + Plan" several times over, short enough that one
+/// name cannot stretch a menu across the screen.
+pub const MAX_NAME_CHARS: usize = 80;
 
-/// Where the templates live: `<store dir>/Prompt Templates`.
-pub fn dir_for(store_path: &Path) -> PathBuf {
-    store_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Prompt Templates")
-}
-
-/// Create the folder with the defaults in it if it does not exist. Keyed on the FOLDER
-/// and not on the files, so emptying it stays empty: the only way back to the defaults is
-/// deleting the folder itself.
-pub fn ensure_dir(dir: &Path) -> std::io::Result<()> {
-    if dir.exists() {
-        return Ok(());
-    }
-    std::fs::create_dir_all(dir)?;
-    for (file, body) in DEFAULTS {
-        std::fs::write(dir.join(file), body)?;
-    }
-    Ok(())
-}
-
-/// Read every template in the folder. An `Err` means the folder itself could not be read,
-/// and the caller keeps what it had rather than emptying the menu.
-pub fn scan(dir: &Path) -> std::io::Result<Scan> {
-    ensure_dir(dir)?;
-    // Sorted before the id check, so which of two colliding files wins can't depend on
-    // the order the filesystem happens to list them in.
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| is_template_file(p))
-        .collect();
-    paths.sort();
-
-    let mut templates: Vec<Template> = Vec::new();
-    let mut skipped: Vec<SkippedFile> = Vec::new();
-    let mut seen: HashMap<String, String> = HashMap::new();
-    for path in paths {
-        let file = lossy_name(path.file_name());
-        let stem = lossy_name(path.file_stem());
-        let id = template_id(&stem);
-        // Only reachable on a case-sensitive volume (`a.md` beside `a.MD`), where both
-        // would otherwise answer to one id.
-        if let Some(first) = seen.get(&id) {
-            let reason = format!("same name as {first}");
-            skipped.push(SkippedFile { file, reason });
-            continue;
-        }
-        match read_body(&path) {
-            Ok(body) => {
-                seen.insert(id.clone(), file.clone());
-                templates.push(Template {
-                    id,
-                    file,
-                    default_name: display_name(&stem),
-                    body,
-                });
-            }
-            Err(reason) => skipped.push(SkippedFile { file, reason }),
-        }
-    }
-    templates.sort_by(|a, b| {
-        a.default_name
+/// Every template, sorted by name the way a person reads a list (case-insensitive), with
+/// the id as the tiebreak so two of the same name keep a stable order between menus.
+pub fn load(db: &Connection) -> Result<Vec<Template>, String> {
+    let mut stmt = db
+        .prepare("SELECT id, name, body FROM prompt_templates")
+        .map_err(|e| e.to_string())?;
+    let mut out: Vec<Template> = stmt
+        .query_map([], |row| {
+            Ok(Template {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                body: row.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    out.sort_by(|a, b| {
+        a.name
             .to_lowercase()
-            .cmp(&b.default_name.to_lowercase())
+            .cmp(&b.name.to_lowercase())
             .then_with(|| a.id.cmp(&b.id))
     });
-    Ok(Scan { templates, skipped })
+    Ok(out)
 }
 
-/// A visible `.md` that isn't a directory. A symlink counts when it points at a file, so
-/// `std::fs::metadata` (which follows it) and not the dir entry's own. A BROKEN link still
-/// counts here, so that it gets reported by `read_body` instead of vanishing.
-fn is_template_file(path: &Path) -> bool {
-    let is_md = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("md"));
-    let hidden = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with('.'));
-    is_md && !hidden && std::fs::metadata(path).map_or(true, |m| m.is_file())
+pub fn get(db: &Connection, id: &str) -> Result<Option<Template>, String> {
+    db.query_row(
+        "SELECT id, name, body FROM prompt_templates WHERE id = ?1",
+        [id],
+        |row| {
+            Ok(Template {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                body: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| e.to_string())
 }
 
-fn lossy_name(name: Option<&std::ffi::OsStr>) -> String {
-    name.map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-}
-
-fn read_body(path: &Path) -> Result<String, String> {
-    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
-    if meta.len() > MAX_BYTES {
-        return Err("larger than 256 KB".into());
+/// Create or update. `id` names an existing template to overwrite; anything else — `None`,
+/// or an id that is not in the table (deleted in another window while this one's editor
+/// was open) — CREATES one under a fresh UUID. Never under the caller's id: it reaches
+/// menu item ids, and only ids minted here are known to be colon-free.
+pub fn save(
+    db: &Connection,
+    id: Option<&str>,
+    name: &str,
+    body: &str,
+    now: i64,
+) -> Result<Template, String> {
+    let (name, body) = validate(name, body)?;
+    if let Some(id) = id {
+        let n = db
+            .execute(
+                "UPDATE prompt_templates SET name = ?2, body = ?3, updated_at = ?4 WHERE id = ?1",
+                params![id, name, body, now],
+            )
+            .map_err(|e| e.to_string())?;
+        if n == 1 {
+            return Ok(Template { id: id.to_string(), name, body });
+        }
     }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let text = String::from_utf8(bytes).map_err(|_| "not UTF-8 text".to_string())?;
-    let body = normalize_body(&text);
+    let id = uuid::Uuid::new_v4().to_string();
+    insert(db, &id, &name, &body, now)?;
+    Ok(Template { id, name, body })
+}
+
+/// Idempotent: deleting a template that is already gone is not an error, since the only
+/// way to get there is two windows deleting the same one.
+pub fn delete(db: &Connection, id: &str) -> Result<(), String> {
+    db.execute("DELETE FROM prompt_templates WHERE id = ?1", [id])
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Write `DEFAULTS` into the table the first time a store opens with this code, in ONE
+/// transaction with the flag that stops it ever happening again. Returns how many it wrote.
+///
+/// A default's name is the user's rename from the folder era when there is one, else its
+/// first-line `# ` heading, else its file stem made readable.
+pub fn seed(db: &Connection, now: i64) -> Result<usize, String> {
+    let seeded: Option<String> = db
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [SEEDED_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if seeded.is_some() {
+        return Ok(0);
+    }
+    let legacy: HashMap<String, String> = db
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [LEGACY_NAMES_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let mut n = 0;
+    for (file, raw) in DEFAULTS {
+        let stem = file.rsplit_once('.').map_or(*file, |(s, _)| s);
+        let body = normalize_body(raw);
+        let name = seed_name(stem, &body, &legacy);
+        // A default that fails its own validation would be written and then be unsavable
+        // from the editor; `every_default_survives_validation` keeps this unreachable.
+        let Ok((name, body)) = validate(&name, &body) else {
+            continue;
+        };
+        let id = if is_safe_id(stem) {
+            stem.to_string()
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        tx.execute(
+            "INSERT OR IGNORE INTO prompt_templates (id, name, body, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![id, name, body, now],
+        )
+        .map_err(|e| e.to_string())?;
+        n += 1;
+    }
+    tx.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [SEEDED_KEY],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
+fn insert(db: &Connection, id: &str, name: &str, body: &str, now: i64) -> Result<(), String> {
+    db.execute(
+        "INSERT INTO prompt_templates (id, name, body, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4)",
+        params![id, name, body, now],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// The rules a save must pass, returning the name and body as stored. The editor checks
+/// the same things before it lets Save be pressed; this is the backstop.
+pub fn validate(name: &str, body: &str) -> Result<(String, String), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("A template needs a name.".into());
+    }
+    if name.chars().count() > MAX_NAME_CHARS {
+        return Err(format!("A name can be at most {MAX_NAME_CHARS} characters."));
+    }
+    let body = normalize_body(body);
     // A blank template can only wipe the prompt it is applied to.
     if body.trim().is_empty() {
-        return Err("empty".into());
+        return Err("A template needs some text.".into());
     }
-    Ok(body)
+    if body.len() > MAX_BODY_BYTES {
+        return Err("A template can be at most 256 KB.".into());
+    }
+    Ok((name.to_string(), body))
 }
 
-/// A file's conventions, not its content. `\r` would land in the node's text, where the
-/// line-based markdown renderer and the caret offsets both assume `\n`; a BOM would stop a
-/// first-line `# ` reading as a heading; and the final newline every editor appends would
-/// show as a blank last line in the prompt. Only `\n` is trimmed, because a trailing space
+/// Text conventions that must not reach a node. `\r` would land in text the line-based
+/// markdown renderer and the caret offsets both treat as `\n`-separated; a BOM would stop
+/// a first-line `# ` reading as a heading; and a trailing newline would be a blank last
+/// line in every prompt the template fills. Only `\n` is trimmed, because a trailing space
 /// can be meaningful (`- ` waiting to be filled in).
-fn normalize_body(raw: &str) -> String {
+pub fn normalize_body(raw: &str) -> String {
     raw.strip_prefix('\u{feff}')
         .unwrap_or(raw)
         .replace("\r\n", "\n")
@@ -197,371 +230,234 @@ fn normalize_body(raw: &str) -> String {
         .to_string()
 }
 
-/// A file's stem as an id, with everything outside `[A-Za-z0-9._-]` percent-encoded.
-///
-/// It MUST stay colon-free: the row menu encodes item ids as
-/// `pf-row:<action>:<window>:<node>` and `lib.rs` parses them with `splitn(4, ':')`, so a
-/// colon would misroute the event to a nonexistent window label, where `emit_to` silently
-/// no-ops. APFS allows `:` in a file name. Encoded rather than replaced, because these are
-/// names typed at run time and two of them collapsing into one id must not be possible
-/// (with `_`, every two-character Japanese name is the same id). The extension is left
-/// out so an id stays what it was when the files had none, which is what existing renames
-/// in the settings table are keyed on.
-fn template_id(stem: &str) -> String {
-    let mut id = String::with_capacity(stem.len());
-    for b in stem.bytes() {
-        if b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-' {
-            id.push(b as char);
-        } else {
-            id.push_str(&format!("%{b:02X}"));
-        }
-    }
-    id
+fn is_safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
 }
 
-/// `New-Feature-Discuss-Plan` -> `New Feature Discuss Plan`. Purely the DEFAULT: any
-/// template can be renamed in Settings.
-fn display_name(stem: &str) -> String {
+fn seed_name(stem: &str, body: &str, legacy: &HashMap<String, String>) -> String {
+    if let Some(v) = legacy.get(stem).map(|v| v.trim()).filter(|v| !v.is_empty()) {
+        return clip(v);
+    }
+    let first = body.lines().next().unwrap_or("");
+    if let Some(h) = first.strip_prefix("# ").map(str::trim).filter(|h| !h.is_empty()) {
+        return clip(h);
+    }
     let spaced: String = stem
         .chars()
         .map(|c| if c == '-' || c == '_' { ' ' } else { c })
         .collect();
-    let trimmed = spaced.trim();
-    // `---.md` has no words left to show, and a menu item can't be blank.
-    let name = if trimmed.is_empty() { stem } else { trimmed };
-    if name.chars().count() > MAX_NAME_CHARS {
-        name.chars().take(MAX_NAME_CHARS).collect::<String>().trim_end().to_string()
-    } else {
-        name.to_string()
-    }
+    let spaced = spaced.trim();
+    clip(if spaced.is_empty() { stem } else { spaced })
 }
 
-pub fn by_id<'a>(templates: &'a [Template], id: &str) -> Option<&'a Template> {
-    templates.iter().find(|t| t.id == id)
+fn clip(name: &str) -> String {
+    name.chars().take(MAX_NAME_CHARS).collect::<String>().trim_end().to_string()
 }
 
-pub fn change_between(old: &[Template], new: &[Template]) -> Change {
-    let new_ids: HashSet<&str> = new.iter().map(|t| t.id.as_str()).collect();
-    let mut change = Change {
-        removed: old.iter().filter(|t| !new_ids.contains(t.id.as_str())).count(),
-        ..Change::default()
-    };
-    for t in new {
-        match by_id(old, &t.id) {
-            None => change.added += 1,
-            Some(before) if before.body != t.body => change.edited += 1,
-            Some(_) => {}
-        }
-    }
-    change
-}
-
-/// Parse the override map. A malformed value is treated as "no overrides" rather than an
-/// error: a corrupt settings row must never be able to empty the submenu.
-pub fn overrides(raw: Option<String>) -> HashMap<String, String> {
-    raw.and_then(|s| serde_json::from_str::<HashMap<String, String>>(&s).ok())
-        .unwrap_or_default()
-}
-
-/// The name to show for `t`, with the override applied. An override that is blank or
-/// whitespace-only falls back to the default, so clearing the field in Settings resets it.
-pub fn name_of(t: &Template, ov: &HashMap<String, String>) -> String {
-    match ov.get(&t.id) {
-        Some(v) if !v.trim().is_empty() => v.trim().to_string(),
-        _ => t.default_name.clone(),
-    }
-}
-
-pub fn list(templates: &[Template], ov: &HashMap<String, String>) -> Vec<TemplateInfo> {
-    templates
-        .iter()
-        .map(|t| TemplateInfo {
-            id: t.id.clone(),
-            file: t.file.clone(),
-            default_name: t.default_name.clone(),
-            name: name_of(t, ov),
-        })
-        .collect()
-}
-
-/// A display name as an NSMenu item title. On macOS muda treats a lone `&` as a mnemonic
-/// marker and eats it, so it has to be doubled — and the shipped template's own body says
-/// "Context & Current Problem", which is exactly the kind of name a user would type here.
+/// A name as an NSMenu item title. On macOS muda treats a lone `&` as a mnemonic marker
+/// and eats it, so it has to be doubled — and "Discuss & Plan" is exactly the kind of name
+/// a template gets.
 pub fn menu_label(name: &str) -> String {
     name.replace('&', "&&")
 }
 
-/// The menu action for a template: `tpl-<id>`. `id` is colon-free by construction
-/// (`template_id`), which is what keeps `lib.rs`'s `splitn(4, ':')` parse of
+/// The ⋯ submenu action for a template: `tpl-<id>`. `id` is colon-free (see `Template`),
+/// which is what keeps `lib.rs`'s `splitn(4, ':')` parse of
 /// `pf-row:<action>:<window>:<node>` intact.
 pub fn menu_action(id: &str) -> String {
     format!("tpl-{id}")
 }
 
+/// The TopBar Templates menu's CONTENTS, as `(action, label)` — pure, so `cargo test` can
+/// pin them without an NSMenu. One `edit-<id>` per template, then `new`. Item ids are
+/// `pf-tpl:<window>:<action>`, parsed with `splitn(3, ':')`, so the action is the LAST
+/// field and a colon in it could not misroute the event — but the ids are colon-free
+/// anyway, and the test says so.
+pub fn topbar_menu_items(templates: &[Template]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = templates
+        .iter()
+        .map(|t| (format!("edit-{}", t.id), menu_label(&t.name)))
+        .collect();
+    out.push(("new".into(), "New Template…".into()));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempdir::TempDir;
 
-    const SHIPPED: &str = "New-Feature-Discuss-Plan";
-
-    /// A folder path that does not exist yet, which is what a first launch sees.
-    fn absent_folder() -> (TempDir, PathBuf) {
-        let t = TempDir::new("pf-templates").unwrap();
-        let dir = t.path().join("Prompt Templates");
-        (t, dir)
+    fn db() -> Connection {
+        crate::persist::open_in_memory().unwrap()
     }
 
-    fn empty_folder() -> (TempDir, PathBuf) {
-        let (t, dir) = absent_folder();
-        fs::create_dir(&dir).unwrap();
-        (t, dir)
-    }
-
-    fn ov(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
-    }
-
-    fn files(scan: &Scan) -> Vec<&str> {
-        scan.templates.iter().map(|t| t.file.as_str()).collect()
-    }
-
-    fn tpl(id: &str, body: &str) -> Template {
-        Template {
-            id: id.into(),
-            file: format!("{id}.md"),
-            default_name: id.into(),
-            body: body.into(),
-        }
-    }
-
-    #[test]
-    fn the_folder_sits_beside_the_store() {
-        assert_eq!(
-            dir_for(Path::new("/a/b/promptflow.sqlite")),
-            PathBuf::from("/a/b/Prompt Templates")
-        );
+    fn names(db: &Connection) -> Vec<String> {
+        load(db).unwrap().into_iter().map(|t| t.name).collect()
     }
 
     /// If this fails, `prompt-templates/` was not committed: a fresh clone that lacks it
     /// builds an empty table rather than failing to compile.
     #[test]
-    fn a_missing_folder_is_created_with_the_shipped_template() {
-        let (_t, dir) = absent_folder();
-        let scan = scan(&dir).unwrap();
-        assert!(dir.join(format!("{SHIPPED}.md")).is_file());
-        let t = by_id(&scan.templates, SHIPPED).expect("no shipped template");
-        assert_eq!(t.file, format!("{SHIPPED}.md"));
-        assert_eq!(t.default_name, "New Feature Discuss Plan");
-        assert!(t.body.starts_with("# New Feature: Discuss & Plan"));
-        // It must exercise the markdown renderer, or picking it demonstrates nothing.
-        assert!(t.body.contains("\n## Overall Goal"));
-        assert!(t.body.contains("\n1. First,"));
-    }
-
-    /// A default the scan itself would refuse would be seeded and then never listed.
-    #[test]
-    fn every_default_survives_its_own_scan() {
-        let (_t, dir) = absent_folder();
-        let scan = scan(&dir).unwrap();
-        assert_eq!(scan.templates.len(), DEFAULTS.len());
-        assert!(scan.skipped.is_empty(), "{:?}", scan.skipped);
-    }
-
-    /// The whole point of keying the seed on the folder: deleting a default must stick.
-    #[test]
-    fn an_existing_folder_is_never_seeded_again() {
-        let (_t, dir) = absent_folder();
-        scan(&dir).unwrap();
-        fs::remove_file(dir.join(format!("{SHIPPED}.md"))).unwrap();
-        assert!(scan(&dir).unwrap().templates.is_empty());
-        assert!(!dir.join(format!("{SHIPPED}.md")).exists());
-    }
-
-    #[test]
-    fn an_edited_default_is_never_overwritten() {
-        let (_t, dir) = absent_folder();
-        scan(&dir).unwrap();
-        fs::write(dir.join(format!("{SHIPPED}.md")), "# Mine").unwrap();
-        let again = scan(&dir).unwrap();
-        assert_eq!(by_id(&again.templates, SHIPPED).unwrap().body, "# Mine");
-    }
-
-    /// The feature itself: files changed while the app runs show up on the next scan, and
-    /// the counts say what happened.
-    #[test]
-    fn a_rescan_picks_up_new_edited_and_removed_files() {
-        let (_t, dir) = empty_folder();
-        fs::write(dir.join("keep.md"), "same").unwrap();
-        fs::write(dir.join("edit.md"), "before").unwrap();
-        fs::write(dir.join("gone.md"), "x").unwrap();
-        let first = scan(&dir).unwrap();
-
-        fs::write(dir.join("edit.md"), "after").unwrap();
-        fs::write(dir.join("new.md"), "fresh").unwrap();
-        fs::remove_file(dir.join("gone.md")).unwrap();
-        let second = scan(&dir).unwrap();
-
-        assert_eq!(files(&second), ["edit.md", "keep.md", "new.md"]);
-        assert_eq!(by_id(&second.templates, "edit").unwrap().body, "after");
+    fn a_new_store_is_seeded_with_both_shipped_templates() {
+        let db = db();
+        assert_eq!(seed(&db, 1).unwrap(), 2);
+        let all = load(&db).unwrap();
         assert_eq!(
-            change_between(&first.templates, &second.templates),
-            Change { added: 1, edited: 1, removed: 1 }
-        );
-    }
-
-    #[test]
-    fn a_rescan_with_no_changes_reports_none() {
-        let (_t, dir) = empty_folder();
-        fs::write(dir.join("a.md"), "a").unwrap();
-        let first = scan(&dir).unwrap();
-        let second = scan(&dir).unwrap();
-        assert_eq!(change_between(&first.templates, &second.templates), Change::default());
-    }
-
-    #[test]
-    fn only_visible_md_files_are_templates() {
-        let (_t, dir) = empty_folder();
-        fs::write(dir.join("a.md"), "a").unwrap();
-        fs::write(dir.join("b.MD"), "b").unwrap();
-        fs::write(dir.join("c.txt"), "c").unwrap();
-        fs::write(dir.join("noext"), "d").unwrap();
-        fs::write(dir.join(".hidden.md"), "e").unwrap();
-        fs::write(dir.join(".DS_Store"), [0u8, 159, 146, 150]).unwrap();
-        fs::create_dir(dir.join("folder.md")).unwrap();
-        let scan = scan(&dir).unwrap();
-        assert_eq!(files(&scan), ["a.md", "b.MD"]);
-        assert!(scan.skipped.is_empty(), "{:?}", scan.skipped);
-    }
-
-    #[test]
-    fn a_symlink_counts_and_a_broken_one_is_reported() {
-        let (t, dir) = empty_folder();
-        let target = t.path().join("elsewhere.txt");
-        fs::write(&target, "linked").unwrap();
-        std::os::unix::fs::symlink(&target, dir.join("good.md")).unwrap();
-        std::os::unix::fs::symlink(t.path().join("nope"), dir.join("bad.md")).unwrap();
-        let scan = scan(&dir).unwrap();
-        assert_eq!(by_id(&scan.templates, "good").unwrap().body, "linked");
-        assert_eq!(scan.skipped.len(), 1);
-        assert_eq!(scan.skipped[0].file, "bad.md");
-    }
-
-    #[test]
-    fn an_unusable_md_file_is_reported_rather_than_dropped() {
-        let (_t, dir) = empty_folder();
-        fs::write(dir.join("ok.md"), "fine").unwrap();
-        fs::write(dir.join("blank.md"), "  \n\n").unwrap();
-        fs::write(dir.join("zero.md"), "").unwrap();
-        fs::write(dir.join("binary.md"), [0xffu8, 0xfe, 0x00]).unwrap();
-        fs::write(dir.join("huge.md"), "x".repeat(MAX_BYTES as usize + 1)).unwrap();
-        fs::write(dir.join("max.md"), "x".repeat(MAX_BYTES as usize)).unwrap();
-        let scan = scan(&dir).unwrap();
-        assert_eq!(files(&scan), ["max.md", "ok.md"]);
-        let reasons: Vec<(&str, &str)> = scan
-            .skipped
-            .iter()
-            .map(|s| (s.file.as_str(), s.reason.as_str()))
-            .collect();
-        assert_eq!(
-            reasons,
+            all.iter().map(|t| (t.id.as_str(), t.name.as_str())).collect::<Vec<_>>(),
             [
-                ("binary.md", "not UTF-8 text"),
-                ("blank.md", "empty"),
-                ("huge.md", "larger than 256 KB"),
-                ("zero.md", "empty"),
+                ("New-Feature-Discuss-Plan", "New Feature: Discuss & Plan"),
+                ("New-Feature-Plan", "New Feature: Plan"),
             ]
         );
+        let plan = &all[1];
+        assert!(plan.body.starts_with("# New Feature: Plan\n\n/plan-with-me ___"));
+        // It must exercise the markdown renderer, or picking it demonstrates nothing.
+        assert!(plan.body.contains("\n## Context & Current Problem"));
+        assert!(plan.body.contains("\n1. Answer the questions"));
+        // The file's own trailing newline is a convention, not a blank last line.
+        assert!(!plan.body.ends_with('\n'));
     }
 
-    /// A folder that can't be read must be an error: the refresh command bails on it
-    /// before replacing the table, so a bad read can't empty the ⋯ menu.
+    /// The whole point of the flag: deleting every template must stick.
     #[test]
-    fn an_unreadable_folder_is_an_error() {
-        let (t, _dir) = absent_folder();
-        let not_a_folder = t.path().join("file");
-        fs::write(&not_a_folder, "x").unwrap();
-        assert!(scan(&not_a_folder).is_err());
+    fn an_emptied_table_is_never_seeded_again() {
+        let db = db();
+        seed(&db, 1).unwrap();
+        for t in load(&db).unwrap() {
+            delete(&db, &t.id).unwrap();
+        }
+        assert_eq!(seed(&db, 2).unwrap(), 0);
+        assert!(load(&db).unwrap().is_empty());
     }
 
     #[test]
-    fn file_conventions_do_not_reach_the_text() {
+    fn an_edited_default_is_never_overwritten_by_a_reseed() {
+        let db = db();
+        seed(&db, 1).unwrap();
+        save(&db, Some("New-Feature-Plan"), "Mine", "# Mine", 2).unwrap();
+        seed(&db, 3).unwrap();
+        let t = get(&db, "New-Feature-Plan").unwrap().unwrap();
+        assert_eq!((t.name.as_str(), t.body.as_str()), ("Mine", "# Mine"));
+    }
+
+    /// A rename made in the folder era's Settings sheet survives the move into the table.
+    #[test]
+    fn the_folder_eras_renames_carry_over() {
+        let db = db();
+        db.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)",
+            params![
+                LEGACY_NAMES_KEY,
+                r#"{"New-Feature-Discuss-Plan":"New Feature: Discuss + Plan","New-Feature-Plan":"  "}"#
+            ],
+        )
+        .unwrap();
+        seed(&db, 1).unwrap();
+        // A blank override was the folder era's "reset", so the heading wins there.
+        assert_eq!(names(&db), ["New Feature: Discuss + Plan", "New Feature: Plan"]);
+    }
+
+    #[test]
+    fn a_corrupt_legacy_rename_row_does_not_stop_the_seed() {
+        let db = db();
+        db.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, 'not json')",
+            [LEGACY_NAMES_KEY],
+        )
+        .unwrap();
+        assert_eq!(seed(&db, 1).unwrap(), 2);
+    }
+
+    #[test]
+    fn every_default_has_a_safe_id_and_survives_validation() {
+        for (file, raw) in DEFAULTS {
+            let stem = file.rsplit_once('.').map_or(*file, |(s, _)| s);
+            assert!(is_safe_id(stem), "{file}: stem is not a safe menu id");
+            let name = seed_name(stem, &normalize_body(raw), &HashMap::new());
+            assert!(validate(&name, raw).is_ok(), "{file} would be unsavable");
+        }
+    }
+
+    #[test]
+    fn save_without_an_id_creates_one() {
+        let db = db();
+        let t = save(&db, None, "  Launch Checklist ", "- [ ] ship\n\n", 1).unwrap();
+        assert_eq!(t.name, "Launch Checklist");
+        assert_eq!(t.body, "- [ ] ship");
+        assert!(uuid::Uuid::parse_str(&t.id).is_ok());
+        assert_eq!(get(&db, &t.id).unwrap(), Some(t));
+    }
+
+    #[test]
+    fn save_with_an_existing_id_updates_it_in_place() {
+        let db = db();
+        let a = save(&db, None, "A", "one", 1).unwrap();
+        let b = save(&db, Some(&a.id), "B", "two", 2).unwrap();
+        assert_eq!(a.id, b.id);
+        assert_eq!(load(&db).unwrap(), vec![b]);
+    }
+
+    /// Deleted in another window while this one's editor was open: the save must not be
+    /// lost, and must not trust an id it did not mint.
+    #[test]
+    fn save_with_an_unknown_id_creates_a_fresh_one() {
+        let db = db();
+        let t = save(&db, Some("x:y"), "Kept", "body", 1).unwrap();
+        assert_ne!(t.id, "x:y");
+        assert!(!t.id.contains(':'));
+        assert_eq!(load(&db).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn save_refuses_what_a_template_cannot_be() {
+        let db = db();
+        assert!(save(&db, None, "   ", "body", 1).is_err());
+        assert!(save(&db, None, "Name", " \n\n ", 1).is_err());
+        assert!(save(&db, None, &"n".repeat(MAX_NAME_CHARS + 1), "b", 1).is_err());
+        assert!(save(&db, None, &"n".repeat(MAX_NAME_CHARS), "b", 1).is_ok());
+        assert!(save(&db, None, "Big", &"x".repeat(MAX_BODY_BYTES + 1), 1).is_err());
+        assert!(save(&db, None, "Max", &"x".repeat(MAX_BODY_BYTES), 1).is_ok());
+        assert_eq!(load(&db).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn delete_is_idempotent() {
+        let db = db();
+        let t = save(&db, None, "A", "a", 1).unwrap();
+        delete(&db, &t.id).unwrap();
+        delete(&db, &t.id).unwrap();
+        assert!(load(&db).unwrap().is_empty());
+    }
+
+    #[test]
+    fn templates_sort_by_name_whatever_the_case() {
+        let db = db();
+        for name in ["zebra", "Apple", "mango"] {
+            save(&db, None, name, "x", 1).unwrap();
+        }
+        assert_eq!(names(&db), ["Apple", "mango", "zebra"]);
+    }
+
+    #[test]
+    fn text_conventions_do_not_reach_the_body() {
         assert_eq!(normalize_body("\u{feff}# T\r\nline\rend\n\n"), "# T\nline\nend");
         assert_eq!(normalize_body("no newline"), "no newline");
         // Blank lines inside are content, and so is an item's trailing space.
         assert_eq!(normalize_body("a\n\nb\n- \n"), "a\n\nb\n- ");
     }
 
-    /// Every file name must come back out of `lib.rs`'s `splitn(4, ':')` parse intact, or
-    /// the menu event goes to a window that doesn't exist and nothing happens.
     #[test]
-    fn any_file_name_survives_the_menu_route() {
-        let (_t, dir) = empty_folder();
-        let names = ["a:b", "a b", "a_b", "日本", "中文", "100%", "a%20b", "A & B", "---"];
-        for name in names {
-            fs::write(dir.join(format!("{name}.md")), "x").unwrap();
-        }
-        let scan = scan(&dir).unwrap();
-        assert_eq!(scan.templates.len(), names.len(), "{:?}", scan.skipped);
-        for t in &scan.templates {
-            let item = format!("pf-row:{}:w12:node-id", menu_action(&t.id));
-            let parts: Vec<&str> = item.splitn(4, ':').collect();
-            assert_eq!(parts[1], format!("tpl-{}", t.id));
-            assert_eq!(parts[2], "w12", "`{}` shifted the window label", t.file);
-            assert!(!t.default_name.is_empty(), "`{}` has a blank menu item", t.file);
-        }
-    }
-
-    /// The rename already in the settings table is keyed on the id from when the shipped
-    /// file had no extension. Adding `.md` must not lose it.
-    #[test]
-    fn adding_the_extension_keeps_the_existing_id() {
-        assert_eq!(template_id(SHIPPED), SHIPPED);
-    }
-
-    #[test]
-    fn derived_names_read_like_names() {
-        assert_eq!(display_name(SHIPPED), "New Feature Discuss Plan");
-        assert_eq!(display_name("snake_case name"), "snake case name");
-        assert_eq!(display_name("---"), "---");
-        assert_eq!(display_name(&"x".repeat(60)).chars().count(), MAX_NAME_CHARS);
-        assert_eq!(display_name(&"é".repeat(60)).chars().count(), MAX_NAME_CHARS);
-    }
-
-    #[test]
-    fn templates_sort_by_name_whatever_the_case() {
-        let (_t, dir) = empty_folder();
-        for name in ["zebra", "Apple", "mango"] {
-            fs::write(dir.join(format!("{name}.md")), "x").unwrap();
-        }
-        assert_eq!(files(&scan(&dir).unwrap()), ["Apple.md", "mango.md", "zebra.md"]);
-    }
-
-    #[test]
-    fn an_override_replaces_the_derived_name() {
-        let t = Template {
-            default_name: "New Feature Discuss Plan".into(),
-            ..tpl(SHIPPED, "x")
-        };
-        assert_eq!(name_of(&t, &ov(&[])), "New Feature Discuss Plan");
-        assert_eq!(
-            name_of(&t, &ov(&[(SHIPPED, "New Feature: Discuss & Plan")])),
-            "New Feature: Discuss & Plan"
-        );
-        // Blank or whitespace-only clears back to the default — that IS the Reset button.
-        assert_eq!(name_of(&t, &ov(&[(SHIPPED, "   ")])), "New Feature Discuss Plan");
-        assert_eq!(name_of(&t, &ov(&[(SHIPPED, "")])), "New Feature Discuss Plan");
-        // Surrounding space is the user's typo, not their intent.
-        assert_eq!(name_of(&t, &ov(&[(SHIPPED, "  Spaced  ")])), "Spaced");
-    }
-
-    #[test]
-    fn a_corrupt_override_row_does_not_empty_the_menu() {
-        assert!(overrides(Some("not json".into())).is_empty());
-        assert!(overrides(Some("[1,2,3]".into())).is_empty());
-        assert!(overrides(None).is_empty());
-        assert_eq!(overrides(Some(r#"{"a":"b"}"#.into())).get("a").unwrap(), "b");
+    fn a_seeded_name_falls_back_from_rename_to_heading_to_stem() {
+        let none = HashMap::new();
+        assert_eq!(seed_name("a-b", "# Title\nx", &none), "Title");
+        assert_eq!(seed_name("a-b", "#Title\nx", &none), "a b");
+        assert_eq!(seed_name("a-b", "## Sub\nx", &none), "a b");
+        assert_eq!(seed_name("---", "x", &none), "---");
+        let ov: HashMap<String, String> = [("a-b".to_string(), " Mine ".to_string())].into();
+        assert_eq!(seed_name("a-b", "# Title", &ov), "Mine");
+        assert_eq!(seed_name("a-b", &format!("# {}", "é".repeat(90)), &none).chars().count(), MAX_NAME_CHARS);
     }
 
     /// muda eats a lone `&` as a mnemonic marker on macOS.
@@ -573,14 +469,40 @@ mod tests {
     }
 
     #[test]
-    fn list_reports_file_default_and_effective_names_separately() {
-        let t = Template {
-            default_name: "New Feature Discuss Plan".into(),
-            ..tpl(SHIPPED, "x")
-        };
-        let rows = list(&[t], &ov(&[(SHIPPED, "Renamed")]));
-        assert_eq!(rows[0].file, format!("{SHIPPED}.md"));
-        assert_eq!(rows[0].default_name, "New Feature Discuss Plan");
-        assert_eq!(rows[0].name, "Renamed");
+    fn the_topbar_menu_lists_every_template_then_new() {
+        let db = db();
+        seed(&db, 1).unwrap();
+        let made = save(&db, None, "A & B", "x", 1).unwrap();
+        let items = topbar_menu_items(&load(&db).unwrap());
+        assert_eq!(
+            items,
+            vec![
+                (format!("edit-{}", made.id), "A && B".to_string()),
+                ("edit-New-Feature-Discuss-Plan".into(), "New Feature: Discuss && Plan".into()),
+                ("edit-New-Feature-Plan".into(), "New Feature: Plan".into()),
+                ("new".into(), "New Template…".into()),
+            ]
+        );
+    }
+
+    /// An empty table still offers a way to make one.
+    #[test]
+    fn an_empty_topbar_menu_still_offers_new() {
+        assert_eq!(topbar_menu_items(&[]), vec![("new".into(), "New Template…".into())]);
+    }
+
+    /// Every item must come back out of `lib.rs`'s parse intact, or the selection is
+    /// routed to a window that does not exist and nothing happens.
+    #[test]
+    fn every_topbar_item_survives_the_menu_route() {
+        let db = db();
+        seed(&db, 1).unwrap();
+        save(&db, None, "a:b", "x", 1).unwrap();
+        for (action, _) in topbar_menu_items(&load(&db).unwrap()) {
+            assert!(!action.contains(':'), "`{action}` has a colon");
+            let item = format!("pf-tpl:w12:{action}");
+            let parts: Vec<&str> = item.splitn(3, ':').collect();
+            assert_eq!(parts, ["pf-tpl", "w12", action.as_str()]);
+        }
     }
 }

@@ -1,4 +1,5 @@
 import { useMemo, useSyncExternalStore } from "react";
+import { api } from "../lib/api";
 import { OutlineLayout } from "../lib/layout";
 import { setHideCompleted } from "../state/controller";
 import { mirror, nodeVersion, subscribeNode } from "../state/mirror";
@@ -102,6 +103,29 @@ function DockGlyph({ dock, size }: { dock: FocusPaneLayout; size: number }) {
           <line x1="1.6" y1="5.7" x2="12.4" y2="5.7" />
         </>
       )}
+    </svg>
+  );
+}
+
+/** A page with a folded corner and a markdown-ish body: a short heading line over two
+ * text lines. Same 14-unit grid and 1.1 stroke as the other TopBar icons. */
+function TemplatesGlyph({ size }: { size: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.1"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M3.1 1.8 H8.3 L10.9 4.4 V12.2 H3.1 Z" />
+      <path d="M8.3 1.8 V4.4 H10.9" />
+      <path d="M5 6.7 H7.2" strokeWidth="1.4" />
+      <path d="M5 8.7 H9" />
+      <path d="M5 10.4 H8.2" />
     </svg>
   );
 }
@@ -225,6 +249,24 @@ export function TopBar() {
               <line x1="2" y1="12" x2="12" y2="2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
             )}
           </svg>
+        </button>
+        <button
+          className="bar-btn"
+          // Kept off the focus chain, like the ⋯ button: dismissing the menu should leave
+          // the caret where it was. Choosing a template opens the editor, which takes
+          // focus itself.
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={(e) => {
+            // A native NSMenu (Rust builds it from the templates table), popped under the
+            // button's leading edge exactly as the ⋯ menu is. The choice comes back as a
+            // `templates-menu-action` event (App.tsx).
+            const r = e.currentTarget.getBoundingClientRect();
+            void api.popupTemplatesMenu(r.left, r.bottom);
+          }}
+          title="Templates"
+          aria-label="Templates"
+        >
+          <TemplatesGlyph size={14 * ts} />
         </button>
         <SyncIndicator scale={ts} />
         <button

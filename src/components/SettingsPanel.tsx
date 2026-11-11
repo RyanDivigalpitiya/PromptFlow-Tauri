@@ -2,9 +2,8 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { api, emitFocusOrderAdopt } from "../lib/api";
+import { emitFocusOrderAdopt } from "../lib/api";
 import { OutlineLayout, Theme } from "../lib/layout";
-import { describeTemplateRefresh } from "../lib/templateRefresh";
 import { setHideCompleted } from "../state/controller";
 import { persistedFocusOrder, useFocusPane } from "../state/focusPane";
 import { mirror } from "../state/mirror";
@@ -143,78 +142,6 @@ function SyncSection() {
       )}
       <div className="settings-footnote">
         this device: {config.deviceId.slice(0, 8)}
-      </div>
-    </>
-  );
-}
-
-/** The templates folder and what was last read from it. The app does not watch the
- * folder, so Refresh is the only thing that picks up a change, and its status line is the
- * only sign an EDIT landed, since an edit changes nothing in this list. The line lives in
- * this component so that it goes away with the sheet. */
-function PromptTemplatesSection() {
-  const s = useSettings();
-  const [status, setStatus] = useState<string | null>(null);
-
-  const refresh = async () => {
-    try {
-      setStatus(describeTemplateRefresh(await s.refreshTemplates()));
-    } catch (e) {
-      setStatus(`Could not read the folder: ${String(e)}`);
-    }
-  };
-
-  const openFolder = async () => {
-    try {
-      await api.openPromptTemplatesFolder();
-    } catch (e) {
-      setStatus(`Could not open the folder: ${String(e)}`);
-    }
-  };
-
-  return (
-    <>
-      {s.templates.length === 0 ? (
-        <div className="settings-footnote">No templates in the folder.</div>
-      ) : (
-        s.templates.map((t) => (
-          <label key={t.id} className="settings-row settings-row-stack">
-            <span>{t.file}</span>
-            <span className="settings-tpl">
-              <input
-                type="text"
-                value={t.name}
-                placeholder={t.defaultName}
-                onChange={(e) => s.setTemplateName(t.id, e.target.value)}
-              />
-              <button
-                className="mini-btn"
-                disabled={t.name.trim() === "" || t.name === t.defaultName}
-                onClick={() => s.setTemplateName(t.id, "", true)}
-              >
-                Reset
-              </button>
-            </span>
-          </label>
-        ))
-      )}
-      <div className="settings-actions">
-        <button className="mini-btn" onClick={() => void openFolder()}>
-          Open Folder in Finder
-        </button>
-        <button className="mini-btn" onClick={() => void refresh()}>
-          Refresh
-        </button>
-      </div>
-      {status && (
-        <div className="settings-tpl-status" role="status">
-          {status}
-        </div>
-      )}
-      <div className="settings-footnote">
-        Each .md file in the folder is a template. Add or edit files there, then press
-        Refresh. The names above are what a prompt's ⋯ menu shows, and are stored on this
-        Mac.
       </div>
     </>
   );
@@ -394,9 +321,6 @@ export function SettingsPanel() {
             Reveal Archive in Finder
           </button>
         </div>
-        <div className="settings-section">Prompt Templates</div>
-        <PromptTemplatesSection />
-
         <div className="settings-section">Sync</div>
         <SyncSection />
 
